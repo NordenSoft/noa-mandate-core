@@ -2207,6 +2207,7 @@ check("a GATE step runs exact Node with a constructed environment, never npm wit
     BASH_ENV: "/evil.sh",
     DYLD_INSERT_LIBRARIES: "/evil.dylib",
     LD_PRELOAD: "/evil.so",
+    GIT_OPTIONAL_LOCKS: "1",
     PATH: "/attacker/bin",
   });
   for (const key of ["NODE_OPTIONS", "npm_config_script_shell", "BASH_ENV", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD"]) {
@@ -2218,6 +2219,8 @@ check("a GATE step runs exact Node with a constructed environment, never npm wit
     "npm refuses to start when userconfig and globalconfig name the same file");
   assert.ok(constructed.PATH.startsWith(path.dirname(process.execPath)),
     "a gate step inherited an attacker-controlled PATH instead of one built from this Node");
+  assert.equal(constructed.GIT_OPTIONAL_LOCKS, "0",
+    "a gate step can refresh the guarded Git index through ambient optional-lock policy");
   assert.throws(
     () => closedEvidenceEnvironment({}, { rcRoot: privateFallbackRoot(), typo: true }),
     /unknown options/,
@@ -3561,6 +3564,55 @@ const initGit = (r) => {
   git("commit", "-q", "-m", "fixture");
   return git;
 };
+
+check("a closed GATE environment cannot refresh stat-cache bytes in the guarded Git index", () => {
+  const r = scratch("closed-gate-git-index-");
+  derivedRoots.push(r);
+  const git = initGit(r);
+  const tracked = path.join(r, "tracked.txt");
+  fs.writeFileSync(tracked, "stable bytes\n");
+  git("add", "tracked.txt");
+  git("commit", "-q", "-m", "tracked fixture");
+
+  const indexPathText = git("rev-parse", "--git-path", "index").trim();
+  const indexPath = path.isAbsolute(indexPathText) ? indexPathText : path.resolve(r, indexPathText);
+  // Make the worktree stat data stale without changing the tracked bytes. A normal `git status`
+  // then has a real optional index refresh to perform; the secured observation must suppress it.
+  const staleTime = new Date("2000-01-01T00:00:00.000Z");
+  fs.utimesSync(tracked, staleTime, staleTime);
+  const before = fs.readFileSync(indexPath);
+  const securedEnvironment = closedEvidenceEnvironment({
+    ...process.env,
+    GIT_OPTIONAL_LOCKS: "1",
+  });
+  const secured = spawnSync("git", ["status", "--porcelain"], {
+    cwd: r,
+    encoding: "utf8",
+    env: securedEnvironment,
+    shell: false,
+    stdio: "pipe",
+  });
+  assert.equal(secured.status, 0, secured.stderr);
+  assert.equal(String(secured.stdout).trim(), "");
+  assert.deepEqual(fs.readFileSync(indexPath), before,
+    "a closed gate observation refreshed raw Git-index stat-cache bytes");
+
+  // ANTI-VACUITY: with the one control removed, the same pending refresh must really change the
+  // index. Otherwise the assertion above would be green without exercising the reported defect.
+  const uncontrolledEnvironment = { ...securedEnvironment };
+  delete uncontrolledEnvironment.GIT_OPTIONAL_LOCKS;
+  const uncontrolled = spawnSync("git", ["status", "--porcelain"], {
+    cwd: r,
+    encoding: "utf8",
+    env: uncontrolledEnvironment,
+    shell: false,
+    stdio: "pipe",
+  });
+  assert.equal(uncontrolled.status, 0, uncontrolled.stderr);
+  assert.equal(String(uncontrolled.stdout).trim(), "");
+  assert.notDeepEqual(fs.readFileSync(indexPath), before,
+    "the fixture exposed no optional Git-index refresh for the control to suppress");
+});
 const withDerivedFixture = (fn) => {
   const r = buildFixture();
   derivedRoots.push(r);

@@ -4926,6 +4926,10 @@ export function closedEvidenceEnvironment(source, options = {}) {
   environment.PATH = [
     path.dirname(process.execPath), "/usr/bin", "/bin", "/usr/sbin", "/sbin",
   ].join(path.delimiter);
+  // Gate observations are read-only evidence. Git may otherwise refresh stat-cache bytes in the
+  // live index during commands such as `status`, which makes the observation modify the exact state
+  // it is meant to measure. Override rather than inherit so an ambient value cannot reopen writes.
+  environment.GIT_OPTIONAL_LOCKS = "0";
   environment.npm_config_node_options = "";
   // Two DISTINCT files, each ATTESTED empty rather than assumed absent — "nobody will ever create
   // that path" is not a control. npm also refuses to start when `userconfig` and `globalconfig`
