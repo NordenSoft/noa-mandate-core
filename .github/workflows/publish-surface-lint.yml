@@ -1,0 +1,93 @@
+name: publish-surface-lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: publish-surface-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+# This PR/main lane can read the checked-out commit and upload its own NON-RELEASE evidence only.
+# It receives no OIDC authority, environment, npm token, registry credential, or cache.
+permissions:
+  contents: read
+
+jobs:
+  immutable-publish-artifact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.2
+
+      - name: Acquire the exact public Node image (setup only; staging later uses pull=never)
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='docker.io/library/node@sha256:62e4daa6819762bbd3072af77cc282ab72c631c4aed30dd7980192babaf385b3'
+          docker pull --platform=linux/amd64 "$image"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = 'linux/amd64'
+
+      - name: Stage and scan immutable real tarballs from the exact Git commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git='/usr/bin/git'
+          node_bin="$(command -v node)"
+          test "$GITHUB_SHA" = "$(env -u HOME GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 LANG=C LC_ALL=C "$git" rev-parse HEAD)"
+          bootstrap_dirs=()
+          cleanup_bootstraps() {
+            local dir
+            for dir in "${bootstrap_dirs[@]}"; do rm -rf -- "$dir"; done
+          }
+          trap cleanup_bootstraps EXIT
+          run_exact_bootstrap() {
+            local bootstrap_dir bootstrap
+            bootstrap_dir="$(mktemp -d "$RUNNER_TEMP/noa-publish-exact-bootstrap.XXXXXX")"
+            bootstrap_dirs+=("$bootstrap_dir")
+            bootstrap="$bootstrap_dir/stage-publish-artifacts.mjs"
+            env -u HOME GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 LANG=C LC_ALL=C "$git" \
+              show "$GITHUB_SHA:scripts/lib/stage-publish-artifacts.mjs" > "$bootstrap"
+            test -s "$bootstrap"
+            chmod 500 "$bootstrap"
+            "$node_bin" "$bootstrap" --repo-root "$GITHUB_WORKSPACE" "$@"
+          }
+          output="$RUNNER_TEMP/noa-publish-CANDIDATE-NON-RELEASE"
+          run_exact_bootstrap --git-ref "$GITHUB_SHA" --output "$output"
+          run_exact_bootstrap --verify "$output" --git-ref "$GITHUB_SHA"
+
+      - name: Upload immutable candidate evidence (never a release authorization)
+        id: candidate-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: noa-publish-${{ github.sha }}-CANDIDATE-NON-RELEASE
+          path: ${{ runner.temp }}/noa-publish-CANDIDATE-NON-RELEASE/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: false
+
+      - name: Prove staging rejects lifecycle, inventory, tar, manifest, and containment mutations
+        run: node scripts/stage-publish-artifacts.selftest.mjs
+
+      - name: State the evidence boundary
+        shell: bash
+        env:
+          ARTIFACT_DIGEST: ${{ steps.candidate-upload.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo '## CANDIDATE / NON-RELEASE'
+            echo
+            echo 'The uploaded bytes are immutable staging evidence for this exact Git commit.'
+            echo 'This workflow does not publish to npm and does not authorize a release.'
+            printf 'Artifact-service SHA-256: %s\n' "$ARTIFACT_DIGEST"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,260 @@
+/**
+ * NOA Relay — storage abstraction.
+ *
+ * `Store` is an interface so the localhost alpha runs on a hermetic in-memory store (no infra,
+ * deterministic tests) while a future persistent driver (see the package README's storage contract) drops in behind the
+ * SAME interface as the next slice — exactly mirroring the push-provider abstraction. No locked
+ * decision (D1–D23) constrains the storage engine; the invariants it must uphold are behavioral
+ * (never store a private key, fail-closed on expiry), not engine-specific.
+ *
+ * NOTE: no method accepts or returns a private key. Only public keys + secret HASHES are stored.
+ */
+
+import type {
+  DevicePairingRecord,
+  AgentRecord,
+  DeviceRecord,
+  HoldRecord,
+  HoldStatus,
+  KeyManifestRecord,
+  PairingRecord,
+  PushSubscriptionRecord,
+} from "./types.js";
+import { safeRefHash } from "./crypto.js";
+
+export type ManifestPutOutcome = "stored" | "idempotent" | "stale" | "equivocation";
+
+export type ManifestPutConflictOutcome = Extract<ManifestPutOutcome, "stale" | "equivocation">;
+
+/** Typed fail-closed signal used by Store implementations when a compare/write loses a race. */
+export class ManifestPutConflictError extends Error {
+  override readonly name = "ManifestPutConflictError";
+
+  constructor(
+    readonly outcome: ManifestPutConflictOutcome,
+    /** The authoritative record that rejected the attempted write. */
+    readonly current: KeyManifestRecord,
+  ) {
+    super(`manifest write rejected: ${outcome}`);
+  }
+}
+
+function optionalCanonicalValueEqual(a: unknown, b: unknown): boolean {
+  const aAbsent = a === null || a === undefined;
+  const bAbsent = b === null || b === undefined;
+  if (aAbsent || bAbsent) return aAbsent && bAbsent;
+
+  const aHash = safeRefHash(a);
+  const bHash = safeRefHash(b);
+  return aHash !== null && bHash !== null && aHash === bHash;
+}
+
+/**
+ * Classify a manifest write without mutating state. Equal-version writes are retries only when the
+ * effective manifest + delegation bundle is JCS-equivalent to the authoritative record. Keeping
+ * this invariant in the Store contract prevents an engine-only check from being bypassed by a
+ * direct caller or invalidated by a future compare/write race in a database-backed Store.
+ */
+export function classifyManifestPut(
+  current: KeyManifestRecord | undefined,
+  next: KeyManifestRecord,
+): ManifestPutOutcome {
+  if (!current || next.version > current.version) return "stored";
+  if (next.version < current.version) return "stale";
+
+  const currentManifestHash = safeRefHash(current.manifest);
+  const nextManifestHash = safeRefHash(next.manifest);
+  const sameManifest =
+    currentManifestHash !== null &&
+    nextManifestHash !== null &&
+    current.refHash === currentManifestHash &&
+    next.refHash === nextManifestHash &&
+    currentManifestHash === nextManifestHash;
+  const sameDelegation = optionalCanonicalValueEqual(current.delegation, next.delegation);
+
+  return sameManifest && sameDelegation ? "idempotent" : "equivocation";
+}
+
+export interface Store {
+  // agents
+  putAgent(a: AgentRecord): void;
+  getAgentById(id: string): AgentRecord | undefined;
+  findAgentByApiKeyHash(hash: string): AgentRecord | undefined;
+
+  // devices
+  putDevice(d: DeviceRecord): void;
+  getDeviceById(id: string): DeviceRecord | undefined;
+  getDeviceByKid(kid: string): DeviceRecord | undefined;
+  findDeviceBySecretHash(hash: string): DeviceRecord | undefined;
+
+  // push
+  putPush(rec: PushSubscriptionRecord): void;
+  listPushForDevice(deviceId: string): PushSubscriptionRecord[];
+  listAllDevices(): DeviceRecord[];
+
+  // pairings
+  putPairing(p: PairingRecord): void;
+  getPairing(token: string): PairingRecord | undefined;
+
+  // device pairing (ADR-0007) — keyed by the token HASH, never by the token
+  putDevicePairing(p: DevicePairingRecord): void;
+  getDevicePairingByHash(tokenHash: string): DevicePairingRecord | undefined;
+
+  // holds
+  putHold(h: HoldRecord): void;
+  getHold(id: string): HoldRecord | undefined;
+  getHoldByIdem(agentId: string, idempotencyKey: string): HoldRecord | undefined;
+  listHolds(filter: { status?: HoldStatus; agentId?: string }): HoldRecord[];
+  countPending(agentId: string): number;
+
+  // manifest (public key material only)
+  /**
+   * Must reject stale/equivocating writes with ManifestPutConflictError. The void return preserves
+   * source compatibility with pre-existing Store implementations; the engine also preflights the
+   * write, while built-in stores enforce the invariant again at the mutation boundary.
+   */
+  /**
+   * `recovery: true` bypasses the monotonicity classification for the ONE case the engine can prove
+   * is unrecoverable otherwise: a stored version so large no conforming publish could have produced
+   * it (pre-bound residue), which would leave the tenant permanently unable to rotate keys. The
+   * engine decides and logs it; the store only honours the explicit instruction.
+   */
+  putManifest(rec: KeyManifestRecord, opts?: { recovery?: boolean }): void;
+  getLatestManifest(tenant: string): KeyManifestRecord | undefined;
+
+  /**
+   * Optional cleanup hook for a `Store` holding external resources (#63-S3 / D6 — `FileStore`'s
+   * exclusive single-process lock file). Purely additive: `InMemoryStore` does not implement it,
+   * and `server.ts`'s `close()` calls it defensively via optional chaining (`store.close?.()`), so
+   * every existing `InMemoryStore`-backed caller/test is unaffected.
+   */
+  close?(): void;
+}
+
+export class InMemoryStore implements Store {
+  private readonly agents = new Map<string, AgentRecord>();
+  private readonly devices = new Map<string, DeviceRecord>();
+  private readonly devicesByKid = new Map<string, string>();
+  private readonly push = new Map<string, PushSubscriptionRecord>();
+  private readonly pairings = new Map<string, PairingRecord>();
+  /** Keyed by token HASH — the plaintext token is returned once at issuance and never stored. */
+  private readonly devicePairings = new Map<string, DevicePairingRecord>();
+  private readonly holds = new Map<string, HoldRecord>();
+  private readonly holdsByIdem = new Map<string, string>();
+  private readonly manifests = new Map<string, KeyManifestRecord>();
+
+  putAgent(a: AgentRecord): void {
+    this.agents.set(a.id, a);
+  }
+  getAgentById(id: string): AgentRecord | undefined {
+    return this.agents.get(id);
+  }
+  findAgentByApiKeyHash(hash: string): AgentRecord | undefined {
+    for (const a of this.agents.values()) if (a.apiKeyHash === hash) return a;
+    return undefined;
+  }
+
+  putDevice(d: DeviceRecord): void {
+    this.devices.set(d.id, d);
+    this.devicesByKid.set(d.kid, d.id);
+  }
+  getDeviceById(id: string): DeviceRecord | undefined {
+    return this.devices.get(id);
+  }
+  getDeviceByKid(kid: string): DeviceRecord | undefined {
+    const id = this.devicesByKid.get(kid);
+    return id ? this.devices.get(id) : undefined;
+  }
+  findDeviceBySecretHash(hash: string): DeviceRecord | undefined {
+    for (const d of this.devices.values()) if (d.deviceSecretHash === hash) return d;
+    return undefined;
+  }
+
+  putPush(rec: PushSubscriptionRecord): void {
+    this.push.set(rec.deviceId, rec);
+  }
+  listPushForDevice(deviceId: string): PushSubscriptionRecord[] {
+    const r = this.push.get(deviceId);
+    return r ? [r] : [];
+  }
+  listAllDevices(): DeviceRecord[] {
+    return [...this.devices.values()];
+  }
+
+  putPairing(p: PairingRecord): void {
+    this.pairings.set(p.token, p);
+  }
+  putDevicePairing(p: DevicePairingRecord): void {
+    this.devicePairings.set(p.tokenHash, p);
+  }
+  getDevicePairingByHash(tokenHash: string): DevicePairingRecord | undefined {
+    return this.devicePairings.get(tokenHash);
+  }
+  getPairing(token: string): PairingRecord | undefined {
+    return this.pairings.get(token);
+  }
+
+  private idemKey(agentId: string, idempotencyKey: string): string {
+    return `${agentId.length}:${agentId}:${idempotencyKey}`;
+  }
+  putHold(h: HoldRecord): void {
+    this.holds.set(h.id, h);
+    this.holdsByIdem.set(this.idemKey(h.agentId, h.idempotencyKey), h.id);
+  }
+  getHold(id: string): HoldRecord | undefined {
+    return this.holds.get(id);
+  }
+  getHoldByIdem(agentId: string, idempotencyKey: string): HoldRecord | undefined {
+    const id = this.holdsByIdem.get(this.idemKey(agentId, idempotencyKey));
+    return id ? this.holds.get(id) : undefined;
+  }
+  listHolds(filter: { status?: HoldStatus; agentId?: string }): HoldRecord[] {
+    const out: HoldRecord[] = [];
+    for (const h of this.holds.values()) {
+      if (filter.status && h.status !== filter.status) continue;
+      if (filter.agentId && h.agentId !== filter.agentId) continue;
+      out.push(h);
+    }
+    return out;
+  }
+  countPending(agentId: string): number {
+    let n = 0;
+    for (const h of this.holds.values()) if (h.agentId === agentId && h.status === "PENDING") n++;
+    return n;
+  }
+
+  putManifest(rec: KeyManifestRecord, opts: { recovery?: boolean } = {}): void {
+    const cur = this.manifests.get(rec.tenant);
+    if (opts.recovery) {
+      this.manifests.set(rec.tenant, rec);
+      return;
+    }
+    const outcome = classifyManifestPut(cur, rec);
+    if (outcome === "stored") {
+      this.manifests.set(rec.tenant, rec);
+      return;
+    }
+    if (outcome === "idempotent") return;
+    throw new ManifestPutConflictError(outcome, cur!);
+  }
+  getLatestManifest(tenant: string): KeyManifestRecord | undefined {
+    return this.manifests.get(tenant);
+  }
+
+  /**
+   * Test/introspection helper: a plain-object dump of EVERYTHING the relay persists. Used by
+   * test/engine-nosign.test.ts to prove no private-key material is ever at rest. Only public keys
+   * + secret HASHES may appear here.
+   */
+  dump(): Record<string, unknown> {
+    return {
+      agents: [...this.agents.values()],
+      devices: [...this.devices.values()],
+      push: [...this.push.values()],
+      pairings: [...this.pairings.values()],
+      devicePairings: [...this.devicePairings.values()],
+      holds: [...this.holds.values()],
+      manifests: [...this.manifests.values()],
+    };
+  }
+}

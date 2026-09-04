@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noatrust.com/schema/noa-approval-evidence-0.1.schema.json",
+  "title": "NOA Approval Evidence Bundle",
+  "description": "The §13 D11-v2 container: an outcome-keyed union of already-signed artifacts (never itself signed). Always carries the Hold Envelope, the genesis DEFERRED receipt, the gate-signed Hold Resolution (F10), the reused noa.checkpoint/0.1 head anchor (F4), the Key Manifest and its root delegation (F7). Each outcome additionally carries ONLY the artifacts that exist for it. Sub-artifact internals are validated at verify-time by their own frozen schemas + verifyArtifact — this container schema fixes ONLY the union shape (additionalProperties:false). No field is added to the receipt or checkpoint schemas (Red Line 5 / F4).",
+  "$comment": "COMPATIBILITY, RECORDED RATHER THAN ASSUMED (S5 settlement plane, 2026-08-14). settlementEvidence and actionParamsPreimage were added as OPTIONAL members under the UNCHANGED $id. That is additive in one direction only: every pre-slice bundle still validates here, but because this container is additionalProperties:false, a STRICT PRE-SLICE READER of 0.1 WILL REJECT a new settlement-bearing bundle as an unknown-property error. That direction is expected, not overlooked. The unchanged identifier is an explicitly documented compatibility boundary, not evidence that downstream readers are absent. Any release intended for independently managed verifiers must bump the wire identifier before settlement-bearing bundles are exchanged, and must test both reader directions. Old bundles staying valid under the new reader is not by itself evidence of rolling compatibility.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["spec", "outcome", "holdEnvelope", "deferredReceipt", "holdResolution", "checkpoint", "keyManifest", "keyDelegation"],
+  "properties": {
+    "spec": { "const": "noa.approval-evidence/0.1" },
+    "outcome": {
+      "enum": [
+        "EXECUTED",
+        "DENIED",
+        "EXPIRED",
+        "APPROVED_NO_EXECUTION_EVIDENCE",
+        "GRANT_EXPIRED_NO_CONSUMPTION_EVIDENCE",
+        "EXECUTION_FAILED",
+        "UNKNOWN_AFTER_DISPATCH",
+        "CANCELLED_LOCAL_STATE_LOST"
+      ]
+    },
+    "holdEnvelope": { "type": "object" },
+    "deferredReceipt": { "type": "object" },
+    "holdResolution": { "type": "object" },
+    "checkpoint": { "type": "object" },
+    "keyManifest": { "type": "object" },
+    "keyDelegation": { "type": "object" },
+    "decisionArtifact": { "type": "object" },
+    "allowedReceipt": { "type": "object" },
+    "blockedReceipt": { "type": "object" },
+    "timeoutReceipt": { "type": "object" },
+    "executionGrant": { "type": "object" },
+    "executionConsumption": { "type": "object" },
+    "executionUncertainty": { "type": "object" },
+    "executedReceipt": { "type": "object" },
+    "failedReceipt": { "type": "object" },
+    "settlementEvidence": { "type": "object" },
+    "actionParamsPreimage": { "type": "string" }
+  }
+}

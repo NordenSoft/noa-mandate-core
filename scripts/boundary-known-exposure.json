@@ -1,0 +1,5 @@
+{
+  "note": "The L12 known-exposure ratchet carries only reviewed findings that are already published. Content findings bind to the exact unit bytes; path findings bind to a domain-separated hash of the exact canonical repository-relative path. This history begins with no carried findings. Every future entry must include why, remediation, and reviewedAt; malformed entries are refused by the gate.",
+  "keyFormat": "sha256(unit content):ruleId OR sha256(noa-boundary:path:v1\\0 + canonical repository-relative path):ruleId",
+  "entries": []
+}

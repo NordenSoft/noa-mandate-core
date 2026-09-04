@@ -1,0 +1,71 @@
+{
+  "schema": "noa.publish-artifact-policy/2",
+  "allowedBuildOutputPrefixes": [
+    "dist/src/",
+    "packages/approval-artifacts/dist/src/"
+  ],
+  "manifestPolicy": {
+    "enginesNode": ">=20",
+    "homepage": "https://noatrust.com",
+    "license": "Apache-2.0",
+    "provenanceRequired": true
+  },
+  "packages": [
+    {
+      "name": "noa-receipt",
+      "noticeTitle": "NOA Receipt — the open Agent Action Receipt organ",
+      "packagePath": ".",
+      "pathCount": 74,
+      "pathSetSha256": "3d11c7d2ca8abe5baba09d404db1876b7cfbfbee4f269b852c1f7a071b153b73"
+    },
+    {
+      "name": "noa-mcp-adapter-core",
+      "noticeTitle": "NOA MCP Adapter Core — shared pre-flight governance for MCP integrations",
+      "packagePath": "packages/adapter-core",
+      "pathCount": 25,
+      "pathSetSha256": "ae135ff3a43c913da375296f84cc9123952332e509fc1664d3cfe4ab008a44c8"
+    },
+    {
+      "name": "noa-approval-artifacts",
+      "noticeTitle": "NOA Approval Artifacts — signed approval and execution-control artifact schemas and conformance vectors",
+      "packagePath": "packages/approval-artifacts",
+      "pathCount": 193,
+      "pathSetSha256": "e4c31b3ed721717810f061bb934731dcbcf0c236633c4427a497c952815cb0d3"
+    },
+    {
+      "name": "noa-framework-adapters",
+      "noticeTitle": "NOA Framework Adapters — fail-closed governance adapters for tool-calling frameworks",
+      "packagePath": "packages/framework-adapters",
+      "pathCount": 8,
+      "pathSetSha256": "663c56df2c10534db3a2b14c6b53d2701c46e742ff8456e89576be1c332f864a"
+    },
+    {
+      "name": "noa-mcp-proxy",
+      "noticeTitle": "NOA MCP Proxy — fail-closed governance proxy for MCP tool calls",
+      "packagePath": "packages/mcp-proxy",
+      "pathCount": 13,
+      "pathSetSha256": "f25c48ef25700bc44cb2ecf170ff3d933428e6ba6f06a85e063c5a9a0ed6af69"
+    },
+    {
+      "name": "noa-rail-x402",
+      "noticeTitle": "NOA Rail x402 — settlement-correlation evidence for NOA mandates and x402 payments",
+      "packagePath": "packages/rail-x402",
+      "pathCount": 8,
+      "pathSetSha256": "8488cf310a8beaadaa18b1f763d7674f610265ababdbc93a0aa982652150d9c8"
+    },
+    {
+      "name": "noa-signer-sidecar",
+      "noticeTitle": "NOA Signer Sidecar — process-isolated Ed25519 signing oracle for noa-receipt",
+      "packagePath": "packages/signer-sidecar",
+      "pathCount": 6,
+      "pathSetSha256": "66fb81e44ab6e7eb242d42bfeb534ccf6c83a9242b092584f1d788d9b7963f19"
+    },
+    {
+      "name": "noa-tsa-anchor",
+      "noticeTitle": "NOA TSA Anchor — opt-in RFC 3161 trusted-timestamp sidecar for noa-receipt witness anchors",
+      "packagePath": "packages/tsa-anchor",
+      "pathCount": 12,
+      "pathSetSha256": "7ed7c1bc2eb6c83b9cd8bd1dfad7f2a5a9cc73d9fc15e21284a4f95239142c61"
+    }
+  ]
+}

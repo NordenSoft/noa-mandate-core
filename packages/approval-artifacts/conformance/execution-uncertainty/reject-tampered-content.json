@@ -1,0 +1,63 @@
+{
+  "description": "reason altered after signing (stale signature)",
+  "spec": "noa.execution-uncertainty/0.1",
+  "expect": "REJECT",
+  "rejectionClass": "tampered-content",
+  "artifact": {
+    "spec": "noa.execution-uncertainty/0.1",
+    "grantHash": "sha256:226bc0786f79b27ddcf95fabfd7ec25083eb4ad42c6b78f766f36c6a3e64744c",
+    "lastKnownState": "DISPATCH_STARTED",
+    "detectedAt": "2026-07-14T11:58:00.000Z",
+    "reason": "PROCESS_CRASH_BEFORE_RECEIPT_COMMIT",
+    "bootId": "boot-forged",
+    "uptimeResetAt": "2026-07-14T11:50:00.000Z",
+    "sig": {
+      "alg": "ed25519",
+      "kid": "gate-prod-1",
+      "value": "/KXAj1qE80YlqG7rTRgazKkTAWeiHQuaRyWXiN+jKNjpT7MoUhk+B1uEfAb9tQTIpE0m/7eiZwTJfE+qQ2YXDQ=="
+    }
+  },
+  "context": {
+    "now": "2026-07-14T12:00:00.000Z",
+    "equals": [
+      {
+        "path": "bootId",
+        "value": "boot-7f3a9c"
+      },
+      {
+        "path": "uptimeResetAt",
+        "value": "2026-07-14T11:50:00.000Z"
+      }
+    ],
+    "refHashChecks": [
+      {
+        "path": "grantHash",
+        "rule": "side",
+        "artifact": {
+          "spec": "noa.execution-grant/0.1",
+          "grantId": "grant-001",
+          "holdId": "hold-001",
+          "paramsHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "holdEnvelopeHash": "sha256:47b71f8b8416943c129da8c326578a9f75d4ddb187f3ed1291abed337ec11e8b",
+          "approvalReceiptHash": "sha256:71a9ae2ed46fcc58cc1940f943ae90d9885d15507e35382c99a51509ef20f66b",
+          "issuedAt": "2026-07-14T11:55:00.000Z",
+          "expiresAt": "2026-07-14T12:30:00.000Z",
+          "maxUses": 1,
+          "nonce": "5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed",
+          "sig": {
+            "alg": "ed25519",
+            "kid": "gate-prod-1",
+            "value": "VmteR01cyCejrkO/3t16U8QABl9PlxDoSP9eTSEjeBGVjuv0h5KC0Szlh9EkC2PF7eEPz2h7bxtbo5DaiJkHAg=="
+          }
+        }
+      }
+    ],
+    "mustBeWithin": [
+      {
+        "path": "detectedAt",
+        "min": "2026-07-14T11:00:00.000Z",
+        "max": "2026-07-14T12:05:00.000Z"
+      }
+    ]
+  }
+}

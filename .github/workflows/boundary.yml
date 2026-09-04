@@ -1,0 +1,79 @@
+name: boundary
+
+# L12 — the public-repository boundary record.
+#
+# Pull requests measure proposed bytes and main pushes record the integrated result. Arbitrary branch
+# and tag pushes are not release authorities and do not start candidate-controlled workflow code;
+# historical-ref custody belongs to an independent, protected scanner, not to this CI file.
+#
+# WHAT THIS WORKFLOW IS, said plainly: after a push, a finding is an INCIDENT, not a gate — the bytes
+# are already on the forge. The pre-push step is the gate; this keyless Tier-A run is the RECORD and
+# the required check that stops a merge. Exact-token Tier B is deliberately UNMEASURED here: a
+# candidate-controlled workflow may not receive the secret that would let it manufacture its own
+# boundary evidence. Repository visibility is also a loud SNAPSHOT NON-CLAIM here: live provider
+# proof needs a credential, and candidate-controlled Node receives none. This workflow never
+# authorizes release. Only a server-side push ruleset could refuse the bytes themselves.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: boundary-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Runs on every pull request (including forks) and integrated main push because Tier A needs no
+  # secret. An outside contributor must never be blocked by a credential they cannot have.
+  shapes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.2
+          cache: npm
+      # The packed lane asks npm what would ship, and npm can only answer about files that exist.
+      # `npm ci` runs the prepare hook, which builds dist/.
+      - run: npm ci
+      - name: Derive the commit range this ref adds
+        id: range
+        shell: bash
+        # DERIVED, never assumed. A tip-only range can read multi-commit history as one commit,
+        # which is the registered knockout `l12-msg-range-is-full`. When no range can be derived the
+        # commit/tag lanes report SKIPPED BY NAME; they are never silently folded into a green.
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --quiet origin "+refs/heads/${{ github.event.repository.default_branch }}:refs/remotes/origin/default" || true
+          RANGE=""
+          if BASE="$(git merge-base refs/remotes/origin/default HEAD 2>/dev/null)"; then
+            if [ "$BASE" != "$(git rev-parse HEAD)" ]; then RANGE="$BASE..HEAD"; fi
+          fi
+          if [ -z "$RANGE" ] && [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            if git cat-file -e "${{ github.event.before }}^{commit}" 2>/dev/null; then RANGE="${{ github.event.before }}..HEAD"; fi
+          fi
+          echo "range=$RANGE" >> "$GITHUB_OUTPUT"
+          echo "derived range: ${RANGE:-<none: the commit and tag lanes will report SKIPPED>}"
+      - name: Prove the boundary scanner still detects its planted failures
+        run: node scripts/lint-boundary.mjs --selftest
+      - name: Boundary shapes and the public-repository inversion (TIER A)
+        shell: bash
+        # `--tier a` is EXPLICIT. Without a key the gate refuses to run tier B rather than quietly
+        # scanning less, so the only honest way to run keyless is to ask for it by name, and the gate
+        # then prints TIER-B UNMEASURED in its own output. Snapshot visibility is equally explicit and
+        # prints SNAPSHOT NON-CLAIM; live provider evidence is not available to candidate code.
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.range.outputs.range }}" ]; then
+            node scripts/lint-boundary.mjs --repo-visibility-source snapshot --tier a --explain --range "${{ steps.range.outputs.range }}"
+          else
+            node scripts/lint-boundary.mjs --repo-visibility-source snapshot --tier a --explain
+          fi

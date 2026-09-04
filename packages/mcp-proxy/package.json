@@ -1,0 +1,58 @@
+{
+  "name": "noa-mcp-proxy",
+  "version": "0.4.0",
+  "description": "Transparent MCP proxy-middleware: sits between an MCP host and an EXISTING, unmodified downstream tool server, dynamically reflects its tool surface, and gates every tools/call through noa-mcp-adapter-core's preCheck before forwarding — fail-closed on DENY, malformed input, or a broken downstream connection.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "proxy",
+    "ai-agent",
+    "governance",
+    "receipt",
+    "provenance"
+  ],
+  "homepage": "https://noatrust.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NordenSoft/noa.git",
+    "directory": "packages/mcp-proxy"
+  },
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "noa-mcp-proxy": "src/proxy.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "test": "node test/dependency-reachability.mjs && node --test test/*.test.mjs && node test/smoke.mjs",
+    "test:reachability": "node test/dependency-reachability.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.5",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "noa-mcp-adapter-core": "file:../adapter-core"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.0.5",
+    "fast-uri": "^3.1.5",
+    "hono": "^4.12.34",
+    "ip-address": "^10.4.0"
+  },
+  "optionalDependencies": {
+    "noa-signer-sidecar": "file:../signer-sidecar"
+  }
+}

@@ -1,0 +1,302 @@
+/**
+ * NOA Relay — domain types (P1b-alpha).
+ *
+ * The relay is UNTRUSTED TRANSPORT (spec §9). It stores and routes public / ciphertext material
+ * only. It never signs and never holds a private key, so NO type in this file has a private-key
+ * or seed field — that absence is intentional and is asserted by test/engine-nosign.test.ts.
+ *
+ * Signed artifacts (Hold Envelope, Key Manifest, phone Decision receipt, Decision Artifact) are
+ * carried through the relay OPAQUELY: the relay stores the exact received object and never
+ * mutates it (any mutation would break the gate's / phone's signature). Their internal shapes
+ * are the gate's / phone's authorship; the relay only structurally validates the minimum it
+ * needs to route and to run its transport-level filter (see the package README's trust note).
+ */
+
+import type { Receipt, RiskClass, Verdict } from "noa-signer";
+
+export type { Receipt, RiskClass, Verdict };
+
+/**
+ * The one hold-status state machine (D6/D19 + F9). Distinct terminal states — an EXPIRED hold
+ * is NEVER an approval and is NEVER a human denial (Red Line 6); it is its own operational
+ * status. The relay owns the STATUS transition; the SIGNED timeout receipt (BLOCKED verdict,
+ * ruleId="approval-timeout") is built by the gate/policy signer, never by the relay (spec §8).
+ */
+export type HoldStatus =
+  | "PENDING"
+  | "APPROVED"
+  | "DENIED"
+  | "EXPIRED"
+  | "CANCELLED_LOCAL_STATE_LOST";
+
+/** Machine-readable reason attached to a terminal transition (never free text / never PII). */
+/**
+ * ⚠ A SECOND COPY OF THE GATE'S UNION, and the compiler is what keeps them honest.
+ *
+ * Adding `HUMAN_APPROVED_INTENT_NOT_EXECUTION_BOUND` to `gate/src/types.ts` broke THIS file — which
+ * is how the duplication surfaced. The relay cannot import the gate's types (the gate depends on the
+ * relay's wire shapes, not the other way round), so the copy stays. What must not happen is the two
+ * drifting silently, and they cannot: the relay writes tokens the gate's signed artifacts carry, so
+ * a member missing here fails to typecheck the moment it is used.
+ */
+export type HoldReasonCode =
+  | "HUMAN_APPROVED"
+  /**
+   * See `gate/src/types.ts` for the full reasoning. In one line: the owner's invariant forbids
+   * claiming `HUMAN_APPROVED` until approval == grant == EXECUTION intent digests, and the
+   * execution leg has no admissible source. The relay establishes strictly LESS than the gate — an
+   * enrolled device's signature, and nothing about intent equality — so if the gate may not claim
+   * it, the relay certainly may not.
+   */
+  | "HUMAN_APPROVED_INTENT_NOT_EXECUTION_BOUND"
+  | "HUMAN_DENIED"
+  | "APPROVAL_TIMEOUT"
+  | "LOCAL_STATE_LOST";
+
+/**
+ * The opaque action summary the relay is allowed to persist. Raw params are NEVER here — only
+ * the canonical action id, its risk class, and the (already-hashed) paramsHash (Red Line 11 /
+ * invariant: raw PII never rests at the relay, spec §9 / D8).
+ */
+export interface HoldAction {
+  canonical: string;
+  riskClass: RiskClass;
+  /** "sha256:<hex>" or "hmac-sha256:<hex>" — the gate/agent computed this; the relay never sees raw params. */
+  paramsHash: string;
+}
+
+/**
+ * noa.encrypted-display/0.1 (spec §9). An HPKE AEAD blob — NOT Ed25519-signed. The relay stores
+ * this ciphertext object verbatim; its integrity is anchored by `displayCiphertextHash` inside
+ * the gate-signed Hold Envelope (F2). Fields typed loosely on purpose — the relay treats the
+ * payload/recipients as opaque bytes it must not interpret, only hash-check.
+ */
+export interface EncryptedDisplay {
+  spec: "noa.encrypted-display/0.1";
+  tenant?: string;
+  holdId?: string;
+  deferredReceiptHash?: string;
+  expiresAt?: string;
+  suite?: { kem: number; kdf: number; aead: number };
+  payload?: { nonce: string; ciphertext: string };
+  recipients?: Array<{ kid: string; enc: string; wrappedCek: string }>;
+  aadHash?: string;
+  [k: string]: unknown;
+}
+
+/** noa.hold/0.1 (gate-signed, spec §8). Stored opaquely; only the routing/anti-rollback fields are read. */
+export interface HoldEnvelope {
+  spec: "noa.hold/0.1";
+  holdId?: string;
+  deferredReceiptId?: string;
+  deferredReceiptHash?: string;
+  mode?: "RAW" | "ENFORCED";
+  /** F2: sha256:<hex> over JCS(the WHOLE noa.encrypted-display/0.1 object). */
+  displayCiphertextHash?: string;
+  keyManifestVersion?: number;
+  keyManifestHash?: string;
+  tenant?: string;
+  expiresAt?: string;
+  nonce?: string;
+  gateKid?: string;
+  sig?: { alg: string; kid: string; value: string };
+  [k: string]: unknown;
+}
+
+/** A stored hold row. */
+export interface HoldRecord {
+  id: string;
+  agentId: string;
+  idempotencyKey: string;
+  /** sha256 of the canonical create-request body, for idempotency-conflict detection. */
+  requestHash: string;
+  status: HoldStatus;
+  action: HoldAction;
+  holdEnvelope: HoldEnvelope | null;
+  deferredReceipt: Receipt | null;
+  encryptedDisplay: EncryptedDisplay | null;
+  /** The approver-signed ALLOWED/BLOCKED receipt. The relay STORES it; it never CREATES one. */
+  decisionReceipt: Receipt | null;
+  /** noa.decision/0.1, approver-signed, stored opaquely. */
+  decisionArtifact: unknown | null;
+  reasonCode: HoldReasonCode | null;
+  expiresAt: number;
+  decidedAt: number | null;
+  createdAt: number;
+}
+
+/** An agent (the gate/agent side that creates holds). Only the API-key HASH is stored. */
+export interface AgentRecord {
+  id: string;
+  name: string;
+  /** sha256 hex of "noa_agent_<secret>". Plaintext is never stored. */
+  apiKeyHash: string;
+  ownerDevice: string | null;
+  /**
+   * WHICH TENANT'S KEY MANIFEST THIS AGENT MAY PUBLISH. `null` means none, and null FAILS CLOSED.
+   *
+   * MEASURED BEFORE THIS FIELD EXISTED (R8-11, round 8, two independent reviewers): customer A
+   * authenticated with its own legitimate credential, put `"tenant": "customer-B"` in the manifest
+   * BODY, and the relay stored it. `GET /v1/trust?tenant=customer-B` then served A's keys as B's
+   * approver and root. Worse than the forgery: B's own next legitimate publish at the same version
+   * came back `409 MANIFEST_EQUIVOCATION`, so any authenticated customer could permanently wedge
+   * another customer's key rotation and recovery path.
+   *
+   * The tenant was read from `manifest["tenant"]` — the caller's own body — and `putManifest` did
+   * not take an agent at all, so there was nothing to check it against. Authentication answered
+   * "who are you"; nothing answered "and whose keys may you replace".
+   *
+   * Bound ONCE at pairing redemption, from the operator-issued pairing token, and never from a
+   * request body. `null` is refused rather than defaulted: an agent whose tenant nobody declared is
+   * exactly the agent that must not be able to publish, and the old `?? "default"` fallback is how
+   * an unscoped credential silently acquired a scope.
+   */
+  tenant: string | null;
+  createdAt: number;
+}
+
+/** An approver device. Only PUBLIC key material + a session-secret HASH — never a private key. */
+export interface DeviceRecord {
+  id: string;
+  kid: string;
+  /** raw 32-byte Ed25519 public key, lowercase hex. */
+  publicKeyHex: string;
+  custodyTier: string;
+  /**
+   * WHICH TENANT THIS DEVICE BELONGS TO — the same field, for the same reason, as `AgentRecord.tenant`
+   * below (R8-11). `null` means the device made no tenant claim, which is what an anonymously
+   * enrolled device has.
+   *
+   * ⚠ WHAT IT CLOSES, AND WHAT IT DOES NOT (ADR-0007 constraint 3).
+   *
+   * `claimDevice` refuses an unknown device and someone else's device identically, but an UNCLAIMED
+   * device (`agentId === null`) is claimable by ANY authenticated agent — first claimer wins. With
+   * one relay serving several customers, the window between a device enrolling and its own operator
+   * claiming it is a window in which a different customer can take it, and from then on that
+   * customer sees and decides everything the device is shown.
+   *
+   * A device that declares a tenant can be matched against the claiming agent's tenant, which closes
+   * the race for it. A device with `tenant: null` still cannot be matched on anything — there is no
+   * claim to check — so it keeps the old behaviour. That is stated rather than hidden: the residual
+   * belongs to the anonymous enrolment path, which is development-only (`config.ts:161`) and which
+   * ADR-0007 exists to replace.
+   */
+  tenant: string | null;
+  /** sha256 hex of "noa_device_<secret>" for non-signing session calls. */
+  deviceSecretHash: string;
+  /**
+   * WHICH AGENT'S HOLDS THIS DEVICE MAY SEE AND DECIDE. `null` until an agent CLAIMS it with its own
+   * credential, and an unclaimed device can do nothing — it cannot list, read or decide any hold.
+   *
+   * MEASURED BEFORE THIS FIELD EXISTED: a device belonging to customer B, freshly enrolled and
+   * unrelated to customer A, called `listPending()` and received A's hold with its canonical action,
+   * risk class and paramsHash; then posted its OWN honestly-signed ALLOWED on A's hold and drove it
+   * to APPROVED / HUMAN_APPROVED. No forgery and no stolen credential — B simply approved someone
+   * else's action. With several customers on one relay that is one customer resolving another's
+   * approvals.
+   *
+   * `AgentRecord.ownerDevice` already existed for this and was never populated or read — a control
+   * that was designed and never wired. The binding is put here, on the DEVICE, because the question
+   * every device route must answer is "whose holds is THIS caller allowed to see", and answering it
+   * from the device record makes the check impossible to forget: there is no code path that reads a
+   * hold for a device without having the device in hand.
+   */
+  agentId: string | null;
+  revokedAt: number | null;
+  createdAt: number;
+}
+
+export interface PushSubscriptionRecord {
+  deviceId: string;
+  /** Opaque provider handle. The relay does not interpret it. */
+  subscription: unknown;
+  createdAt: number;
+}
+
+/** A one-time pairing token used to onboard an agent. */
+/**
+ * A DEVICE-pairing token: the credential a phone presents to enrol, issued during the ceremony the
+ * operator already performs (ADR-0007).
+ *
+ * FOUR PROPERTIES, each from a measured reason rather than from caution:
+ *
+ *  · HASHED AT REST (`tokenHash`). `PairingRecord` stores its token raw, unlike `apiKeyHash` and
+ *    `deviceSecretHash` — a pre-existing inconsistency this type does not inherit.
+ *  · KID-BOUND (`kid`). The gate sees the phone key in the CONFIRMATION before it authors ACCEPTED,
+ *    so the token can name the only device allowed to redeem it. A leaked paste bundle is then
+ *    useless without that phone private key — a property a shared operator secret cannot have.
+ *  · TENANT REQUIRED, never null. For AGENTS a null tenant fails CLOSED (it cannot publish a
+ *    manifest). For DEVICES a null tenant fails OPEN: it bypasses the claim match at
+ *    `engine.ts` and the device becomes claimable by anyone. The device namespace must not
+ *    inherit the agent default, or this route reopens the race through the front door.
+ *  · SINGLE-USE (`usedAt`), and "single-use" is the honest word. No revoke API exists for these
+ *    tokens; single use plus a short TTL is the whole mechanism, and calling it "revocable" would be
+ *    an overclaim.
+ */
+export interface DevicePairingRecord {
+  /** sha256 of the token. The plaintext is returned once, at issuance, and never stored. */
+  tokenHash: string;
+  /** The tenant the redeemed device is scoped to. NEVER null — see above. */
+  tenant: string;
+  /** The ONLY device key permitted to redeem this token. */
+  kid: string;
+  usedAt: number | null;
+  expiresAt: number;
+  createdAt: number;
+}
+
+export interface PairingRecord {
+  token: string;
+  agentHint: string | null;
+  /**
+   * The tenant the redeemed agent will be scoped to (R8-11). Carried on the OPERATOR-ISSUED pairing
+   * token because that is the last point at which a party other than the agent decides anything
+   * about it — after redemption every byte the agent sends is its own. `null` yields a
+   * `tenant: null` agent, which cannot publish a manifest at all.
+   */
+  tenant: string | null;
+  usedAt: number | null;
+  expiresAt: number;
+  createdAt: number;
+}
+
+/** noa.key-manifest/0.1 — PUBLIC key material only, externally signed. Stored opaquely. */
+export interface KeyManifestRecord {
+  tenant: string;
+  version: number;
+  /** The exact received, externally-signed manifest object. The relay never signs it. */
+  manifest: Record<string, unknown>;
+  /**
+   * noa.key-delegation/0.1 — PUBLIC, root/tenant-authority-signed, stored opaquely alongside the
+   * manifest so `GET /v1/trust` can serve the full root→delegation→manifest chain (#64-S2). `null`
+   * when the publishing gate didn't carry one (older gates, pre-#64) — `GET /v1/trust` reports
+   * this honestly (404 NO_DELEGATION) rather than fabricating a delegation.
+   *
+   * OPTIONAL (not required-nullable) — this field was added to an already-EXPORTED type. Making it
+   * required, even as `T | null`, would break any external `Store`/record implementer at compile
+   * time; `?:` keeps the #64 addition truly additive for outside consumers of this type (R4).
+   * Every internal constructor (engine.ts `putManifest`) still always sets it explicitly.
+   */
+  delegation?: Record<string, unknown> | null;
+  refHash: string;
+  createdAt: number;
+  /**
+   * PROVENANCE, not a number: set by `RelayEngine.putManifest` on every record it accepts under the
+   * R6 version bound. It is the ONLY thing that qualifies a stored record for re-genesis recovery
+   * (see engine.ts) — a record carrying this marker was produced by a conforming publish and is
+   * therefore never "residue", whatever its version happens to be.
+   *
+   * WHY THIS EXISTS. Recovery used to be gated on a NUMERIC threshold: a stored version above
+   * 1,000,000 "cannot have been produced by a conforming publish". That was false. Each publish may
+   * advance the counter by up to MAX_VERSION_JUMP (1,000), so 1,001 ordinary accepted publishes
+   * reach 1,000,001 — and the tenant then qualifies for recovery, which bypasses monotonic conflict
+   * handling entirely and lets the manifest be rolled back to version 1 with any key list. The
+   * threshold was walkable by exactly the operation it was assumed to be out of reach of.
+   *
+   * OPTIONAL, and absence is meaningful: a record WITHOUT the marker predates this field (pre-bound
+   * residue, or a snapshot written by an older relay) and is the only kind that may re-genesis. The
+   * field is `?:` for the same reason `delegation` is — this type is exported, and making it
+   * required would break external `Store`/record implementers at compile time.
+   */
+  publishedUnderVersionBound?: true;
+}

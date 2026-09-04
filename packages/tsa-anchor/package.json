@@ -1,0 +1,53 @@
+{
+  "name": "noa-tsa-anchor",
+  "version": "0.1.0",
+  "description": "Opt-in independent anchoring for noa-receipt witness anchors: RFC 3161 trusted timestamps from a third-party TSA, plus a witness-quorum monitor that finds signed contradictions in a public anchor pool and emits a proof a third party can re-check offline.",
+  "keywords": [
+    "ai-agent",
+    "governance",
+    "receipt",
+    "hash-chain",
+    "provenance",
+    "rfc3161",
+    "timestamping",
+    "witness",
+    "equivocation",
+    "transparency"
+  ],
+  "homepage": "https://noatrust.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NordenSoft/noa.git",
+    "directory": "packages/tsa-anchor"
+  },
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "bin": {
+    "noa-tsa": "src/cli.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "test": "node --test",
+    "check:tarball": "node ../../scripts/lint-publish-tarball-deps.mjs --dir . --manifest",
+    "prepublishOnly": "npm test && npm run check:tarball"
+  },
+  "dependencies": {
+    "noa-receipt": "file:../.."
+  }
+}

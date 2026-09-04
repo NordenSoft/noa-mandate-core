@@ -1,0 +1,32 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.venv/
+*.tsbuildinfo
+# generated conformance vectors are committed (deterministic); build output is not
+
+# Python
+__pycache__/
+*.pyc
+
+# Scratch and local reproduction artifacts never ship in the public package.
+_*.mjs
+_*.ts
+_*.py
+_*.json
+_*.txt
+_*.sh
+_repro_*
+_probe*
+# Deterministic public test fixture; these are test-only keys, never operational secrets.
+!test/federation/_seeded-keys.ts
+# Per-session tooling state never ships.
+agent-context/
+
+# Local agent scratch — must never be committed to a PUBLIC repo by a stray `git add -A`.
+scratchpad/
+.agents/
+
+# Browser-automation page snapshots (MCP scratch). Never belongs in the PUBLIC kernel repo.
+.playwright-mcp/

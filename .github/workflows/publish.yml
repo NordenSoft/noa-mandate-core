@@ -1,0 +1,21 @@
+name: publish (RELEASE_FROZEN)
+
+# This legacy workflow ID is permanently quarantined. A future release controller must use a new
+# workflow file and earn release authority independently. Manual dispatch exists only to make the
+# fail-closed state observable; it can never build, stage, or publish candidate bytes.
+
+on:
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  release-frozen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Refuse legacy release authority
+        shell: bash
+        run: |
+          echo "::error::RELEASE_FROZEN: publish.yml is quarantined and is not a release authority."
+          exit 1

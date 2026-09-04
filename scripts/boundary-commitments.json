@@ -1,0 +1,41 @@
+{
+  "note": "HMAC-SHA256 commitments over the confidential label list. DIGESTS ONLY — the plaintext list and the key live outside this repository, so this file is not a wordlist. `ngramSizes` is the set of WORD COUNTS present in the list, which is what lets a spaced phrase normalise onto a hyphenated label without generating every n-gram in the tree; it discloses word counts and nothing else. A `#` inside a committed form matches any digit run, so a numbered family is one commitment rather than an unbounded list. `excludedCount` is how many derived names an operator-reviewed exclusion list removed as known-public — a count only, never which.",
+  "alg": "HMAC-SHA256",
+  "keyId": "4885c5be",
+  "refreshedAt": "2026-09-03T21:04:49.798Z",
+  "count": 25,
+  "excludedCount": 1,
+  "ngramSizes": [
+    1,
+    2,
+    3
+  ],
+  "canaryDigest": "47290264dac3694a311ef11a93ca7ad7d03082f0eafc51f438ef2bf7806b0b25",
+  "digests": [
+    "0355edf0234c98f2aff768e22b82e34d4eb5c19af5d0fe36874fd6e444f88123",
+    "04e1bced1e54a512f94690cdd3fc82bbd28c01f602d1c31eb50008702397fbb8",
+    "0d5b30cfb205e334055858382c6905534000eedd7c39efd75bca58c669a00971",
+    "3d450efad45afe9d41a894c37ccd4fcea9374f20c9879c312e1f77723c4aae21",
+    "3f49acc2e1eb0203a0c847a1f0528f8fb469f16c818b4bfcfb3cbdfa73710911",
+    "47290264dac3694a311ef11a93ca7ad7d03082f0eafc51f438ef2bf7806b0b25",
+    "5998135e1fd5b1086a97af1c5ed2fc785167f5659058aa4e60593c795c81dde7",
+    "6c55c255c920f2a5c245aea648d983e52d9df500c8a0bbe3f688fd7da94d3e3f",
+    "6e2269ad3bcab961b5397b675d79043869834df27f1d764d46d2150471ab624b",
+    "7128d499be035bae6feeb39356373d26c039caf18db2397e3ad6e037c7a3f60d",
+    "770662601f158f498319bea0dab7a839b48f51d3a1cb9afc2e17ce43200ad0d9",
+    "787a95fb787e41756bdb0038a9f7afd03a885d7bcaaa51d505a8f844bdbf86a9",
+    "815ccc96230aaced455fe708a102f0b074da27318ed80715d732289cd83305a1",
+    "8a32a9c5ead4c61376c8dc86d9578882ebd853b677bb4a0653675bc9610f9b6c",
+    "99a420cce09335efb2b3758c2bf292c915c56fed0a1701ae530100e916afb811",
+    "ab0133a8b3246bd70baf7b3445db8275886eecaa9155e59ea4801ab19d7db760",
+    "bce92fdd25cea9834b04b3b28df514e797d8418a2e70adf9e00b08375488c2c7",
+    "c6e7da7df8ec9dd835cadc282ab3ecfb03aadec3116c36b641f7015f74a5fb35",
+    "d56ea63053a88bd071bae768b3b993e1bad41da7f6b7be6fc2bbb5f1c62c9431",
+    "da1ed6cc4e31a3bce123f1184298cb34e07e1dffbd9a411923d84559e13d7746",
+    "f0a1b91d89469006bb2da7cd7a6454e561ea4e968cc4de8a97d5812a69933089",
+    "f2d756885405dc4ce3afccf22899416948b60cf421d5875ee7cc18d9b873b63a",
+    "f4e2b32aed617f40446eccb2424a56feef6bf8f6ebfc14845e4ed1c5a5e414e8",
+    "f51b8f80412e9cc9ac25299e224ddc398942ac3a7441b9ac066e0f609d0a7ea4",
+    "f989c105aff6ee4cee485d6d7c6e8b7db5f266379746b5ccf77621737111b046"
+  ]
+}

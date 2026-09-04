@@ -1,0 +1,26 @@
+{
+  "name": "noa-e2e-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Public reference verification and cross-resolver conformance harness for NOA receipt, approval, gate, relay, evidence, and signer packages.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build:deps": "npm --prefix ../signer-core run build && npm --prefix ../.. run build && npm --prefix ../approval-artifacts run build && npm --prefix ../gate run build && npm --prefix ../relay run build && npm --prefix ../evidence run build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "noa-approval-artifacts": "file:../approval-artifacts",
+    "noa-approval-evidence": "file:../evidence",
+    "noa-gate": "file:../gate",
+    "noa-receipt": "file:../..",
+    "noa-relay": "file:../relay",
+    "noa-signer": "file:../signer-core"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.23.11",
+    "typescript": "5.9.3"
+  }
+}

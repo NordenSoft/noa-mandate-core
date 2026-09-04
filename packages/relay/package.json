@@ -1,0 +1,55 @@
+{
+  "name": "noa-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NOA approval Relay — a framework-free reference transport that routes gate-signed holds and encrypted display ciphertext to an approver client and returns approver-signed decisions. The relay does not sign approval artifacts or hold signing keys.",
+  "keywords": [
+    "ai-agent",
+    "governance",
+    "receipt",
+    "approval",
+    "relay",
+    "human-in-the-loop"
+  ],
+  "homepage": "https://noatrust.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NordenSoft/noa.git",
+    "directory": "packages/relay"
+  },
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/src/index.js",
+      "types": "./dist/src/index.d.ts"
+    }
+  },
+  "bin": {
+    "noa-relay": "dist/src/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist/src",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "start": "npm run build && node dist/src/cli.js"
+  },
+  "dependencies": {
+    "@noble/curves": "2.3.0",
+    "noa-signer": "file:../signer-core"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

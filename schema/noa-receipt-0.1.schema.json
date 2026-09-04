@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noatrust.com/schema/noa-receipt-0.1.schema.json",
+  "title": "NOA Receipt v0.1",
+  "description": "Open, offline-verifiable provenance record for an AI-agent action. Params are never carried in raw form — only their hash (paramsHash). Unknown fields are rejected (additionalProperties:false). Caller-supplied identifiers (id, scope.chain, agent.id, agent.model, approval.by, ruleId) are opaque and MUST NOT contain PII; the format cannot enforce that.",
+  "$comment": "STRUCTURAL AID, NOT the full normative validator. JSON Schema cannot express three controls that the normative reference validators (src/schema.ts and impl-py/noa_verify.py) additionally enforce, so a receipt accepted by THIS schema may still be MALFORMED: (1) well-formed Unicode — strings containing lone UTF-16 surrogates are rejected (spec §2, threat-model T7b: surrogate→U+FFFD hash-collision channel); (2) duplicate object keys are rejected by the strict JSON parser (threat-model T8); (3) `ts` and `approval.at` must DENOTE A REAL INSTANT, not merely match the pattern below — month 01-12, the real length of that month in that year (leap years included), hour ≤ 23, minute ≤ 59, second ≤ 60 (60 is a leap second and is ACCEPTED), offset ≤ 23:59. The `pattern` here cannot say that and `format: date-time` is annotation-only in most validators, so `2026-13-45T99:99:99.000Z` passes THIS file and is MALFORMED under every conformant verifier. The four CROSS-FIELD coherence rules (spec §2 'Coherence rules') ARE expressible and are encoded in `allOf` below. For a conformant verdict, run the normative validator, not a generic JSON-Schema check.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["spec", "id", "ts", "scope", "agent", "action", "governance", "chain", "sig"],
+  "allOf": [
+    {
+      "$comment": "R1 — a receipt that names the SANDBOX SIMULATOR as the actor while denying it was a simulation is a statement that can be argued both ways after the fact. ONE-DIRECTIONAL: sandboxed:true with any other principal is legitimate and stays valid.",
+      "if": {
+        "required": ["agent"],
+        "properties": { "agent": { "required": ["principal"], "properties": { "principal": { "const": "SANDBOX_SIM" } } } }
+      },
+      "then": {
+        "required": ["governance"],
+        "properties": { "governance": { "required": ["sandboxed"], "properties": { "sandboxed": { "const": true } } } }
+      }
+    },
+    {
+      "$comment": "R2 — the same contradiction in the OUTCOME rather than the actor: a SIMULATED verdict beside sandboxed:false.",
+      "if": {
+        "required": ["governance"],
+        "properties": { "governance": { "required": ["verdict"], "properties": { "verdict": { "const": "SIMULATED" } } } }
+      },
+      "then": {
+        "properties": { "governance": { "required": ["sandboxed"], "properties": { "sandboxed": { "const": true } } } }
+      }
+    },
+    {
+      "$comment": "R3 — an action declared impossible to undo may not carry the reference used to undo it. rollbackRef absent, or present and null, both satisfy this.",
+      "if": {
+        "required": ["action"],
+        "properties": { "action": { "required": ["reversible"], "properties": { "reversible": { "const": false } } } }
+      },
+      "then": {
+        "properties": { "action": { "properties": { "rollbackRef": { "type": "null" } } } }
+      }
+    },
+    {
+      "$comment": "R4 — a receipt may not assert that the action WAS undone while declaring it could not be.",
+      "if": {
+        "required": ["governance"],
+        "properties": { "governance": { "required": ["verdict"], "properties": { "verdict": { "const": "ROLLED_BACK" } } } }
+      },
+      "then": {
+        "required": ["action"],
+        "properties": { "action": { "required": ["reversible"], "properties": { "reversible": { "const": true } } } }
+      }
+    }
+  ],
+  "properties": {
+    "spec": { "const": "noa.receipt/0.1" },
+    "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "ts": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}[Tt]\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?([Zz]|[+-]\\d{2}:\\d{2})$" },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chain"],
+      "properties": {
+        "tenant": { "type": "string" },
+        "chain": { "type": "string", "minLength": 1 }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "principal"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "model": { "type": ["string", "null"] },
+        "principal": { "enum": ["HUMAN", "SERVICE", "POLICY", "SANDBOX_SIM"] }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "canonical", "riskClass", "paramsHash", "reversible"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "canonical": { "type": "string", "minLength": 1 },
+        "riskClass": { "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL", "IRREVERSIBLE"] },
+        "paramsHash": { "type": "string", "pattern": "^(sha256|hmac-sha256):[0-9a-f]{64}$" },
+        "reversible": { "type": "boolean" },
+        "rollbackRef": { "type": ["string", "null"] }
+      }
+    },
+    "governance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "verdict", "sandboxed"],
+      "properties": {
+        "mode": { "enum": ["off", "shadow", "approvals_on", "on"] },
+        "verdict": {
+          "enum": ["ALLOWED", "BLOCKED", "DEFERRED", "EXECUTED", "FAILED", "ROLLED_BACK", "SIMULATED"]
+        },
+        "ruleId": { "type": ["string", "null"] },
+        "sandboxed": { "type": "boolean" },
+        "approval": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["by", "at"],
+          "properties": {
+            "by": { "type": "string" },
+            "at": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}[Tt]\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?([Zz]|[+-]\\d{2}:\\d{2})$" }
+          }
+        },
+        "compliance": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["policyHash", "readSetHash", "inputsHash"],
+          "properties": {
+            "policyHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "readSetHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "inputsHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "verdict": { "enum": ["ALLOW", "DENY"] }
+          }
+        }
+      }
+    },
+    "chain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "prevHash", "hash"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "prevHash": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$" },
+        "hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "sig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alg", "kid", "value"],
+      "properties": {
+        "alg": { "const": "ed25519" },
+        "kid": { "type": "string", "minLength": 1 },
+        "value": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

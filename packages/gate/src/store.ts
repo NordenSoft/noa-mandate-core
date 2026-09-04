@@ -1,0 +1,150 @@
+/**
+ * NOA Gate — storage abstraction (the AUTHORITATIVE state; the wrapper-local record is only a
+ * fast-path hint, F8a).
+ *
+ * `Store` is an interface so the localhost alpha runs on a hermetic in-memory store while a durable
+ * driver drops in behind the SAME interface later. The gate's grant record here is the single-use
+ * ENFORCER — the UNUSED→RESERVED transition and the one-shot terminal-report lock both live on this
+ * record, never on a client flag.
+ *
+ * ⚠ CORRECTED 2026-07-31 (claim finding C19). This said "the ATOMIC single-use ENFORCER ... the CAS".
+ * The atomicity is real but it is a property of THIS DRIVER, not of the interface: `engine.ts:951`
+ * says so itself — "single-process => the map write IS the atomic step" — and the `Store` interface
+ * below exposes **no compare-and-swap primitive at all** (`get`/`put` only). A durable multi-process
+ * driver implementing this interface faithfully would therefore be NON-ATOMIC by construction, and
+ * the sentence would silently become false at exactly the moment the documented plan is executed.
+ * Adding a CAS method to the interface is the one-way door here; only the driver is deferred.
+ */
+
+import type { AgentRecord, GrantRecord, GrantStatus, HoldRecord, HoldStatus } from "./types.js";
+
+export interface Store {
+  // agents (per-agent API key, F29)
+  putAgent(a: AgentRecord): void;
+  findAgentByApiKeyHash(hash: string): AgentRecord | undefined;
+
+  // holds
+  putHold(h: HoldRecord): void;
+  getHold(id: string): HoldRecord | undefined;
+  getHoldByIdem(agentId: string, idempotencyKey: string): HoldRecord | undefined;
+  listHolds(filter: { status?: HoldStatus; agentId?: string }): HoldRecord[];
+  countPending(agentId: string): number;
+  /** True iff the agent already has an unresolved (PENDING) hold on this chain (D17). */
+  hasPendingOnChain(agentId: string, chain: string): boolean;
+
+  // grants (the atomic single-use record — F8a)
+  putGrant(g: GrantRecord): void;
+  getGrant(grantId: string): GrantRecord | undefined;
+  listGrants(): GrantRecord[];
+
+  // ── THE COMPARE-AND-SWAP PRIMITIVES (S2, 2026-08-13) ──────────────────────────────────────────
+  // The one-way door this file's own header named: without these, "atomic single-use" was a property
+  // of the in-memory DRIVER, not of the interface, and any faithful durable implementation would have
+  // been non-atomic BY CONSTRUCTION. `reserve()` read the status, compared it, then wrote — two
+  // processes both observing UNUSED would both write RESERVED and both return 200, which is two
+  // executions from one human approval.
+  //
+  // Both are shaped so a durable driver expresses them as ONE statement with no transaction:
+  //   UPDATE grants SET status=$next, reserved_at=$at WHERE grant_id=$id AND status=$expected RETURNING *
+  //   UPDATE grants SET status='REPORTED', reported_at=$at WHERE grant_id=$id AND reported_at IS NULL RETURNING *
+  // The WHERE clause IS the compare; the row count IS the verdict. A driver that implements either as
+  // read-then-write has reintroduced the defect these replaced.
+
+  /**
+   * Atomically move a grant from `expected` to `next`, stamping `reservedAt`.
+   * Returns the post-transition record when THIS caller made the move, `null` when it did not —
+   * because the grant is gone, or because its observed status was not `expected`.
+   * A `null` is a LOST RACE, never an error: the caller answers 409, never a second authorization.
+   */
+  claimGrantStatus(grantId: string, expected: GrantStatus, next: GrantStatus, at: number): GrantRecord | null;
+
+  /**
+   * Atomically take the one-shot TERMINAL report lock (F8c), stamping `reportedAt` and moving the
+   * status to REPORTED. Returns the post-transition record when THIS caller took the lock, `null`
+   * when it was already taken. Keyed on `reportedAt IS NULL` rather than on a status, because an
+   * UNKNOWN hint is explicitly NOT terminal and must not consume the lock.
+   */
+  claimGrantReported(grantId: string, at: number): GrantRecord | null;
+}
+
+export class InMemoryStore implements Store {
+  private readonly agents = new Map<string, AgentRecord>();
+  private readonly holds = new Map<string, HoldRecord>();
+  private readonly holdsByIdem = new Map<string, string>();
+  private readonly grants = new Map<string, GrantRecord>();
+
+  putAgent(a: AgentRecord): void {
+    this.agents.set(a.id, a);
+  }
+  findAgentByApiKeyHash(hash: string): AgentRecord | undefined {
+    for (const a of this.agents.values()) if (a.apiKeyHash === hash) return a;
+    return undefined;
+  }
+
+  private idemKey(agentId: string, idempotencyKey: string): string {
+    return `${agentId.length}:${agentId}:${idempotencyKey}`;
+  }
+  putHold(h: HoldRecord): void {
+    this.holds.set(h.id, h);
+    this.holdsByIdem.set(this.idemKey(h.agentId, h.idempotencyKey), h.id);
+  }
+  getHold(id: string): HoldRecord | undefined {
+    return this.holds.get(id);
+  }
+  getHoldByIdem(agentId: string, idempotencyKey: string): HoldRecord | undefined {
+    const id = this.holdsByIdem.get(this.idemKey(agentId, idempotencyKey));
+    return id ? this.holds.get(id) : undefined;
+  }
+  listHolds(filter: { status?: HoldStatus; agentId?: string }): HoldRecord[] {
+    const out: HoldRecord[] = [];
+    for (const h of this.holds.values()) {
+      if (filter.status && h.status !== filter.status) continue;
+      if (filter.agentId && h.agentId !== filter.agentId) continue;
+      out.push(h);
+    }
+    return out;
+  }
+  countPending(agentId: string): number {
+    let n = 0;
+    for (const h of this.holds.values()) if (h.agentId === agentId && h.status === "PENDING") n++;
+    return n;
+  }
+  hasPendingOnChain(agentId: string, chain: string): boolean {
+    for (const h of this.holds.values()) {
+      if (h.agentId === agentId && h.chain === chain && h.status === "PENDING") return true;
+    }
+    return false;
+  }
+
+  putGrant(g: GrantRecord): void {
+    this.grants.set(g.grant.grantId, g);
+  }
+  getGrant(grantId: string): GrantRecord | undefined {
+    return this.grants.get(grantId);
+  }
+  listGrants(): GrantRecord[] {
+    return [...this.grants.values()];
+  }
+
+  // The compare and the swap are one synchronous block with no `await` inside — on a single-threaded
+  // event loop nothing can interleave between them, which is what makes this driver's version atomic.
+  // That is a property of THIS driver and is stated here rather than in the interface, because
+  // writing it in the interface is precisely the mistake this file's header records.
+  claimGrantStatus(grantId: string, expected: GrantStatus, next: GrantStatus, at: number): GrantRecord | null {
+    const rec = this.grants.get(grantId);
+    if (!rec || rec.status !== expected) return null;
+    rec.status = next;
+    rec.reservedAt = at;
+    this.grants.set(grantId, rec);
+    return rec;
+  }
+
+  claimGrantReported(grantId: string, at: number): GrantRecord | null {
+    const rec = this.grants.get(grantId);
+    if (!rec || rec.reportedAt !== null) return null;
+    rec.status = "REPORTED";
+    rec.reportedAt = at;
+    this.grants.set(grantId, rec);
+    return rec;
+  }
+}

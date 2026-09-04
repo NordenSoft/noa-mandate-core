@@ -1,0 +1,24 @@
+{
+  "note": "PUBLIC repositories, per organisation, as the forge itself reports them. This file is safe to publish because every name in it is already public. It exists so the boundary gate can ALLOWLIST the public instead of denylisting the private: a denylist would itself be the disclosure, and would always be one repository behind reality.",
+  "source": "gh repo list <org> --visibility public --json name",
+  "refreshedAt": "2026-08-28T20:53:40.307Z",
+  "orgs": {
+    "NordenSoft": [
+      "Data-Mining-on-Social-Media",
+      "DeepFaceLab",
+      "JAMStack",
+      "NordenSoft",
+      "eyavap",
+      "jamstack.org",
+      "leap-day",
+      "madexpres-shop",
+      "netlify-cms",
+      "noa",
+      "nordensoftnew",
+      "react-native-demo",
+      "react-native-toast-message",
+      "sanity-nextjs-landing-pages",
+      "sanity-nuxt-events"
+    ]
+  }
+}

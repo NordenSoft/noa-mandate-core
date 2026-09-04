@@ -1,0 +1,372 @@
+# NOA Receipt — Specification v0.1
+
+### An open, offline-verifiable format for AI-agent action provenance
+
+> **Status:** v0.1 (2026-06-20). Apache-2.0. This is the normative specification for the open
+> NOA Receipt protocol.
+>
+> **What changed from the early draft (after adversarial security review):** signatures
+> are now **MANDATORY**, the signing-key identity is **bound into the hash** (key-swap
+> defense), **genesis** and **tail-truncation** are defined explicitly, and the
+> canonicalization rules are frozen and integer-only. An unsigned hash chain is just a
+> checksum — it proves nothing against a party that can write the log — so v0.1 requires
+> signatures from the start.
+
+---
+
+## 1. What a NOA Receipt is
+
+A **NOA Receipt** is a signed, hash-chained, append-only record asserting:
+
+> *Agent **A**, acting for principal **P**, attempted action **X** (params hashed to **H**),
+> under governance mode **M**; the verdict was **V**; reversible via **R**; and this record
+> is link-hashed to the previous one (**prevHash**) and signed by key **kid**.*
+
+One action lifecycle emits one or more receipts (proposed → verdict → executed/blocked/
+deferred → approved/rejected → rolled_back). Receipts for one `scope.chain` form a
+**hash-chain**: altering any past receipt breaks every later hash.
+
+**What it proves / does not prove (be precise):**
+- ✅ Proves: *this exact record was produced under these rules and signed by this key, and
+  the sequence has not been edited in the middle.*
+- ❌ Does NOT prove: that the real-world action actually succeeded, that it was *wise*, that
+  the agent didn't hallucinate the intent, or (without a checkpoint, §6) that recent records
+  weren't **deleted from the tail**. See [THREAT-MODEL.md](../THREAT-MODEL.md).
+
+---
+
+## 2. Receipt object
+
+Canonicalized per **RFC 8785 (JCS)** — with NOA hardening (§4) — before hashing/signing.
+
+```json
+{
+  "spec": "noa.receipt/0.1",
+  "id": "rcpt_01J...",
+  "ts": "2026-06-20T07:30:54.123Z",
+  "scope":   { "tenant": "store_or_org", "chain": "chain-partition-key" },
+  "agent":   { "id": "agent-handle", "model": "vendor/model|null", "principal": "HUMAN|SERVICE|POLICY|SANDBOX_SIM" },
+  "action":  { "id": "payment.refund", "canonical": "payment.refund",
+               "riskClass": "LOW|MEDIUM|HIGH|CRITICAL|IRREVERSIBLE",
+               "paramsHash": "sha256:…|hmac-sha256:…", "reversible": false, "rollbackRef": "snap_…|null" },
+  "governance": { "mode": "off|shadow|approvals_on|on",
+                  "verdict": "ALLOWED|BLOCKED|DEFERRED|EXECUTED|FAILED|ROLLED_BACK|SIMULATED",
+                  "ruleId": "…|null", "approval": { "by": "…", "at": "…" } , "sandboxed": false },
+  "chain":   { "seq": 42, "prevHash": "sha256:…|null", "hash": "sha256:…" },
+  "sig":     { "alg": "ed25519", "kid": "noa-key-2026", "value": "base64…" }
+}
+```
+
+### Field rules
+
+- **Mandatory:** `spec, id, ts, scope.chain, agent.id, agent.principal,
+  action.{id,canonical,riskClass,paramsHash,reversible}, governance.{mode,verdict,sandboxed},
+  chain.{seq,prevHash,hash}, sig.{alg,kid,value}`.
+- **Unknown fields are REJECTED** at every level (`additionalProperties:false`). This is a
+  security control: it closes the "smuggle PII / data in an unrecognized field" channel and
+  keeps the hashed surface exactly the documented surface.
+- **PII-free producer obligation** (the format cannot enforce this — see THREAT-MODEL T9):
+  producers MUST NOT embed raw params, customer data, secrets, or free text — only `paramsHash`
+  and enum/id fields. Unknown fields are rejected, but PII placed in a known opaque field is not.
+- **Integer-only:** all numbers are JSON integers in the safe range. Floats/exponents are
+  rejected (removes number-serialization ambiguity entirely).
+- **`paramsHash`** is `sha256:<hex>` or, recommended for low-entropy params,
+  `hmac-sha256:<hex>` with a tenant-scoped key (plain SHA-256 of an amount/id/bool is
+  brute-forceable and identical across tenants → correlation; see THREAT-MODEL §params).
+- **`ts` and `approval.at` MUST denote a real instant**, not merely match the RFC 3339 shape.
+  Month `01`-`12`; day within the real length of that month in that year (leap years included);
+  hour ≤ `23`; minute ≤ `59`; second ≤ `60`; offset ≤ `23:59`. **Second `60` is ACCEPTED** — a leap
+  second is a real instant, and refusing one would refuse a truthful receipt; which UTC days carry
+  one is an IERS table, not a property of the string, so the range is what a verifier enforces.
+  `2026-13-45T99:99:99.000Z` matches the pattern and is **`MALFORMED`**.
+
+### Coherence rules (cross-field)
+
+Every rule above reads ONE field. A receipt can satisfy all of them and still be a statement that
+argues both ways — `agent.principal: "SANDBOX_SIM"` (the actor was the sandbox simulator) beside
+`governance.sandboxed: false` (this really happened), on a `CRITICAL` transfer, signed and
+chain-valid. A verifier MUST reject these as **`MALFORMED`**:
+
+| | Rule |
+|---|---|
+| **R1** | `agent.principal == "SANDBOX_SIM"` REQUIRES `governance.sandboxed == true` |
+| **R2** | `governance.verdict == "SIMULATED"` REQUIRES `governance.sandboxed == true` |
+| **R3** | `action.reversible == false` REQUIRES `action.rollbackRef` absent or `null` |
+| **R4** | `governance.verdict == "ROLLED_BACK"` REQUIRES `action.reversible == true` |
+
+Each is **one-directional**, and the converse is legitimate: a `SERVICE` agent may run inside a
+sandbox (`sandboxed: true` with any principal is valid), and a reversible action need not carry a
+`rollbackRef`.
+
+These are decidable **with no key material at all** — a reader holding only the bytes can see the
+contradiction — which is why they belong beside the unknown-field rule rather than in the signature
+path. The same placement means a conformant *producer* cannot sign one either. R1-R4 are encoded in
+[`schema/noa-receipt-0.1.schema.json`](../schema/noa-receipt-0.1.schema.json) `allOf`; the
+real-instant rule above is **not** expressible in JSON Schema and is enforced only by the normative
+validators. Pinned by `conformance/vectors/attack/coherence-*.json` (reject) and
+`conformance/vectors/coherence-*.json` + `conformance/vectors/ts-leap-second.json` (must stay valid).
+
+### Hashing rule (frozen)
+
+```
+hash = sha256( JCS( receipt WITHOUT chain.hash AND WITHOUT sig.value ) )
+```
+
+`sig.alg` and `sig.kid` **are inside** the hashed bytes. Therefore an attacker cannot strip
+the signature, swap to another key, and re-sign: changing `sig.kid` changes the hash, which
+breaks linkage. `chain.hash = "sha256:" + hash`.
+
+The **signature** is Ed25519 over a **domain-separated preimage**, not the bare digest:
+
+```
+sig.value = Ed25519_sign( privkey,  "NOA-Receipt-v0.1-sig:" ++ sha256(JCS(receipt \ chain.hash \ sig.value)) )
+```
+
+The domain tag (`NOA-Checkpoint-v0.1-sig:` for checkpoints) prevents cross-protocol signature
+reuse — a signature over a 32-byte value in another context can never be replayed as a receipt
+signature. Well-formed Unicode is required: **unpaired UTF-16 surrogates are rejected** (they
+would collapse to U+FFFD at the UTF-8 hashing step, a forgery channel).
+
+---
+
+## 3. Hash-chain & key-pinning
+
+For each `scope.chain`, receipts form an append-only chain:
+
+```
+R0(seq=0, prevHash=null) -> R1(prevHash=H(R0)) -> R2(prevHash=H(R1)) -> …
+```
+
+- **Genesis** is `seq == 0` with `prevHash == null`. A non-null genesis prevHash is rejected.
+  The genesis receipt is signed; obtain its key out-of-band (the keyring is the trust root).
+- **Key-pinning (continuity):** the first receipt for a given `agent.id` pins its `sig.kid`. A
+  later receipt for the same `agent.id` under a **different** `kid` is rejected — a mid-chain key
+  swap cannot pass even if the attacker holds a valid keypair. (Pinning is per `agent.id`; one
+  `kid` MAY be shared across multiple `agent.id`s by design. This is key *continuity* — identity
+  authenticity comes from the out-of-band keyring, not from first-sight.)
+- Editing any `Ri` changes `H(Ri)` → mismatches `R(i+1).prevHash`. **Tamper-evident.**
+
+---
+
+## 4. Canonicalization (NOA-hardened JCS)
+
+RFC 8785 with these frozen, test-pinned rules (see `conformance/`):
+
+1. Object keys sorted by UTF-16 code units.
+2. No whitespace.
+3. Strings: escape `" \ \b \f \n \r \t` and control chars `< U+0020` as `\u00XX`; **all other
+   code points emitted literally as UTF-8** (no `\u` escaping of non-control chars, **no
+   Unicode normalization** — inputs MUST already be NFC).
+4. Numbers: **integers only**, safe range; `-0` serializes as `0`; floats/NaN/Infinity/bigint
+   rejected.
+5. On parse (verifier side): **duplicate object keys are rejected** (no silent last-wins);
+   `__proto__`/`constructor`/`prototype` keys rejected; depth and size bounded.
+
+Conformance test vectors pin the exact bytes so a Rust producer and a TypeScript verifier
+cannot disagree.
+
+---
+
+## 5. Verification (the open verifier)
+
+Anyone — operator, auditor, receiving service, regulator — verifies a chain **offline**, no
+NOA service, via `noa verify` (or the library `verifyChain`):
+
+```
+verify(receipts, { keyring?, checkpoint?, identityManifest? }):
+  1. structural validate each receipt (strict; reject unknown fields;   -> else MALFORMED
+     enforce the §2 coherence rules R1-R4 and the real-instant `ts` rule
+     — all decidable with no key material)
+  2. single chain partition; seqs contiguous 0..n-1, unique             -> else TAMPERED
+  for each receipt in seq order:
+  3. recompute hash = sha256(JCS(receipt \ chain.hash \ sig.value)); assert == chain.hash
+  4. pin sig.kid per agent.id (reject mid-chain key swap)
+  5. signatures, by keyring state:
+       - keyring supplied AND kid known   -> ed25519_verify over the domain-separated preimage
+                                             (curve-PINNED: a non-Ed25519 key is rejected, no alg-confusion)
+       - keyring supplied AND kid UNKNOWN -> TAMPERED (no silent TOFU on attacker input)
+       - no keyring at all                -> UNVERIFIED (cannot authenticate; never VALID)
+  5b. identity binding (only if identityManifest supplied):
+       - (agent.id, sig.kid) authorized in the manifest -> ok
+       - else                                           -> UNTRUSTED (cross-agent impersonation:
+                                                           authenticated key, but NOT authorized for
+                                                           this agent.id). No manifest => kid-level
+                                                           attribution + an explicit warning.
+  6. linkage: seq 0 => prevHash null; else prevHash == prev.hash && seq == prev.seq+1
+  7. if checkpoint: assert head matches checkpoint (tail-truncation); and (if identityManifest
+       supplied) the checkpoint sig.kid MUST be authorized for the GENESIS agent.id (the chain
+       OPENER, seq 0) — NOT the mutable head — else UNTRUSTED (closes the re-heading attack); warn
+       when the chain has >1 agent.id (opener-scoped completeness)
+  -> VALID | UNVERIFIED | UNTRUSTED | TAMPERED | MALFORMED
+```
+
+CLI exit codes: `0` VALID · `1` UNVERIFIED (no keyring supplied) · `2` TAMPERED · `3` MALFORMED
+· `4` usage · `5` UNTRUSTED (identity binding failed). **CI rule: treat any non-zero exit as failure** (do not special-case `==2`). Honest
+by design: without a keyring, signatures are reported UNVERIFIED, never VALID; without a
+checkpoint, the verifier emits an explicit tail-truncation warning; and it always emits a
+fork/equivocation caveat (an offline verifier sees only the branch it was given) plus a
+non-monotonic-timestamp warning if `ts` goes backwards.
+
+**Public-key strictness (interop-normative).** A conformant verifier MUST decode the Ed25519 public
+key `A` strictly: it **MUST reject** the 8 canonical small-order point encodings (the torsion subgroup
+of order dividing 8) and **MUST reject** any non-canonical encoding with `y ≥ q`. A verifier whose library admits low-order keys
+(e.g. OpenSSL) otherwise accepts low-order keys that a strict RFC-8032 verifier rejects, splitting the
+verdict on identical signed bytes (a legitimate signing key is never a low-order point, so this rejects
+no genuine key). This is the minimal pin for cross-impl agreement on `A` — **not** full ZIP-215
+semantics; the signature's `R` point needs no separate blocklist because it is bound by the verification
+equation, which both implementations enforce. The cross-impl conformance suite pins these vectors.
+
+---
+
+## 6. Tail-truncation & checkpoints
+
+`prevHash` catches mid-chain edits but **not** deletion of the most-recent receipts (an
+attacker drops the tail; the prefix still validates). A signed **checkpoint** closes this:
+
+```json
+{ "spec": "noa.checkpoint/0.1", "chain": "…", "highestSeq": 42, "headHash": "sha256:…",
+  "ts": "…", "sig": { "alg": "ed25519", "kid": "…", "value": "base64…" } }
+```
+
+A verifier given a checkpoint asserts the chain head equals `{highestSeq, headHash}` →
+truncation/extension is detected. **The checkpoint signature is held to the same trust root as
+receipts**: with a keyring supplied, a checkpoint signed by an unknown `kid` (or with a bad
+signature) is `TAMPERED`, and `tailChecked` is set true **only** for an authenticated
+checkpoint — otherwise an attacker could drop the tail and forge a checkpoint over the
+truncated head with their own key. **Identity-bound (when an `identityManifest` is supplied):**
+the checkpoint is authorized by the chain **OPENER** — its `sig.kid` MUST be authorized for the
+**GENESIS** receipt's `agent.id` (the `seq == 0` receipt that opened the chain), else `UNTRUSTED`.
+**The authority is the opener, NOT the mutable head** — this is deliberate: a `scope.chain` is a
+*shared* partition with no opener/ownership binding, so any co-trusted key holder can APPEND its own
+receipt onto a victim's prefix, become the head, drop the victim's tail, and forge a checkpoint over
+its OWN head (the **re-heading** attack). Binding to the head would then check the
+attacker's checkpoint against the attacker's OWN authorized `agent.id` → `VALID` while the victim's
+tail is erased. The opener cannot be re-written by an appended tail, so genesis-binding rejects the
+re-heading checkpoint as `UNTRUSTED` and strictly subsumes the legitimate opener-checkpoint case
+(when the opener also heads, genesis == head). **Multi-agent caveat:** the checkpoint completeness it
+proves is *opener-scoped*. When a chain holds more than one distinct `agent.id`, the verifier **warns**
+that a co-agent's tail is not separately certified by the opener's checkpoint. **Residual (needs the
+v1.0 external anchor):** the opener itself dropping a co-agent's tail, and the no-`identityManifest`
+case (kid-level only — any keyring-trusted key can forge a checkpoint over any head). Without a
+checkpoint the verifier **warns** that
+tail-truncation is undetectable offline. Stronger completeness claims need separately trusted,
+externally obtained evidence; this specification does not provide it.
+
+---
+
+## 7. Current scope and non-goals
+
+- **v0.1:** format + hardened JCS + mandatory Ed25519 + key-pinning + offline verifier
+  + checkpoints + JSON-Schema + conformance suite.
+- **Future revisions:** require their own normative text, compatibility rules, vectors, and release
+  evidence. This document does not commit an implementation or governance roadmap.
+- **Non-goals:** does NOT detect hallucination; does NOT undo irreversible real-world
+  effects (it *gates before* them); does NOT replace your model or your framework.
+
+---
+
+*Reference implementation + conformance vectors: this repository (`src/`, `conformance/`).
+Companion: [README](../README.md) · [THREAT-MODEL](../THREAT-MODEL.md) · [SECURITY](../SECURITY.md).*
+
+---
+
+## 8. The universal envelope — COSE_Sign1 / SCITT profile
+
+A NOA Receipt is also expressible as a **COSE_Sign1** (RFC 9052) so it verifies in **any** conforming
+COSE implementation — every language, hardware (TPM/FIDO), cloud KMS, RATS/EAT — **without NOA's code**.
+That is what makes it universal rather than bespoke.
+
+- **Algorithm:** Ed25519 (COSE alg `-19`, RFC 9864). The protected header alg (label `1`) MUST be `-19`;
+  a verifier MUST reject any other `alg` to prevent algorithm confusion. We use the curve-specific `-19`
+  rather than the generic EdDSA (`-8`, RFC 9053, deprecated Oct-2025): `-8` also admits Ed448, so pinning
+  `-19` closes the Ed448 algorithm-confusion surface at the alg-id layer (complementing the node:crypto
+  curve-type key pin). NOA *issues* the two-member protected header `{1: -19, 4: kid}` — CBOR leading
+  bytes `a2 01 32 04 …`, the `…` being the kid byte string, so the header's length follows the kid's. On the
+  *verify* side, per RFC 9052 §3.1, additional registered/non-critical protected headers (e.g. `kid`,
+  `content type`, `CWT_Claims`) are accepted and any unknown header NOT listed in `crit` (label `2`) is
+  ignored — so a draft-conformant peer that carries `kid`/`crit`/extra headers in the protected bucket
+  still verifies; only the `alg` pin and `crit`-processability are enforced (a critical header the
+  verifier cannot process is rejected, fail-closed).
+- **kid:** NOA *emits* `kid` (label `4`) in the **protected** (signed) header, so the signature covers
+  the emitter's identifier and it cannot be swapped for a same-length victim kid; the unprotected
+  bucket is emitted empty. A verifier resolves the kid against its keyring from EITHER bucket,
+  preferring the protected (signed) copy when present. An outer kid taken from the *unprotected*
+  bucket MAY resolve a key and MUST NOT be reported as an identity.
+- **TWO SIGNATURES, TWO CLAIMS (normative MUST — draft §6):** an enveloped receipt carries two
+  identifiers and they answer different questions. The **native** `sig.kid` inside the payload
+  attributes the **agent**: it is the key that signed the receipt into its chain and the identifier
+  `agent.id` makes a claim about. The **outer** COSE kid attributes the party that **emitted the
+  envelope** — an issuer submitting its own receipt, or a relay presenting someone else's. A verifier
+  supplied an identity manifest MUST check it against the **native** `sig.kid`; MUST NOT let an
+  authorized outer kid satisfy the agent check (an envelope signed by a key that happens to be
+  authorized for `agent.id` says nothing about who signed the receipt inside it); MUST NOT reject a
+  receipt solely because its outer signer is not one of the agent's keys (a relay is a legitimate
+  presentation); and MUST report the two results separately. This profile defines no authorization
+  list for the emitter: the manifest binds agents to keys, not envelopes to emitters.
+  `receiptFromCose` therefore verifies **both** signatures — `ok:true` never means one of the two —
+  and returns `nativeKid`/`agentClaim` beside `envelopeKid`/`envelopeClaim`. Vectors for both
+  directions: `conformance/cose-attribution/vectors.json`.
+- **Payload:** the JCS-canonical NOA receipt bytes (§2/§4). So a standard COSE verify authenticates the
+  receipt; a NOA-native consumer then parses the payload and runs the hash-chain / policy checks (§3–§6).
+- **Sig_structure:** the RFC 9052 `["Signature1", protected, external_aad(empty), payload]`, Ed25519-signed.
+- **CBOR:** core-deterministic (RFC 8949 §4.2) — shortest-form heads, map keys sorted by encoded bytes.
+
+**SCITT:** the same COSE_Sign1 is a **SCITT Signed Statement**. Registering it in a SCITT transparency
+log yields a registration **receipt** + an append-only, witness-cosigned anchor — which supplies the
+external non-equivocation / tail-truncation defense the self-signed hash-chain (§6) cannot give alone.
+
+**Conformance:** NOA ships its own zero-dependency COSE_Sign1 producer/verifier. The conformance suite
+also checks its output with off-the-shelf CBOR and Ed25519 libraries. This demonstrates compatibility
+for the covered vectors; it does not prove universal interoperability or organizational independence.
+
+---
+
+## 9. L2 policy-compliance (optional, on-receipt)
+
+A receipt MAY commit an `governance.compliance` block binding the decision to the exact policy + the
+exact recorded inputs WITHOUT carrying raw inputs (which may be PII) — only their hashes:
+
+```
+"governance": { …, "compliance": {
+  "policyHash":   "sha256:…",   // JCS-canonical policy identity
+  "readSetHash":  "sha256:…",   // the policy's closed input read-set
+  "inputsHash":   "sha256:…",   // JCS-canonical recorded decision inputs (hash only — no raw PII)
+  "verdict":      "ALLOW|DENY"  // OPTIONAL: the recorded decision (re-run at commit time)
+}}
+```
+
+`verifyReceiptCompliance(receipt, policy, inputs)` is the OFFLINE L2 proof: given the policy + the
+recorded inputs out-of-band, it confirms the three committed hashes authenticate exactly that policy +
+those inputs, then **re-runs the deterministic evaluator** to reproduce the verdict. When the commitment
+also records a `verdict`, the verifier **REQUIRES the re-run verdict to equal the recorded one** — so a
+receipt that commits inputs evaluating to DENY while recording ALLOW is rejected (`ok:false`). It is
+fail-closed (any hash mismatch / verdict mismatch / non-canonicalizable input ⇒ `ok:false`) and never
+throws. A substituted policy (policyHash mismatch — anti policy-swap) or substituted inputs (inputsHash
+mismatch) is rejected. The `verdict` field is OPTIONAL and additive: a commitment without it stays
+backward-compatible (no reconciliation; the verifier just returns the re-run verdict).
+
+**CARRIER AUTHENTICITY (normative MUST):** the L2 check operates on the receipt's `governance.compliance`
+block, which is attacker-mutable on a NON-authentic receipt — so by itself it does NOT establish that the
+receipt is genuine. A verifier MUST authenticate the carrier before trusting an L2 `ok:true`, by EITHER
+passing the keyring to `verifyReceiptCompliance(receipt, policy, inputs, { keyring })` (it then verifies the
+carrier's own `chain.hash` + Ed25519 signature first; a non-authentic carrier ⇒ `ok:false`) OR calling
+`verifyChain([...], { keyring })` and requiring `VALID` first. Reporting "compliant" off an un-authenticated
+carrier is a conformance violation.
+
+**ATTRIBUTION — KID-LEVEL vs AGENT-LEVEL:** `{ keyring }` carrier-auth is *kid-level* — it
+proves "a keyring-trusted key signed this carrier", NOT "THIS `agent.id` signed it". In a multi-key keyring a
+co-trusted key can sign a receipt claiming `agent.id=victim` and still pass carrier-auth, which is exactly the
+cross-agent impersonation `verifyChain` rejects as `UNTRUSTED` *only* when also given an identityManifest. To
+bind WHICH agent, pass `verifyReceiptCompliance(receipt, policy, inputs, { keyring, identityManifest })`: after
+carrier-auth, an unauthorized `(agent.id, sig.kid)` pairing ⇒ `ok:false` (mirroring verify.ts §5 / the
+`UNTRUSTED` verdict). Without an identityManifest, L2 attribution stays kid-level.
+
+**Honesty razor (normative):** this proves *"policy P, re-run over the RECORDED inputs I, yields verdict
+V, and V equals the decision the receipt recorded, on an authenticated carrier"* — it is
+substitution-resistant (a receipt cannot commit DENY-inputs while claiming ALLOW), but it is NOT proof the
+policy was in force at decision time, nor that I is true or complete, nor that P is a *good* rule, nor that
+the recorded inputs reflect external ground truth (the oracle/input-authenticity limit — a lying agent can
+emit a fully-valid receipt over inputs it fabricated). Carrier-auth via `{ keyring }` alone is *kid-level*:
+it does NOT prove THIS `agent.id` signed — pass `{ keyring, identityManifest }` to bind the signer to the
+agent (see "ATTRIBUTION" above). The reference policy DSL is integer-only / pure-logic; policies using
+non-deterministic elements are out of scope for replay.
