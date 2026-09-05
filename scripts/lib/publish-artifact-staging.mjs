@@ -1652,10 +1652,16 @@ function verifyPackedManifest(parsed, expected) {
   }
 }
 
-function runSurfaceLinter(tarballPath, linter = SURFACE_LINTER, publicRepos) {
+function runSurfaceLinter(tarballPath, linter = SURFACE_LINTER, publicRepos, sourceRoot) {
   assertRealFile(linter, "published-surface linter");
   assertRealFile(publicRepos, "published-artifact public repository policy");
-  const result = runCommand(process.execPath, [linter, "--tarball", tarballPath, "--public-repos", publicRepos], {
+  assertRealDirectory(sourceRoot, "published-surface exact Git source root");
+  const result = runCommand(process.execPath, [
+    linter,
+    "--tarball", tarballPath,
+    "--public-repos", publicRepos,
+    "--source-root", sourceRoot,
+  ], {
     allowFailure: true,
     encoding: "utf8",
     env: {
@@ -2051,6 +2057,7 @@ function verifyCandidateSetBound(
     gitRef,
     gitSource,
     independentBuildOutputs,
+    linterSourceRoot,
     offlineCache,
     ownedOfflineCache,
     repoRoot = DEFAULT_REPO_ROOT,
@@ -2096,6 +2103,10 @@ function verifyCandidateSetBound(
     fail("candidate manifest contains zero packages");
   }
   const bindingSource = gitSource ?? loadGitSource(repoRoot, gitRef);
+  if (typeof linterSourceRoot !== "string" || linterSourceRoot === "") {
+    fail("candidate verification requires a controller-materialized exact Git source root for published-surface citations");
+  }
+  verifyMaterializedGitSource(bindingSource, linterSourceRoot);
   const planned = verifyGitBinding(manifest, bindingSource, policy);
   const plannedByPath = new Map(planned.map((entry) => [entry.packagePath, entry]));
   const policyByPath = new Map(policy.packages.map((entry) => [entry.packagePath, entry]));
@@ -2217,7 +2228,12 @@ function verifyCandidateSetBound(
         fail(`candidate ${entry.filename} file is not bound to Git or the complete build census: ${item.path}`);
       }
     }
-    const observedLinterSha256 = runSurfaceLinter(tarballPath, controller.linter, controller.publicRepos);
+    const observedLinterSha256 = runSurfaceLinter(
+      tarballPath,
+      controller.linter,
+      controller.publicRepos,
+      linterSourceRoot,
+    );
     if (entry.surfaceLinterSha256 !== linterSha256 || observedLinterSha256 !== linterSha256) {
       fail(`candidate ${entry.filename} linter binding does not match the executing linter`);
     }
@@ -2239,6 +2255,7 @@ function verifyCandidateSetBound(
   if (!label.includes(CANDIDATE_STATUS) || !label.includes("not authorized")) {
     fail("candidate output label is ambiguous");
   }
+  verifyMaterializedGitSource(bindingSource, linterSourceRoot);
   return manifest;
 }
 
@@ -2252,7 +2269,15 @@ export function verifyCandidateSet(output, options = {}) {
   const gitSource = loadGitSource(repoRoot, gitRef);
   return withOwnedScratch(join(tmpdir(), "noa-publish-artifact-controller-"), "exact Git controller scratch", (workRoot) => {
     const controller = materializeExactController(gitSource, workRoot);
-    return verifyCandidateSetBound(output, { gitSource, offlineCache, repoRoot }, loadPublishArtifactPolicy(controller.policy), controller);
+    const linterSourceRoot = join(workRoot, "exact-git-source");
+    materializeGitSource(gitSource, linterSourceRoot);
+    makeReadOnly(linterSourceRoot);
+    return verifyCandidateSetBound(
+      output,
+      { gitSource, linterSourceRoot, offlineCache, repoRoot },
+      loadPublishArtifactPolicy(controller.policy),
+      controller,
+    );
   });
 }
 
@@ -2262,7 +2287,13 @@ export function verifyCandidateSetForSelftest(output, options, policy) {
   if (!Array.isArray(options?.independentBuildOutputs)) {
     fail("selftest candidate verification requires independently supplied build-output rows");
   }
-  return verifyCandidateSetBound(output, options, policy);
+  if (!options.gitSource) fail("selftest candidate verification requires an exact Git source fixture");
+  return withOwnedScratch(join(tmpdir(), "noa-publish-artifact-selftest-source-"), "selftest exact Git source scratch", (workRoot) => {
+    const linterSourceRoot = join(workRoot, "exact-git-source");
+    materializeGitSource(options.gitSource, linterSourceRoot);
+    makeReadOnly(linterSourceRoot);
+    return verifyCandidateSetBound(output, { ...options, linterSourceRoot }, policy);
+  });
 }
 
 function assertFrozenRealTree(root) {
@@ -2414,6 +2445,9 @@ export function stagePublishArtifacts({
     const inventory = derivePackageInventory(gitSource);
     const plannedPackages = planReleaseManifests(inventory);
     enforcePolicyPackageSet(plannedPackages, policy, gitSource);
+    const linterSourceRoot = join(workRoot, "exact-git-source");
+    materializeGitSource(gitSource, linterSourceRoot);
+    makeReadOnly(linterSourceRoot);
     const finalCandidate = join(finalScratch, "candidate");
     const offlineCacheState = offlineCache === undefined
       ? undefined
@@ -2489,7 +2523,12 @@ export function stagePublishArtifacts({
           policyEntry.pathSetSha256 !== pathSetSha256) {
         fail(`packer path set disagrees with policy for ${entry.name}`);
       }
-      const surfaceLinterSha256 = runSurfaceLinter(sourceTarball, controller.linter, controller.publicRepos);
+      const surfaceLinterSha256 = runSurfaceLinter(
+        sourceTarball,
+        controller.linter,
+        controller.publicRepos,
+        linterSourceRoot,
+      );
       const destinationTarball = join(finalCandidate, entry.filename);
       copyFileSync(sourceTarball, destinationTarball, COPYFILE_EXCL);
       const copied = readSafeNpmTarball(destinationTarball);
@@ -2569,14 +2608,14 @@ export function stagePublishArtifacts({
     );
     verifyCandidateSetBound(
       finalCandidate,
-      { gitSource, independentBuildOutputs: buildOutputs, ownedOfflineCache: offlineCacheState },
+      { gitSource, independentBuildOutputs: buildOutputs, linterSourceRoot, ownedOfflineCache: offlineCacheState },
       policy,
       controller,
     );
     materializeCandidateOutput(finalCandidate, resolvedOutput, (materializedOutput) => {
       verifyCandidateSetBound(
         materializedOutput,
-        { gitSource, independentBuildOutputs: buildOutputs, ownedOfflineCache: offlineCacheState },
+        { gitSource, independentBuildOutputs: buildOutputs, linterSourceRoot, ownedOfflineCache: offlineCacheState },
         policy,
         controller,
       );

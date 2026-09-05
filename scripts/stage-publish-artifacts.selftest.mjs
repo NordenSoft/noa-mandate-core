@@ -864,10 +864,58 @@ try {
     assert.equal(selftest.status, 0, `${selftest.stdout}${selftest.stderr}`);
     const tarball = join(root, "controller-graph.tgz");
     createTarball(tarball, minimalPackageEntries());
-    const clean = spawnSync(process.execPath, [controller.linter, "--tarball", tarball, "--public-repos", controller.publicRepos], {
+    const missingSourceRoot = spawnSync(
+      process.execPath,
+      [controller.linter, "--tarball", tarball, "--public-repos", controller.publicRepos],
+      { encoding: "utf8" },
+    );
+    assert.equal(missingSourceRoot.status, 2, `${missingSourceRoot.stdout}${missingSourceRoot.stderr}`);
+    assert.match(missingSourceRoot.stderr, /requires the controller-materialized exact --source-root Git tree/u);
+    const clean = spawnSync(process.execPath, [
+      controller.linter,
+      "--tarball", tarball,
+      "--public-repos", controller.publicRepos,
+      "--source-root", REPO_ROOT,
+    ], {
       encoding: "utf8",
     });
     assert.equal(clean.status, 0, `${clean.stdout}${clean.stderr}`);
+
+    const anchorTarball = join(root, "controller-source-anchor.tgz");
+    createTarball(anchorTarball, minimalPackageEntries([{
+      content: "The snapshot is atomic (`fixtureAtomicSnapshot`).\n",
+      path: "package/anchored-k6.md",
+    }]));
+    const absentAnchorRoot = join(root, "absent-anchor-source");
+    mkdirSync(absentAnchorRoot);
+    const unresolvedAnchor = spawnSync(process.execPath, [
+      controller.linter,
+      "--tarball", anchorTarball,
+      "--public-repos", controller.publicRepos,
+      "--source-root", absentAnchorRoot,
+    ], { encoding: "utf8" });
+    assert.equal(unresolvedAnchor.status, 1, `${unresolvedAnchor.stdout}${unresolvedAnchor.stderr}`);
+    assert.match(unresolvedAnchor.stderr, /\[K6\] atomic \(unanchored\)/u);
+    const exactAnchorRoot = join(root, "exact-anchor-source");
+    mkdirSync(join(exactAnchorRoot, "src"), { recursive: true });
+    writeFileSync(join(exactAnchorRoot, "src", "fixture.ts"), "export function fixtureAtomicSnapshot() {}\n");
+    const resolvedAnchor = spawnSync(process.execPath, [
+      controller.linter,
+      "--tarball", anchorTarball,
+      "--public-repos", controller.publicRepos,
+      "--source-root", exactAnchorRoot,
+    ], { encoding: "utf8" });
+    assert.equal(resolvedAnchor.status, 0, `${resolvedAnchor.stdout}${resolvedAnchor.stderr}`);
+    const linkedAnchorRoot = join(root, "linked-anchor-source");
+    symlinkSync(exactAnchorRoot, linkedAnchorRoot);
+    const linkedAnchor = spawnSync(process.execPath, [
+      controller.linter,
+      "--tarball", anchorTarball,
+      "--public-repos", controller.publicRepos,
+      "--source-root", linkedAnchorRoot,
+    ], { encoding: "utf8" });
+    assert.equal(linkedAnchor.status, 2, `${linkedAnchor.stdout}${linkedAnchor.stderr}`);
+    assert.match(linkedAnchor.stderr, /must name one real directory, not a link or special entry/u);
 
     const diagnosticTarball = join(root, "controller-diagnostic-path.tgz");
     const syntheticHiddenCoordinate = "https://github.com/exampleorg/hidden-one";
@@ -881,7 +929,12 @@ try {
       content: `All comparisons are constant-time ${syntheticHiddenCoordinate}\n`,
       path: "package/diagnostic-k6.md",
     }]));
-    const diagnostic = spawnSync(process.execPath, [controller.linter, "--tarball", diagnosticTarball, "--public-repos", controller.publicRepos], {
+    const diagnostic = spawnSync(process.execPath, [
+      controller.linter,
+      "--tarball", diagnosticTarball,
+      "--public-repos", controller.publicRepos,
+      "--source-root", REPO_ROOT,
+    ], {
       encoding: "utf8",
     });
     assert.equal(diagnostic.status, 1, `${diagnostic.stdout}${diagnostic.stderr}`);
@@ -904,7 +957,12 @@ try {
     tarString(invalidPathHeader, 0, 100, `package/../${syntheticHiddenCoordinate}`);
     rewriteTarChecksum(invalidPathHeader);
     writeFileSync(invalidPathTarball, canonicalGzip(invalidPathRaw));
-    const invalidPath = spawnSync(process.execPath, [controller.linter, "--tarball", invalidPathTarball, "--public-repos", controller.publicRepos], {
+    const invalidPath = spawnSync(process.execPath, [
+      controller.linter,
+      "--tarball", invalidPathTarball,
+      "--public-repos", controller.publicRepos,
+      "--source-root", REPO_ROOT,
+    ], {
       encoding: "utf8",
     });
     assert.equal(invalidPath.status, 2, `${invalidPath.stdout}${invalidPath.stderr}`);
@@ -920,7 +978,12 @@ try {
         withGzipOptionalMetadata(canonicalGzip(Buffer.alloc(0)), 0x10, syntheticHiddenCoordinate),
       ]),
     );
-    const appendedMember = spawnSync(process.execPath, [controller.linter, "--tarball", appendedMemberTarball, "--public-repos", controller.publicRepos], {
+    const appendedMember = spawnSync(process.execPath, [
+      controller.linter,
+      "--tarball", appendedMemberTarball,
+      "--public-repos", controller.publicRepos,
+      "--source-root", REPO_ROOT,
+    ], {
       encoding: "utf8",
     });
     assert.equal(appendedMember.status, 2, `${appendedMember.stdout}${appendedMember.stderr}`);
@@ -934,7 +997,12 @@ try {
         : readFileSync(join(REPO_ROOT, path)),
     ]), controllerModes);
     const substitutedController = materializeExactControllerForSelftest(substituted, mkdtempSync(join(TEST_ROOT, "exact-controller-substituted-")));
-    const rejected = spawnSync(process.execPath, [substitutedController.linter, "--tarball", tarball, "--public-repos", substitutedController.publicRepos], {
+    const rejected = spawnSync(process.execPath, [
+      substitutedController.linter,
+      "--tarball", tarball,
+      "--public-repos", substitutedController.publicRepos,
+      "--source-root", REPO_ROOT,
+    ], {
       encoding: "utf8",
     });
     assert.notEqual(rejected.status, 0);
@@ -1556,7 +1624,12 @@ try {
       const entries = minimalPackageEntries().filter((entry) => entry.path !== path);
       entries.push({ path, content });
       createTarball(tarball, entries);
-      const result = spawnSync(process.execPath, [SURFACE_LINTER, "--tarball", tarball, "--public-repos", artifactPublicRepos], {
+      const result = spawnSync(process.execPath, [
+        SURFACE_LINTER,
+        "--tarball", tarball,
+        "--public-repos", artifactPublicRepos,
+        "--source-root", REPO_ROOT,
+      ], {
         encoding: "utf8",
       });
       assert.equal(result.status, 1);
@@ -2030,7 +2103,12 @@ try {
     assert.equal(readFileSync(join(packageB, "README.md"), "utf8"), hostile);
     const lint = spawnSync(
       process.execPath,
-      [SURFACE_LINTER, "--tarball", join(outB, "noa-cross-package-b-1.0.0.tgz"), "--public-repos", PUBLIC_REPOS],
+      [
+        SURFACE_LINTER,
+        "--tarball", join(outB, "noa-cross-package-b-1.0.0.tgz"),
+        "--public-repos", PUBLIC_REPOS,
+        "--source-root", REPO_ROOT,
+      ],
       { encoding: "utf8" },
     );
     assert.equal(lint.status, 1);

@@ -127,7 +127,7 @@ find it" for a payment that may well have settled.
   takes a `chain.findAuthorizationUse` reader. Every decision in this package is tested without a
   chain, which is correct for the logic and means the *chain-facing* half has no test in this
   package at all.
-- **Hosted-facilitator nonce policy is outside this package's guarantee.** A deployment may impose
+- **Hosted-facilitator nonce policy is not guaranteed by this package.** A deployment may impose
   additional nonce constraints. Validate the selected facilitator's documented policy and a funded
   end-to-end path before making an interoperability or availability claim.
 - **No mandate approval is proven by any of this**, and no service delivery. See the scope sentence

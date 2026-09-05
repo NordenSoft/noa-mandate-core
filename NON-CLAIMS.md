@@ -66,7 +66,7 @@ unless a stronger, separately verified source establishes it.
 Two invocations may have the same action and parameter commitment. Correlate outcomes using the
 protocol's invocation-, receipt-, chain-, or grant-specific binding, never action fields alone.
 
-### NC-2.5 — Nothing here is an exactly-once guarantee
+### NC-2.5 — Receipts do not guarantee exactly-once effects
 
 Exactly-once effects require end-to-end idempotency, durable state, bounded retries, and reconciliation
 with the external system. Receipt integrity alone cannot provide those properties.

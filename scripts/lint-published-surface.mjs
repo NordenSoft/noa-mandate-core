@@ -74,7 +74,7 @@
  * (unknown/missing/conflicting argument), unsafe tarball, or legacy mutable-directory refusal.
  *
  * Usage:
- *   node scripts/lint-published-surface.mjs --tarball <candidate.tgz> --public-repos <exact-policy.json>
+ *   node scripts/lint-published-surface.mjs --tarball <candidate.tgz> --public-repos <exact-policy.json> --source-root <exact-git-tree>
  *   node scripts/lint-published-surface.mjs [--dir <path>]
  *
  *   --dir <path>  Historical syntax retained to produce an explicit exit-2 migration message.
@@ -82,14 +82,17 @@
  *                 --tarball refuses in the same way. This intentionally makes the old
  *                 `prepublishOnly` path fail closed until it is migrated to staged artifacts.
  *   --tarball     Scan exact immutable `.tgz` bytes. This is the authoritative CI/release mode.
+ *   --source-root Resolve K6 citations only against the controller-materialized exact Git tree.
+ *                 It is mandatory with `--tarball`; the staging controller supplies it.
  */
 
-import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { resolve, dirname, isAbsolute } from "node:path";
+import { readFileSync, existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
+import { resolve, dirname, isAbsolute, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readSafeNpmTarball } from "./lib/safe-npm-tarball.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+let SOURCE_ROOT = REPO_ROOT;
 
 // ---------------------------------------------------------------------------
 // 0. Arg parsing — exact tarball and legacy directory modes are mutually exclusive.
@@ -98,7 +101,7 @@ function usageError(message) {
   process.stderr.write(
     `lint-published-surface: ${message}\n\n` +
       `Usage:\n` +
-        `  node scripts/lint-published-surface.mjs --tarball <candidate.tgz> --public-repos <exact-policy.json>\n` +
+        `  node scripts/lint-published-surface.mjs --tarball <candidate.tgz> --public-repos <exact-policy.json> --source-root <exact-git-tree>\n` +
         `  node scripts/lint-published-surface.mjs [--dir <path>]\n`,
   );
   process.exit(2);
@@ -108,6 +111,7 @@ function parseArgs(argv) {
   let dir; // undefined => repo root (default, unchanged behavior)
   let tarball;
   let publicRepos;
+  let sourceRoot;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--dir") {
@@ -138,6 +142,14 @@ function parseArgs(argv) {
     } else if (arg.startsWith("--public-repos=")) {
       publicRepos = arg.slice("--public-repos=".length);
       if (publicRepos === "") usageError("--public-repos requires a path argument.");
+    } else if (arg === "--source-root") {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("--")) usageError("--source-root requires a path argument.");
+      sourceRoot = value;
+      i++;
+    } else if (arg.startsWith("--source-root=")) {
+      sourceRoot = arg.slice("--source-root=".length);
+      if (sourceRoot === "") usageError("--source-root requires a path argument.");
     } else {
       usageError(`Unknown argument: ${arg}`);
     }
@@ -148,8 +160,25 @@ function parseArgs(argv) {
   if (tarball !== undefined && publicRepos === undefined) {
     usageError("--tarball requires the exact --public-repos policy used by the staging controller.");
   }
+  if (tarball !== undefined && sourceRoot === undefined) {
+    usageError("--tarball requires the controller-materialized exact --source-root Git tree.");
+  }
   if (tarball === undefined && publicRepos !== undefined) usageError("--public-repos requires --tarball.");
-  return { dir, tarball, publicRepos };
+  if (tarball === undefined && sourceRoot !== undefined) usageError("--source-root requires --tarball.");
+  return { dir, tarball, publicRepos, sourceRoot };
+}
+
+function selectSourceRoot(rawSourceRoot) {
+  const candidate = isAbsolute(rawSourceRoot) ? rawSourceRoot : resolve(process.cwd(), rawSourceRoot);
+  try {
+    const stat = lstatSync(candidate);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      usageError("--source-root must name one real directory, not a link or special entry.");
+    }
+    return realpathSync(candidate);
+  } catch {
+    usageError("--source-root is unavailable or cannot be inspected safely.");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -656,14 +685,28 @@ const IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
  * Does this backtick span resolve to something a reader can open?
  *
  * A path-like token resolves iff the file exists after stripping `:lines`. A bare identifier
- * resolves iff it appears, at a word boundary, in the repo's TypeScript sources. Anything else —
- * prose in backticks, a made-up name, a dead path — does not resolve, which is the point: an anchor
- * nobody can follow is decoration, and decoration is what the claim was hiding behind.
+ * resolves iff it appears, at a word boundary, in the controller-supplied exact Git source tree's
+ * TypeScript/ESM sources. Anything else — prose in backticks, a made-up name, a dead path — does not
+ * resolve, which is the point: an anchor nobody can follow is decoration, and decoration is what
+ * the claim was hiding behind.
  */
 function anchorResolves(span, sourceIndex) {
   if (span.includes("/") || SOURCE_EXT_RE.test(span)) {
     const path = span.replace(/:\d+(?:-\d+)?$/, "");
-    return existsSync(resolve(REPO_ROOT, path));
+    if (isAbsolute(path) || path.includes("\\") || path.split("/").some((part) => part === "" || part === "." || part === "..")) {
+      return false;
+    }
+    const target = resolve(SOURCE_ROOT, path);
+    const fromRoot = relative(SOURCE_ROOT, target);
+    if (fromRoot === "" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+      return false;
+    }
+    try {
+      const stat = lstatSync(target);
+      return stat.isFile() && !stat.isSymbolicLink();
+    } catch {
+      return false;
+    }
   }
   // `acquireLock()` is how a function is named in prose, and refusing the parens would push authors
   // toward text they would not otherwise write. Measured: without this, four HONEST-LIMIT paragraphs
@@ -677,13 +720,13 @@ function anchorResolves(span, sourceIndex) {
   return false;
 }
 
-/** Every TS source body, read once — the index `anchorResolves` greps for bare identifiers. */
+/** Every TS/ESM source body, read once — the index `anchorResolves` greps for bare identifiers. */
 let SOURCE_INDEX = null;
 function sourceIndex() {
   if (SOURCE_INDEX !== null) return SOURCE_INDEX;
   const bodies = [];
-  const roots = [resolve(REPO_ROOT, "src")];
-  const pkgDir = resolve(REPO_ROOT, "packages");
+  const roots = [resolve(SOURCE_ROOT, "src")];
+  const pkgDir = resolve(SOURCE_ROOT, "packages");
   if (existsSync(pkgDir)) {
     for (const p of readdirSync(pkgDir)) {
       const s = resolve(pkgDir, p, "src");
@@ -745,7 +788,7 @@ function scanK6(file, text) {
 /**
  * K6 currently finds ZERO on the real published surface, and a gate that finds nothing has to prove
  * it CAN fire before that zero means anything. These fixtures are the proof, in both directions:
- * four sentences that must be caught and three that must be let through.
+ * six sentences that must be caught and three that must be let through.
  *
  * They run in-process because `scanK6` is a pure function of `(file, text)` — no file planting, so
  * the selftest cannot be defeated by the packed-file trap: `npm pack` decides the file set, so a
@@ -775,6 +818,8 @@ const K6_SELFTEST_CASES = [
     text: "Reservation is atomic (`definitelyNotARealFnXyzzy`)." },
   { expect: "finding", why: "a dead path is the same failure as a fake identifier, spelled differently",
     text: "Compared in constant time (`gone/missing.ts:12`)." },
+  { expect: "finding", why: "a traversal-looking anchor must not resolve through the exact source root",
+    text: "The snapshot is atomic (`src/../scripts/lint-published-surface.mjs`)." },
   { expect: "finding", why: "an anchor in a neighbouring sentence must not rescue this one — scanning is per sentence",
     text: "The gate is atomic. See `packages/gate/src/engine.ts` for the CAS." },
 
@@ -902,11 +947,18 @@ function runArtifactCoordinateSelftest() {
 // main
 // ---------------------------------------------------------------------------
 function main() {
-  const { dir: rawDir, tarball: rawTarball, publicRepos: rawPublicRepos } = parseArgs(process.argv.slice(2));
+  const {
+    dir: rawDir,
+    tarball: rawTarball,
+    publicRepos: rawPublicRepos,
+    sourceRoot: rawSourceRoot,
+  } = parseArgs(process.argv.slice(2));
 
   let records;
   let evidence;
   if (rawTarball !== undefined) {
+    SOURCE_ROOT = selectSourceRoot(rawSourceRoot);
+    SOURCE_INDEX = null;
     const tarballPath = isAbsolute(rawTarball) ? rawTarball : resolve(process.cwd(), rawTarball);
     let parsed;
     try {
