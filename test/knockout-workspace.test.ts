@@ -1056,13 +1056,31 @@ function installArmWorkerFixture(
   return sha256File(path.join(destination, "knockout-workspace-worker.mjs"));
 }
 
-function installFullRunnerClosure(source: string, commitMessage: string): void {
+function installPhase2RunnerFixture(source: string, commitMessage: string): void {
   const scripts = path.join(source, "scripts");
-  fs.mkdirSync(scripts, { recursive: true, mode: 0o700 });
-  fs.cpSync(path.join(repositoryRoot, "scripts", "lib"), path.join(scripts, "lib"), {
-    preserveTimestamps: true,
-    recursive: true,
-  });
+  const library = path.join(scripts, "lib");
+  fs.mkdirSync(library, { recursive: true, mode: 0o700 });
+  for (const filename of [
+    "boundary-bootstrap.mjs",
+    "boundary-gate-provenance.mjs",
+    "gate-event-contract.mjs",
+    "knockout-runner.mjs",
+    "knockout-test-observer.mjs",
+    "knockout-workspace.mjs",
+    "knockout-workspace-worker.mjs",
+    "proof-event-contract.mjs",
+    "proof-event-reporter.mjs",
+    "proof-resolve.mjs",
+    "safe-npm-tarball.mjs",
+    "typescript-test-hooks.mjs",
+    "typescript-test-register.mjs",
+  ]) {
+    fs.copyFileSync(
+      path.join(repositoryRoot, "scripts", "lib", filename),
+      path.join(library, filename),
+    );
+    fs.chmodSync(path.join(library, filename), 0o600);
+  }
   fs.writeFileSync(
     path.join(scripts, "resolver-inventory.json"),
     `${JSON.stringify({ proofs: {} }, null, 2)}\n`,
@@ -1078,13 +1096,30 @@ function installFullRunnerClosure(source: string, commitMessage: string): void {
     ].join("\n"),
     { mode: 0o600 },
   );
-  const typescriptPackage = path.dirname(fileURLToPath(import.meta.resolve("typescript/package.json")));
-  const nodeModules = path.join(source, "node_modules");
-  fs.mkdirSync(nodeModules, { recursive: true, mode: 0o700 });
-  fs.cpSync(typescriptPackage, path.join(nodeModules, "typescript"), {
-    preserveTimestamps: true,
-    recursive: true,
-  });
+  const typescriptPackage = path.join(source, "node_modules", "typescript");
+  fs.mkdirSync(typescriptPackage, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    path.join(typescriptPackage, "package.json"),
+    `${JSON.stringify({
+      name: "typescript",
+      private: true,
+      type: "module",
+      exports: "./index.mjs",
+    }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  fs.writeFileSync(
+    path.join(typescriptPackage, "index.mjs"),
+    [
+      "// These direct-gate fixtures do not resolve TypeScript proofs.",
+      "// Fail closed if a fixture unexpectedly starts using the compiler API.",
+      "export default new Proxy(Object.freeze({}), {",
+      "  get() { throw new Error('TypeScript proof resolution is unavailable in this direct-gate fixture'); },",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
   fs.writeFileSync(path.join(source, ".gitignore"), "node_modules/\n", { mode: 0o600 });
   git(source, ["add", "--all"]);
   git(source, ["commit", "-q", "-m", commitMessage]);
@@ -11058,7 +11093,7 @@ test("Phase 2 isolated runner executes one real baseline and mutant in separate 
     suite: [".", "node", ["fixture-gate.mjs"]],
   };
   try {
-    installFullRunnerClosure(fixture.source, "install isolated runner closure");
+    installPhase2RunnerFixture(fixture.source, "install isolated runner closure");
     fs.writeFileSync(
       path.join(fixture.source, "control.mjs"),
       "export const controlEnabled = true;\n",
@@ -11208,7 +11243,7 @@ test("Phase 2 supervisor refuses a retained mutant changed by a delayed same-gro
     suite: [".", "node", ["delayed-retained-target-gate.mjs"]],
   };
   try {
-    installFullRunnerClosure(fixture.source, "install delayed-child runner closure");
+    installPhase2RunnerFixture(fixture.source, "install delayed-child runner closure");
     fs.writeFileSync(
       path.join(fixture.source, "control.mjs"),
       "export const controlEnabled = true;\n",
@@ -11355,7 +11390,7 @@ test("Phase 2 refuses forged cross-phase result, wire, and predecessor reference
     let cooperativeLease: CooperativeSourceLease | null = null;
     let released: { retainedPrivateRoots?: RetainedPrivateRoot[] } | null = null;
     try {
-      installFullRunnerClosure(fixture.source, `install ${scenario.id} runner closure`);
+      installPhase2RunnerFixture(fixture.source, `install ${scenario.id} runner closure`);
       fs.writeFileSync(
         path.join(fixture.source, "control.mjs"),
         "export const controlEnabled = true;\n",
@@ -11548,7 +11583,7 @@ test("Phase 2 setup-integrity credit waits for a fresh pristine POSTCHECK arm", 
     suite: [".", "node", ["fixture-setup-gate.mjs"]],
   };
   try {
-    installFullRunnerClosure(fixture.source, "install setup-integrity runner closure");
+    installPhase2RunnerFixture(fixture.source, "install setup-integrity runner closure");
     fs.writeFileSync(
       path.join(fixture.source, "control.mjs"),
       `export const caseId = ${JSON.stringify(from)};\n`,
@@ -11661,7 +11696,7 @@ test("Phase 2 isolated selftest failure stops before every baseline and cannot p
     suite: [".", "node", ["fixture-never-runs.mjs"]],
   };
   try {
-    installFullRunnerClosure(fixture.source, "install selftest-refusal runner closure");
+    installPhase2RunnerFixture(fixture.source, "install selftest-refusal runner closure");
     fs.writeFileSync(
       path.join(fixture.source, "scripts", "lint-control-knockout.selftest.mjs"),
       [
@@ -11742,7 +11777,7 @@ test("Phase 2 isolated runner refuses a captured registry mismatch before suite 
   };
   const supervisorEntry = { ...capturedEntry, control: "supervisor substituted control" };
   try {
-    installFullRunnerClosure(fixture.source, "install isolated mismatch runner closure");
+    installPhase2RunnerFixture(fixture.source, "install isolated mismatch runner closure");
     fs.writeFileSync(
       path.join(fixture.source, "control.mjs"),
       "export const controlEnabled = true;\n",
