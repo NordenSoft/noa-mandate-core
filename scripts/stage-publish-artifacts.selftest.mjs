@@ -222,14 +222,14 @@ function fixtureManifest(overrides = {}) {
   };
 }
 
-function fakeGitSource(manifests, extras = []) {
+function fakeGitSource(manifests, extras = [], modes = {}) {
   const blobs = new Map();
   for (const [path, manifest] of Object.entries(manifests)) {
     blobs.set(path, Buffer.from(typeof manifest === "string" ? manifest : `${JSON.stringify(manifest)}\n`));
   }
   for (const [path, content] of extras) blobs.set(path, Buffer.from(content));
   const records = [...blobs.entries()].map(([path, bytes]) => ({
-    mode: "100644",
+    mode: modes[path] ?? "100644",
     oid: createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex"),
     path,
     size: bytes.length,
@@ -797,7 +797,7 @@ try {
     assert.equal(planned[0].releaseManifestBytes.equals(planned[0].sourceManifestBytes), false);
   });
 
-  check("exact Git controller materialization rejects an omitted authority", () => {
+  check("exact Git controller materialization enforces every authority and its Git mode", () => {
     const paths = [
       "scripts/boundary-public-repos.json",
       "scripts/lib/npm-homedir-override.cjs",
@@ -809,7 +809,12 @@ try {
       "scripts/lib/stage-publish-artifacts.mjs",
       "scripts/lint-published-surface.mjs",
     ];
-    const source = fakeGitSource({}, paths.map((path) => [path, readFileSync(join(REPO_ROOT, path))]));
+    const controllerModes = { "scripts/lint-published-surface.mjs": "100755" };
+    const source = fakeGitSource(
+      {},
+      paths.map((path) => [path, readFileSync(join(REPO_ROOT, path))]),
+      controllerModes,
+    );
     const root = mkdtempSync(join(TEST_ROOT, "exact-controller-"));
     const controller = materializeExactControllerForSelftest(source, root);
     assert.equal(readFileSync(controller.driver).equals(readFileSync(join(REPO_ROOT, "scripts/lib/publish-container-driver.mjs"))), true);
@@ -818,19 +823,42 @@ try {
     assert.equal(readFileSync(controller.staging).equals(readFileSync(join(REPO_ROOT, "scripts/lib/publish-artifact-staging.mjs"))), true);
     assert.equal(readFileSync(controller.bootstrap).equals(readFileSync(STAGING_CLI)), true);
     assert.equal(readFileSync(controller.npmHomedirOverride).equals(readFileSync(join(REPO_ROOT, "scripts/lib/npm-homedir-override.cjs"))), true);
-    for (const authority of [
-      "scripts/lib/publish-artifact-executor.mjs",
-      "scripts/lib/publish-artifact-staging.mjs",
-      "scripts/lib/safe-npm-tarball.mjs",
-      "scripts/lib/stage-publish-artifacts.mjs",
-      "scripts/lib/npm-homedir-override.cjs",
-    ]) {
-      const omitted = fakeGitSource({}, paths.filter((path) => path !== authority).map((path) => [path, readFileSync(join(REPO_ROOT, path))]));
+    for (const authority of paths) {
+      const omitted = fakeGitSource(
+        {},
+        paths.filter((path) => path !== authority).map((path) => [path, readFileSync(join(REPO_ROOT, path))]),
+        controllerModes,
+      );
       expectValidation(
         () => materializeExactControllerForSelftest(omitted, mkdtempSync(join(TEST_ROOT, "exact-controller-omitted-"))),
         /lacks regular file/u,
       );
     }
+
+    const wrongLinterMode = fakeGitSource(
+      {},
+      paths.map((path) => [path, readFileSync(join(REPO_ROOT, path))]),
+    );
+    expectValidation(
+      () => materializeExactControllerForSelftest(
+        wrongLinterMode,
+        mkdtempSync(join(TEST_ROOT, "exact-controller-wrong-mode-")),
+      ),
+      /lint-published-surface\.mjs with mode 100755/u,
+    );
+
+    const wrongPolicyMode = fakeGitSource(
+      {},
+      paths.map((path) => [path, readFileSync(join(REPO_ROOT, path))]),
+      { ...controllerModes, "scripts/lib/publish-artifact-policy.json": "100755" },
+    );
+    expectValidation(
+      () => materializeExactControllerForSelftest(
+        wrongPolicyMode,
+        mkdtempSync(join(TEST_ROOT, "exact-controller-wrong-mode-")),
+      ),
+      /publish-artifact-policy\.json with mode 100644/u,
+    );
 
     const selftest = spawnSync(process.execPath, [controller.linter, "--selftest"], { encoding: "utf8" });
     assert.equal(selftest.status, 0, `${selftest.stdout}${selftest.stderr}`);
@@ -904,7 +932,7 @@ try {
       path === "scripts/lib/safe-npm-tarball.mjs"
         ? Buffer.from('export function readSafeNpmTarball() { throw new Error("exact-controller-parser-substitution"); }\n', "utf8")
         : readFileSync(join(REPO_ROOT, path)),
-    ]));
+    ]), controllerModes);
     const substitutedController = materializeExactControllerForSelftest(substituted, mkdtempSync(join(TEST_ROOT, "exact-controller-substituted-")));
     const rejected = spawnSync(process.execPath, [substitutedController.linter, "--tarball", tarball, "--public-repos", substitutedController.publicRepos], {
       encoding: "utf8",
@@ -932,11 +960,16 @@ try {
       const target = join(repo, ...path.split("/"));
       mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, readFileSync(join(REPO_ROOT, path)));
+      chmodSync(target, path === "scripts/lint-published-surface.mjs" ? 0o755 : 0o644);
     }
     fixtureGit(repo, ["init", "--quiet"]);
     fixtureGit(repo, ["add", "."]);
     fixtureGit(repo, ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture"]);
     const commit = fixtureGit(repo, ["rev-parse", "HEAD"]);
+    assert.match(
+      fixtureGit(repo, ["ls-tree", commit, "--", "scripts/lint-published-surface.mjs"]),
+      /^100755 blob [0-9a-f]+\tscripts\/lint-published-surface\.mjs$/u,
+    );
     const streamed = spawnSync("/usr/bin/git", ["show", `${commit}:scripts/lib/stage-publish-artifacts.mjs`], {
       cwd: repo,
       encoding: "buffer",

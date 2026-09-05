@@ -62,16 +62,16 @@ const POLICY = join(THIS_DIR, "publish-artifact-policy.json");
 const PUBLIC_REPOS = join(THIS_DIR, "../boundary-public-repos.json");
 const POLICY_REPO_PATH = "scripts/lib/publish-artifact-policy.json";
 const POLICY_SCHEMA = "noa.publish-artifact-policy/2";
-const CONTROLLER_REPO_PATHS = Object.freeze([
-  "scripts/boundary-public-repos.json",
-  "scripts/lib/npm-homedir-override.cjs",
-  "scripts/lib/publish-artifact-executor.mjs",
-  "scripts/lib/publish-artifact-policy.json",
-  "scripts/lib/publish-artifact-staging.mjs",
-  "scripts/lib/publish-container-driver.mjs",
-  "scripts/lib/safe-npm-tarball.mjs",
-  "scripts/lib/stage-publish-artifacts.mjs",
-  "scripts/lint-published-surface.mjs",
+const CONTROLLER_REPO_FILES = Object.freeze([
+  Object.freeze({ mode: "100644", path: "scripts/boundary-public-repos.json" }),
+  Object.freeze({ mode: "100644", path: "scripts/lib/npm-homedir-override.cjs" }),
+  Object.freeze({ mode: "100644", path: "scripts/lib/publish-artifact-executor.mjs" }),
+  Object.freeze({ mode: "100644", path: "scripts/lib/publish-artifact-policy.json" }),
+  Object.freeze({ mode: "100644", path: "scripts/lib/publish-artifact-staging.mjs" }),
+  Object.freeze({ mode: "100644", path: "scripts/lib/publish-container-driver.mjs" }),
+  Object.freeze({ mode: "100644", path: "scripts/lib/safe-npm-tarball.mjs" }),
+  Object.freeze({ mode: "100644", path: "scripts/lib/stage-publish-artifacts.mjs" }),
+  Object.freeze({ mode: "100755", path: "scripts/lint-published-surface.mjs" }),
 ]);
 const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true });
 const FORBIDDEN_PATH_CHARS_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
@@ -722,10 +722,12 @@ function materializeExactController(gitSource, workRoot) {
   const controllerRoot = join(workRoot, "exact-controller");
   mkdirSync(controllerRoot, { recursive: false, mode: 0o700 });
   const records = new Map(gitSource.records.map((record) => [record.path, record]));
-  for (const path of CONTROLLER_REPO_PATHS) {
+  for (const { mode, path } of CONTROLLER_REPO_FILES) {
     const record = records.get(path);
     const bytes = gitSource.blobs.get(path);
-    if (!record || !bytes || record.mode !== "100644") fail(`exact Git controller lacks regular file ${path}`);
+    if (!record || !bytes || record.mode !== mode) {
+      fail(`exact Git controller lacks regular file ${path} with mode ${mode}`);
+    }
     const target = join(controllerRoot, ...path.split("/"));
     mkdirSync(dirname(target), { recursive: true, mode: 0o755 });
     writeFileSync(target, bytes, { flag: "wx", mode: 0o644 });
