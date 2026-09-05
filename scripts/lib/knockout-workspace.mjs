@@ -4417,9 +4417,16 @@ function observeMacMetadataBatch(
   operationBudget = null,
   anchorRoot,
   metadataCache = null,
+  descriptorCode = KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
 ) {
   if (!Array.isArray(requests)) {
     fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "metadata batch is malformed");
+  }
+  if (!ERROR_CODE_SET.has(descriptorCode)) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT,
+      "metadata batch descriptor refusal code is malformed",
+    );
   }
   const cacheState = metadataCache === null
     ? null
@@ -4468,7 +4475,7 @@ function observeMacMetadataBatch(
       } catch (error) {
         if (error instanceof KnockoutWorkspaceError) throw error;
         fail(
-          KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+          descriptorFailureCode(error, descriptorCode),
           "metadata anchor could not be bound to a batch directory descriptor",
           { path: firstContext.absolute },
           error,
@@ -4534,7 +4541,7 @@ function observeMacMetadataBatch(
         try { fd = fs.openSync(record.context.absolute, flags); }
         catch (error) {
           fail(
-            KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+            descriptorFailureCode(error, descriptorCode),
             `${record.context.absolute} could not be descriptor-bound for metadata inspection`,
             null,
             error,
@@ -4672,16 +4679,30 @@ function observeMacMetadataBatch(
       const closeErrors = [];
       for (const fd of [...openedNodeFds].reverse()) {
         try { fs.closeSync(fd); }
-        catch (error) { closeErrors.push(error); }
+        catch (error) {
+          closeErrors.push(workspaceError(
+            descriptorFailureCode(error, descriptorCode),
+            "metadata node descriptor could not be closed",
+            null,
+            error,
+          ));
+        }
       }
       if (directoryFd !== undefined) {
         try { fs.closeSync(directoryFd); }
-        catch (error) { closeErrors.push(error); }
+        catch (error) {
+          closeErrors.push(workspaceError(
+            descriptorFailureCode(error, descriptorCode),
+            "metadata anchor descriptor could not be closed",
+            { path: anchorRoot.path },
+            error,
+          ));
+        }
       }
       primaryError = combineWorkspaceFailures(
         primaryError,
         closeErrors,
-        KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+        descriptorCode,
         "metadata batch descriptors could not be closed",
       );
     }
@@ -4722,6 +4743,7 @@ function observeMetadata(
   expected = null,
   anchorRoot,
   metadataCache = null,
+  descriptorCode = KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
 ) {
   if (process.platform === "darwin") {
     return observeMacMetadataBatch(
@@ -4729,6 +4751,7 @@ function observeMetadata(
       operationBudget,
       anchorRoot,
       metadataCache,
+      descriptorCode,
     )[0];
   }
   const context = metadataPathContext(abs, anchorRoot);
@@ -9542,6 +9565,8 @@ function bindCreatedPrivateDirectory(abs, fd, operationBudget = null, metadataAn
     operationBudget,
     opened,
     metadataAnchor ?? createdDirectory,
+    null,
+    KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
   );
   const confirmedOpened = fs.fstatSync(fd, { bigint: true });
   const confirmedAtPath = fs.lstatSync(abs, { bigint: true });

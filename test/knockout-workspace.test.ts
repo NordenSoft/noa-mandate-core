@@ -955,6 +955,77 @@ function minimalCaptureFixture(prefix: string): {
   return { custody, source, trackedPath };
 }
 
+function withSyntheticMacMetadata<T>(operation: () => T): {
+  helperCalls: number;
+  result: T;
+} {
+  // These consumer-capability tests need a genuine registered capture, while the
+  // native ACL/xattr backend and its exact bytes are covered by dedicated tests.
+  // Keep this unrelated setup bounded by synthesizing descriptor-bound empty metadata.
+  if (process.platform !== "darwin") return { helperCalls: 0, result: operation() };
+  const descriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+  assert.ok(descriptor !== undefined);
+  const originalSpawnSync = childProcess.spawnSync;
+  let helperCalls = 0;
+  let result: T;
+  try {
+    Object.defineProperty(childProcess, "spawnSync", {
+      ...descriptor,
+      value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
+        const childArgs = args[1];
+        if (
+          args[0] === "/usr/bin/perl" && Array.isArray(childArgs) &&
+          childArgs.includes("/usr/bin/python3") &&
+          (childArgs.includes("acl") || childArgs.includes("xattr"))
+        ) {
+          const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
+          assert.ok(Array.isArray(stdio));
+          const nodeFds = stdio.slice(4);
+          const declaredCount = Number(childArgs.at(-1));
+          assert.equal(declaredCount, nodeFds.length);
+          const mode = childArgs.includes("acl") ? "acl" : "xattr";
+          const records = nodeFds.map((fd, index) => {
+            assert.equal(typeof fd, "number");
+            const observed = fs.fstatSync(fd as number, { bigint: true });
+            const stat = {
+              ctimeNs: String(observed.ctimeNs),
+              identity: `${observed.dev}:${observed.ino}`,
+              mode: Number(observed.mode & 0o7777n),
+              mtimeNs: String(observed.mtimeNs),
+              nlink: Number(observed.nlink),
+              size: Number(observed.size),
+              type: observed.isSymbolicLink() ? "symlink" : observed.isDirectory()
+                ? "directory" : observed.isFile() ? "file" : "other",
+              uid: Number(observed.uid),
+            };
+            return mode === "acl"
+              ? { fd: index + 4, present: false, stat }
+              : { fd: index + 4, namesBase64: [], provenanceBase64: null, stat };
+          });
+          const stdout = Buffer.from(JSON.stringify(records));
+          const stderr = Buffer.alloc(0);
+          helperCalls += 1;
+          return {
+            output: [null, stdout, stderr],
+            pid: process.pid,
+            signal: null,
+            status: 0,
+            stderr,
+            stdout,
+          } as unknown as ReturnType<typeof childProcess.spawnSync>;
+        }
+        return Reflect.apply(originalSpawnSync, childProcess, args);
+      }) as typeof childProcess.spawnSync,
+    });
+    syncBuiltinESMExports();
+    result = operation();
+  } finally {
+    Object.defineProperty(childProcess, "spawnSync", descriptor);
+    syncBuiltinESMExports();
+  }
+  return { helperCalls, result };
+}
+
 function installArmWorkerFixture(
   source: string,
   commitMessage: string,
@@ -7588,22 +7659,30 @@ test("consumer verification rejects proxy-wrapped capabilities without observing
   let captured: Capture | null = null;
   let propertyReads = 0;
   try {
-    captured = workspace.captureAndSealCandidate({
-      sourceRoot: fixture.source,
-      custodyRoot: fixture.custody,
+    const bounded = withSyntheticMacMetadata(() => {
+      const sealed = workspace.captureAndSealCandidate({
+        sourceRoot: fixture.source,
+        custodyRoot: fixture.custody,
+      });
+      captured = sealed;
+      const proxied = new Proxy(sealed, {
+        get(target, property, receiver) {
+          propertyReads += 1;
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      assert.throws(
+        () => workspace.verifySealedSeed(proxied),
+        (error: WorkspaceError) => error.code === workspaceErrorCode("INVALID_ARGUMENT"),
+      );
+      assert.equal(propertyReads, 0, "unregistered capability properties were observed");
+      assert.doesNotThrow(() => workspace.verifySealedSeed(sealed));
+      return sealed;
     });
-    const proxied = new Proxy(captured, {
-      get(target, property, receiver) {
-        propertyReads += 1;
-        return Reflect.get(target, property, receiver);
-      },
-    });
-    assert.throws(
-      () => workspace.verifySealedSeed(proxied),
-      (error: WorkspaceError) => error.code === workspaceErrorCode("INVALID_ARGUMENT"),
-    );
-    assert.equal(propertyReads, 0, "unregistered capability properties were observed");
-    assert.doesNotThrow(() => workspace.verifySealedSeed(captured!));
+    captured = bounded.result;
+    if (process.platform === "darwin") {
+      assert.ok(bounded.helperCalls > 0, "the consumer-only test used bounded macOS metadata");
+    }
   } finally {
     cleanupReportedScratchRoots(captured?.retainedPrivateRoots ?? []);
     removeFixturePath(fixture.source);
@@ -7615,24 +7694,32 @@ test("consumer capability rejects producer-rehashed source resource summaries", 
   const fixture = minimalCaptureFixture("consumer-source-resource-summary");
   let captured: Capture | null = null;
   try {
-    captured = workspace.captureAndSealCandidate({
-      sourceRoot: fixture.source,
-      custodyRoot: fixture.custody,
+    const bounded = withSyntheticMacMetadata(() => {
+      const sealed = workspace.captureAndSealCandidate({
+        sourceRoot: fixture.source,
+        custodyRoot: fixture.custody,
+      });
+      captured = sealed;
+      for (const field of ["allocatedBytes", "logicalBytes", "maxDepth", "nodeCount"] as const) {
+        const tampered = JSON.parse(JSON.stringify(sealed.manifest)) as Capture["manifest"];
+        tampered.resourceAdmission.source[field] += 1;
+        tampered.candidateManifestSha256 = workspace.candidateManifestSha256(tampered);
+        const forged = Object.freeze({
+          ...sealed,
+          candidateManifestSha256: tampered.candidateManifestSha256,
+          manifest: tampered,
+        }) as Capture;
+        assert.throws(
+          () => workspace.verifySealedSeed(forged),
+          (error: WorkspaceError) => error.code === workspaceErrorCode("INVALID_ARGUMENT"),
+          `source ${field} entered through an unregistered capture capability`,
+        );
+      }
+      return sealed;
     });
-    for (const field of ["allocatedBytes", "logicalBytes", "maxDepth", "nodeCount"] as const) {
-      const tampered = JSON.parse(JSON.stringify(captured.manifest)) as Capture["manifest"];
-      tampered.resourceAdmission.source[field] += 1;
-      tampered.candidateManifestSha256 = workspace.candidateManifestSha256(tampered);
-      const forged = Object.freeze({
-        ...captured,
-        candidateManifestSha256: tampered.candidateManifestSha256,
-        manifest: tampered,
-      }) as Capture;
-      assert.throws(
-        () => workspace.verifySealedSeed(forged),
-        (error: WorkspaceError) => error.code === workspaceErrorCode("INVALID_ARGUMENT"),
-        `source ${field} entered through an unregistered capture capability`,
-      );
+    captured = bounded.result;
+    if (process.platform === "darwin") {
+      assert.ok(bounded.helperCalls > 0, "the consumer-only test used bounded macOS metadata");
     }
   } finally {
     cleanupReportedScratchRoots(captured?.retainedPrivateRoots ?? []);
