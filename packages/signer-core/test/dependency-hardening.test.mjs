@@ -864,6 +864,11 @@ test("the package manifest pins every hardened dependency and its postinstall tr
   const manifest = JSON.parse(await readFile(join(PACKAGE_ROOT, "package.json"), "utf8"));
   assert.equal(manifest.private, true, "the unreleased signer package became publishable");
   assert.equal(
+    manifest.publishConfig,
+    undefined,
+    "the unreleased signer package declares public publication intent",
+  );
+  assert.equal(
     manifest.scripts?.postinstall,
     "node scripts/apply-dependency-hardening.mjs --apply",
     "the installed artifact no longer applies the exact dependency transform",

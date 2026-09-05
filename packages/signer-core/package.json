@@ -41,10 +41,6 @@
     "LICENSE",
     "NOTICE"
   ],
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
-  },
   "scripts": {
     "postinstall": "node scripts/apply-dependency-hardening.mjs --apply",
     "check:dependency-hardening": "node scripts/apply-dependency-hardening.mjs --check",
