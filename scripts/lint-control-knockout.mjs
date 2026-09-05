@@ -1719,7 +1719,7 @@ const KNOCKOUTS = [
       "    throw new Error(\"expected a JSON object of non-negative safe integers\");\n" +
       "  }",
     kind: "tests",
-    suite: [".", "npm", ["run", "lint:security-gates"]],
+    suite: [".", "node", ["--test", "scripts/lib/security-ratchet.selftest.mjs"]],
   },
   {
     id: "security-ratchet-any-count-rise-is-refused",
@@ -1735,7 +1735,7 @@ const KNOCKOUTS = [
       "    } else if (false) {\n" +
       "      problems.push({ kind: \"rise\", id: row.id, was, current: row.count });",
     kind: "tests",
-    suite: [".", "npm", ["run", "lint:security-gates"]],
+    suite: [".", "node", ["--test", "scripts/lib/security-ratchet.selftest.mjs"]],
   },
   {
     id: "t20-source-lock-scope",
