@@ -181,8 +181,8 @@ export interface GuardInput {
    *
    * Removing them is an all-or-nothing rename sweep with a blast radius beyond this ADR slice (these
    * three fields, `deriveParamsHash`'s RAW arm, `holdBody`'s RAW conditional, and the honest callers
-   * that pass `mode: "ENFORCED"` explicitly — `e2e-demo/src/agent.ts` and `harness.ts` both do, so
-   * deleting the field breaks their object literals at compile time). Deferred as not-0006-A and
+   * that pass `mode: "ENFORCED"` explicitly — current gate tests cover the field directly, so a
+   * deletion would break a public caller contract). Deferred as not-0006-A and
    * recorded as an open item, not forgotten.
    *
    * A wrapper-side RAW pre-refusal is deliberately NOT added: the engine's 422 is the one control and

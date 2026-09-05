@@ -468,7 +468,8 @@ jobs:
         #   .mjs REACHED   — a fixture in a `.mjs`-only root, because discovery was `.ts`-only and this
         #                    selftest could not have detected that;
         #   L9-B / L9-C    — as before, now asserted per layer rather than by a summed count.
-        # So `L9-D = 0` IS now citable as clause evidence. See docs/ADR-0005-VERIFICATION.md §3.2.
+        # So `L9-D = 0` is citable only together with this deliberately triggered negative control.
+        # See docs/ADR-0005-trusted-input-provenance.md §7 and the current self-test source.
         run: node scripts/lint-trusted-roots.mjs --selftest
       - name: R7 exploit corpus (pinned dispositions)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

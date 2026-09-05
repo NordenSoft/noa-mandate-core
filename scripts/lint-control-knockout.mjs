@@ -1704,6 +1704,40 @@ const KNOCKOUTS = [
     suite: [".", "npm", ["run", "lint:security-gates"]],
   },
   {
+    id: "security-ratchet-invalid-snapshot-is-refused",
+    control:
+      "The exact-count ratchet accepts only a JSON object whose values are non-negative safe " +
+      "integers. A valid JSON null used to skip the comparison and leave the gate green, so invalid " +
+      "shape rejection is a control rather than input cosmetics.",
+    file: "scripts/lib/security-ratchet.mjs",
+    find:
+      "  if (!validCountSnapshot(value)) {\n" +
+      "    throw new Error(\"expected a JSON object of non-negative safe integers\");\n" +
+      "  }",
+    replace:
+      "  if (false) {\n" +
+      "    throw new Error(\"expected a JSON object of non-negative safe integers\");\n" +
+      "  }",
+    kind: "tests",
+    suite: [".", "npm", ["run", "lint:security-gates"]],
+  },
+  {
+    id: "security-ratchet-any-count-rise-is-refused",
+    control:
+      "A warn-mode gate is pinned to its exact previous count, not merely its larger migration " +
+      "budget. Removing the rise branch recreates reusable slack and lets a new prohibited " +
+      "construct enter while the security gate remains green.",
+    file: "scripts/lib/security-ratchet.mjs",
+    find:
+      "    } else if (row.count > was) {\n" +
+      "      problems.push({ kind: \"rise\", id: row.id, was, current: row.count });",
+    replace:
+      "    } else if (false) {\n" +
+      "      problems.push({ kind: \"rise\", id: row.id, was, current: row.count });",
+    kind: "tests",
+    suite: [".", "npm", ["run", "lint:security-gates"]],
+  },
+  {
     id: "t20-source-lock-scope",
     control: "T20 — the source lock's subject is the WHOLE derived TCB, not a hand-picked five",
     file: "test/security/intrinsic-poisoning.test.ts",
@@ -3117,6 +3151,15 @@ const KNOCKOUTS = [
     expectedGateFindings: [{ rule: "PROOF_UNRESOLVED", subject: "RES-PAR-XRES-EQUIV" }],
     suite: [".", "npm", ["run", "lint:resolver-parity"]],
   },
+  {
+    id: "xres-evidence-manifest-validfrom-carried",
+    control: "Resolver equivalence — the evidence manifest resolver carries the declared activation into the KeyEntry consumed by the real verifier; dropping it must make the current two-resolver parity proof fail. [proof: RES-PAR-XRES-EQUIV]",
+    file: "packages/evidence/src/trust.ts",
+    find: "    out[kid] = { publicKey, type, roles: Array.isArray(roles) ? [...roles] : [], validFrom: validFrom ?? null, revokedAt: revokedAt ?? null };",
+    replace: "    out[kid] = { publicKey, type, roles: Array.isArray(roles) ? [...roles] : [], revokedAt: revokedAt ?? null };",
+    kind: "tests",
+    suite: ["packages/e2e-demo", "npm", ["run", "test:resolver-parity:built"]],
+  },
   // ── noa.action-digest/0.1 (round-2 QA, 2026-08-12) ────────────────────────────────────────────
   // Round-2 QA observed that this module had NO entry here at all, so none of its controls were in
   // the repository's own L4 ratchet — its knockout evidence lived in a scratch script, which is the
@@ -3346,8 +3389,8 @@ const KNOCKOUTS = [
       "early and false of one that finished; the two are the difference between an unfinished check " +
       "and an unasked question, and the result carries exactly one of them.",
     file: "packages/evidence/src/verify-evidence.ts",
-    find: "    { integrity: \"INTACT\", authorization: ctx.authorization, settlement: \"NO_EXECUTION_BINDING\" },",
-    replace: "    { integrity: \"INTACT\", authorization: ctx.authorization, settlement: \"UNCHECKED\" },",
+    find: "    { integrity: \"INTACT\", authorization: ctx.authorization, settlement: \"NO_EXECUTION_BINDING\", settlementObserver: ctx.settlementObserver ?? \"NOT_EVALUATED\" },",
+    replace: "    { integrity: \"INTACT\", authorization: ctx.authorization, settlement: \"UNCHECKED\", settlementObserver: ctx.settlementObserver ?? \"NOT_EVALUATED\" },",
     kind: "tests",
     suite: ["packages/evidence", "npm", ["test"]],
   },
@@ -3431,8 +3474,33 @@ const KNOCKOUTS = [
       "in-process consumer can, and a verifier whose past answers its own caller can edit is not " +
       "offering a verdict. The mutation restores the shared object.",
     file: "packages/evidence/src/verify-evidence.ts",
-    find: "function nothingProven(): VerdictDimensions {\n  return { integrity: \"BROKEN\", authorization: \"UNCHECKED\", settlement: \"UNCHECKED\" };\n}",
-    replace: "const SHARED_NOTHING_PROVEN: VerdictDimensions = { integrity: \"BROKEN\", authorization: \"UNCHECKED\", settlement: \"UNCHECKED\" };\nfunction nothingProven(): VerdictDimensions {\n  return SHARED_NOTHING_PROVEN;\n}",
+    find: "  return { integrity: \"BROKEN\", authorization: \"UNCHECKED\", settlement: \"UNCHECKED\", settlementObserver: \"NOT_EVALUATED\" };\n}",
+    replace: "  return SHARED_NOTHING_PROVEN;\n}\nconst SHARED_NOTHING_PROVEN: VerdictDimensions = { integrity: \"BROKEN\", authorization: \"UNCHECKED\", settlement: \"UNCHECKED\", settlementObserver: \"NOT_EVALUATED\" };",
+    kind: "tests",
+    suite: ["packages/evidence", "npm", ["test"]],
+  },
+  {
+    id: "settlement-observer-relationship-is-carried-out",
+    control:
+      "The reconciler's observer-to-execution-signer relationship reaches the result. It was derived " +
+      "on every call and read nowhere in packages/evidence, so a settlement witnessed by the " +
+      "execution signer's own key rode a VALID_FULL_CHAIN with nothing in the result saying so. " +
+      "The mutation hardcodes the relationship to UNKNOWN; the focused observer suite must detect it.",
+    file: "packages/evidence/src/steps.ts",
+    find: "  ctx.settlementObserver = observerRelationshipOf(r.observerRelationship);",
+    replace: "  ctx.settlementObserver = \"UNKNOWN\";",
+    kind: "tests",
+    suite: ["packages/evidence", "npm", ["test"]],
+  },
+  {
+    id: "settlement-reconciler-warnings-are-not-discarded",
+    control:
+      "The reconciler's closed-set warnings are carried into the result instead of discarded. " +
+      "Warnings remain reporting-only, but a warning no consumer can read is not an effective warning. " +
+      "The mutation removes only that propagation; the focused observer suite must detect it.",
+    file: "packages/evidence/src/steps.ts",
+    find: "  for (const w of settlementWarningsOf(r.warnings)) ctx.warnings.push(w);",
+    replace: "",
     kind: "tests",
     suite: ["packages/evidence", "npm", ["test"]],
   },
@@ -3479,8 +3547,8 @@ const KNOCKOUTS = [
       "because the corpus runner never passes `purpose`: it was invisible to every fixture-driven " +
       "assertion, which is why the behavioural two-run pin exists.",
     file: "packages/evidence/src/verify-evidence.ts",
-    find: "    { integrity: \"INTACT\", authorization: ctx.authorization, settlement: \"NO_EXECUTION_BINDING\" },\n    // REPORTED, not hardcoded",
-    replace: "    { integrity: \"INTACT\", authorization: ctx.authorization, settlement: purpose === \"authorize\" ? \"ATTESTED_UNVERIFIED\" : \"NO_EXECUTION_BINDING\" },\n    // REPORTED, not hardcoded",
+    find: "settlement: \"NO_EXECUTION_BINDING\", settlementObserver: ctx.settlementObserver ?? \"NOT_EVALUATED\" },",
+    replace: "settlement: purpose === \"authorize\" ? \"ATTESTED_UNVERIFIED\" : \"NO_EXECUTION_BINDING\", settlementObserver: ctx.settlementObserver ?? \"NOT_EVALUATED\" },",
     kind: "tests",
     suite: ["packages/evidence", "npm", ["test"]],
   },

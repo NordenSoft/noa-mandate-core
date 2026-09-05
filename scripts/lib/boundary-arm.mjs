@@ -115,9 +115,9 @@ const ARM_CHILD_OUTPUT_MAX_BYTES = 1024 * 1024;
 // Counts are diagnostics only. The domain-separated, reviewed ID-set digests below are the case-plan
 // authority; both manifests were recalculated from these exact registered bytes by independent
 // execution and syntax-tree calculators.
-const ARM_DIAGNOSTIC_FULL_CASE_COUNT = 249;
+const ARM_DIAGNOSTIC_FULL_CASE_COUNT = 254;
 const ARM_DIAGNOSTIC_SPOOL_ONLY_CASE_COUNT = 23;
-const ARM_REVIEWED_FULL_CASE_PLAN_SHA256 = "2f9bb551b3be2bcace728b3340aa438504189fcf82dbe1faecbb6ee4617ee35d";
+const ARM_REVIEWED_FULL_CASE_PLAN_SHA256 = "f9f32d81c09d933e1c900b46c5fec5dbbb8fe9d0e21aefb27fe83adb53fbb12a";
 const ARM_REVIEWED_SPOOL_ONLY_CASE_PLAN_SHA256 = "a03420b437d9c15e9c0213844f6d911fc01494cba6ab658be242f22f2875e188";
 const ARM_TERMINAL_WATCHDOG_MS = 10 * 60 * 1000;
 
@@ -166,9 +166,14 @@ const ARM_STATIC_CASES = Object.freeze({
   case_the_real_push_hook_selects_and_writes_only_its_isolated_arm_evi_0331903f: defineArmCase("case.the-real-push-hook-selects-and-writes-only-its-isolated-arm-evidence-spool", "the real-push hook selects and writes only its isolated arm evidence spool", ARM_FULL_ONLY),
   case_pre_push_new_branch_destination_refs_are_used_and_an_older_blob_864a9483: defineArmCase("case.pre-push-new-branch-destination-refs-are-used-and-an-older-blob-version-is-found", "pre-push new branch: destination refs are used and an older blob version is FOUND", ARM_FULL_ONLY),
   case_pre_push_new_branch_the_same_destination_derived_path_goes_clea_0d02024c: defineArmCase("case.pre-push-new-branch-the-same-destination-derived-path-goes-clean-without-the-plant", "pre-push new branch: the same destination-derived path goes CLEAN without the plant", ARM_FULL_ONLY),
+  case_pre_push_new_branch_ignores_unavailable_destination_tips_and_finds_older_blob: defineArmCase("case.pre-push-new-branch-ignores-unavailable-destination-tips-and-finds-older-blob", "pre-push new branch: unavailable disconnected destination tips broaden scanning and an older blob is FOUND", ARM_FULL_ONLY),
+  case_pre_push_new_branch_with_unavailable_destination_tips_goes_clean: defineArmCase("case.pre-push-new-branch-with-unavailable-destination-tips-goes-clean", "pre-push new branch: unavailable disconnected destination tips still permit a fully scanned CLEAN result", ARM_FULL_ONLY),
+  case_pre_push_existing_ref_with_unavailable_destination_tip_finds_older_blob: defineArmCase("case.pre-push-existing-ref-with-unavailable-destination-tip-finds-older-blob", "pre-push existing ref: an unavailable disconnected destination tip broadens scanning and an older blob is FOUND", ARM_FULL_ONLY),
+  case_pre_push_existing_ref_with_unavailable_destination_tip_goes_clean: defineArmCase("case.pre-push-existing-ref-with-unavailable-destination-tip-goes-clean", "pre-push existing ref: an unavailable disconnected destination tip still permits a fully scanned CLEAN result", ARM_FULL_ONLY),
   case_pre_push_annotated_tag_the_tag_object_annotation_is_found_even__c2aeff84: defineArmCase("case.pre-push-annotated-tag-the-tag-object-annotation-is-found-even-when-its-commit-already-exists-remotely", "pre-push annotated tag: the tag object annotation is FOUND even when its commit already exists remotely", ARM_FULL_ONLY),
   case_pre_push_annotated_tag_the_exact_destination_tag_name_is_found__63c9c60f: defineArmCase("case.pre-push-annotated-tag-the-exact-destination-tag-name-is-found-independently-of-local-name", "pre-push annotated tag: the exact destination tag name is FOUND independently of local name", ARM_FULL_ONLY),
   case_pre_push_annotated_tag_clean_object_and_clean_names_go_clean: defineArmCase("case.pre-push-annotated-tag-clean-object-and-clean-names-go-clean", "pre-push annotated tag: clean object and clean names go CLEAN", ARM_FULL_ONLY),
+  case_pre_push_tag_targeting_non_commit_object_fails_closed: defineArmCase("case.pre-push-tag-targeting-non-commit-object-fails-closed", "pre-push tag: a blob target is refused because commit-history lanes cannot enumerate it", ARM_FULL_ONLY),
   case_the_working_tree_lane_is_clean_again_after_every_shape_plant: defineArmCase("case.the-working-tree-lane-is-clean-again-after-every-shape-plant", "the working-tree lane is clean again after every shape plant", ARM_FULL_ONLY),
   case_ratchet_a_finding_with_no_ledger_entry_blocks: defineArmCase("case.ratchet-a-finding-with-no-ledger-entry-blocks", "ratchet: a finding with no ledger entry BLOCKS", ARM_FULL_ONLY),
   case_ratchet_the_same_finding_with_a_reviewed_entry_is_carried: defineArmCase("case.ratchet-the-same-finding-with-a-reviewed-entry-is-carried", "ratchet: the same finding with a reviewed entry is CARRIED", ARM_FULL_ONLY),
@@ -2525,6 +2530,76 @@ export async function runArm({ root, knockoutJson, spoolOnly = false }) {
         `exit ${coldBranch.code}\n${coldBranch.out.slice(0, 700)}`);
       git(repo, ["reset", "-q", "--hard", before]);
 
+      // Clean-history publication cannot possess the destination's old object graph. Model that
+      // topology with an unrelated source repository and prove both pre-push modes scan the full
+      // locally-known ancestry instead of passing a missing remote OID to `rev-list --not`.
+      const disconnectedSource = join(work, "arm-disconnected-source");
+      const disconnectedRemote = join(work, "arm-disconnected-remote.git");
+      buildSyntheticRepo(disconnectedSource, root);
+      git(work, ["init", "-q", "--bare", disconnectedRemote], true);
+      git(disconnectedSource, ["push", "--no-verify", "-q", disconnectedRemote, "HEAD:refs/heads/main"]);
+      const unavailableRemoteSha = git(disconnectedSource, ["rev-parse", "HEAD"]).stdout.trim();
+      const accidentalLocalCopy = git(
+        repo,
+        ["cat-file", "-e", `${unavailableRemoteSha}^{object}`],
+        true,
+      );
+      if (accidentalLocalCopy.status === 0) {
+        throw new Error("the disconnected-history arm accidentally shares its destination tip");
+      }
+      const disconnectedRefArgs = [
+        "--lane", "L-WT", "--refs-from-stdin",
+        "--pre-push-remote", disconnectedRemote, "--pre-push-url", disconnectedRemote,
+      ];
+      const disconnectedBase = git(repo, ["rev-parse", "HEAD"]).stdout.trim();
+      writeFileSync(join(repo, "disconnected-history.md"), `historical ${canary}\n`);
+      git(repo, ["add", "disconnected-history.md"]);
+      git(repo, ["commit", "-q", "-m", "chore: disconnected history plant"]);
+      writeFileSync(join(repo, "disconnected-history.md"), "clean at the disconnected tip\n");
+      git(repo, ["add", "disconnected-history.md"]);
+      git(repo, ["commit", "-q", "-m", "chore: scrub disconnected history tip"]);
+      const disconnectedHotSha = git(repo, ["rev-parse", "HEAD"]).stdout.trim();
+      const disconnectedNewHot = run(disconnectedRefArgs, {
+        input: `HEAD ${disconnectedHotSha} refs/heads/clean-candidate ${zeros}\n`,
+      });
+      check(
+        ARM_STATIC_CASES.case_pre_push_new_branch_ignores_unavailable_destination_tips_and_finds_older_blob,
+        disconnectedNewHot.code === 1
+          && disconnectedNewHot.findings.some((finding) => finding.rule === "token-commitment")
+          && !disconnectedNewHot.out.includes(canary),
+        `exit ${disconnectedNewHot.code}; rules ${JSON.stringify(disconnectedNewHot.findings.map((finding) => finding.rule))}`,
+      );
+      const disconnectedExistingHot = run(disconnectedRefArgs, {
+        input: `HEAD ${disconnectedHotSha} refs/heads/main ${unavailableRemoteSha}\n`,
+      });
+      check(
+        ARM_STATIC_CASES.case_pre_push_existing_ref_with_unavailable_destination_tip_finds_older_blob,
+        disconnectedExistingHot.code === 1
+          && disconnectedExistingHot.findings.some((finding) => finding.rule === "token-commitment")
+          && !disconnectedExistingHot.out.includes(canary),
+        `exit ${disconnectedExistingHot.code}; rules ${JSON.stringify(disconnectedExistingHot.findings.map((finding) => finding.rule))}`,
+      );
+      git(repo, ["reset", "-q", "--hard", disconnectedBase]);
+      git(repo, ["commit", "-q", "--allow-empty", "-m", "chore: clean disconnected candidate"]);
+      const disconnectedColdSha = git(repo, ["rev-parse", "HEAD"]).stdout.trim();
+      const disconnectedNewCold = run(disconnectedRefArgs, {
+        input: `HEAD ${disconnectedColdSha} refs/heads/clean-candidate ${zeros}\n`,
+      });
+      check(
+        ARM_STATIC_CASES.case_pre_push_new_branch_with_unavailable_destination_tips_goes_clean,
+        disconnectedNewCold.code === 0,
+        `exit ${disconnectedNewCold.code}\n${disconnectedNewCold.out.slice(0, 700)}`,
+      );
+      const disconnectedExistingCold = run(disconnectedRefArgs, {
+        input: `HEAD ${disconnectedColdSha} refs/heads/main ${unavailableRemoteSha}\n`,
+      });
+      check(
+        ARM_STATIC_CASES.case_pre_push_existing_ref_with_unavailable_destination_tip_goes_clean,
+        disconnectedExistingCold.code === 0,
+        `exit ${disconnectedExistingCold.code}\n${disconnectedExistingCold.out.slice(0, 700)}`,
+      );
+      git(repo, ["reset", "-q", "--hard", before]);
+
       const annotatedName = "arm-annotated";
       git(repo, ["tag", "-a", annotatedName, "-m", `release ${canary}`, "HEAD"]);
       const annotatedSha = git(repo, ["rev-parse", `refs/tags/${annotatedName}`]).stdout.trim();
@@ -2555,6 +2630,25 @@ export async function runArm({ root, knockoutJson, spoolOnly = false }) {
       check(ARM_STATIC_CASES.case_pre_push_annotated_tag_clean_object_and_clean_names_go_clean, cleanTagRun.code === 0,
         `exit ${cleanTagRun.code}\n${cleanTagRun.out.slice(0, 700)}`);
       git(repo, ["tag", "-d", cleanTag]);
+
+      const blobFixturePath = join(repo, "arm-non-commit-tag-target.txt");
+      writeFileSync(blobFixturePath, "harmless blob tag target\n");
+      const blobTargetSha = git(repo, ["hash-object", "-w", blobFixturePath]).stdout.trim();
+      unlinkSync(blobFixturePath);
+      const blobTag = "arm-blob-target";
+      git(repo, ["update-ref", `refs/tags/${blobTag}`, blobTargetSha]);
+      const blobTagRun = run(["--lane", "L-TAG", ...refArgs.slice(2)], {
+        input: `refs/tags/${blobTag} ${blobTargetSha} refs/tags/${blobTag} ${zeros}\n`,
+      });
+      check(
+        ARM_STATIC_CASES.case_pre_push_tag_targeting_non_commit_object_fails_closed,
+        blobTagRun.code === 2
+          && blobTagRun.findings.some((finding) =>
+            finding.rule === "SETUP_FAILED"
+              && finding.subject === "a pushed tag terminates at a non-commit object"),
+        `exit ${blobTagRun.code}; findings ${JSON.stringify(blobTagRun.findings.map((finding) => [finding.rule, finding.subject]))}`,
+      );
+      git(repo, ["update-ref", "-d", `refs/tags/${blobTag}`]);
 
       // A tag whose benign name resembles another full ref must still be dereferenced through its
       // exact refs/tags identity; short-name resolution may not let a branch shadow its annotation.

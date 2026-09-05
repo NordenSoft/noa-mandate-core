@@ -178,7 +178,7 @@ export function runApproveCli(argv) {
   }
 
   const ts = new Date().toISOString();
-  // D8 / GDPR-CCPA (THREAT-MODEL-ADDENDUM §5): the raw `--by` email is a low-entropy PII identifier and
+  // Privacy contract (THREAT-MODEL.md, "Privacy and data minimisation"): the raw `--by` email is a low-entropy PII identifier and
   // MUST NOT enter the SIGNED receipt bytes. Pseudonymize it to a deterministic, tenant-scoped, opaque
   // `hmac-sha256:` id (opaque-id.mjs) — the same opaque shape the mobile/HTTP path already uses (a device
   // kid). Tenant is read off the DEFERRED hold so the id de-correlates across tenants. The raw email is

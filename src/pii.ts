@@ -1,7 +1,7 @@
 /**
  * pii.ts — deterministic, PII-free pseudonymization for low-entropy receipt identifiers (D8).
  *
- * The D8 / GDPR-CCPA "hash-only PII" contract (THREAT-MODEL-ADDENDUM §5) forbids a raw, low-entropy
+ * The public privacy and data-minimisation contract (THREAT-MODEL.md) forbids a raw, low-entropy
  * identifier (an email, a phone number) from entering the SIGNED receipt bytes. Any producer that puts
  * a human identifier into `governance.approval.by` MUST pseudonymize it first — this is that helper.
  * (The offline MCP approval CLI has its own byte-identical mirror at

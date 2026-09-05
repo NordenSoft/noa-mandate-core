@@ -8,7 +8,13 @@
  */
 
 export { createRelay, type Relay, type CreateRelayOptions } from "./server.js";
-export { RelayEngine, type EngineResult, type RelayEngineDeps } from "./engine.js";
+export {
+  RelayEngine,
+  buildApprovalDeepLink,
+  type ApprovalDeepLinkBuilder,
+  type EngineResult,
+  type RelayEngineDeps,
+} from "./engine.js";
 export {
   InMemoryStore,
   ManifestPutConflictError,

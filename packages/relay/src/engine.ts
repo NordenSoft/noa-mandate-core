@@ -143,14 +143,40 @@ export interface RelayEngineDeps {
   store: Store;
   push: PushProvider;
   config: RelayConfig;
+  /**
+   * Deployment-owned navigation contract. The argument is an already percent-encoded hold-id
+   * path segment; deployments may return an application URI or HTTPS URL.
+   */
+  approvalDeepLinkBuilder?: ApprovalDeepLinkBuilder;
   /** Structured log sink (no raw params / no PII ever passed in). */
   log?: (event: string, fields: Record<string, unknown>) => void;
+}
+
+export type ApprovalDeepLinkBuilder = (encodedHoldId: string) => string;
+
+const legacyApprovalDeepLink: ApprovalDeepLinkBuilder =
+  (encodedHoldId) => `/app/approve/${encodedHoldId}`;
+
+/**
+ * Preserve the original public route by default while allowing a deployment to own navigation.
+ * The hold id is encoded exactly once before it reaches either builder.
+ */
+export function buildApprovalDeepLink(
+  holdId: string,
+  builder: ApprovalDeepLinkBuilder = legacyApprovalDeepLink,
+): string {
+  const deepLink = builder(encodeURIComponent(holdId));
+  if (typeof deepLink !== "string" || deepLink.length === 0 || deepLink.length > 2_048) {
+    throw new Error("approval deep-link builder must return a non-empty string of at most 2048 characters");
+  }
+  return deepLink;
 }
 
 export class RelayEngine {
   private readonly store: Store;
   private readonly push: PushProvider;
   private readonly cfg: RelayConfig;
+  private readonly approvalDeepLinkBuilder: ApprovalDeepLinkBuilder;
   private readonly log: (event: string, fields: Record<string, unknown>) => void;
   private readonly waiters = new Map<string, Set<Waiter>>();
 
@@ -158,6 +184,7 @@ export class RelayEngine {
     this.store = deps.store;
     this.push = deps.push;
     this.cfg = deps.config;
+    this.approvalDeepLinkBuilder = deps.approvalDeepLinkBuilder ?? legacyApprovalDeepLink;
     this.log = deps.log ?? (() => {});
   }
 
@@ -1327,11 +1354,20 @@ export class RelayEngine {
   }
 
   private async notify(hold: HoldRecord): Promise<void> {
+    let deepLink: string;
+    try {
+      deepLink = buildApprovalDeepLink(hold.id, this.approvalDeepLinkBuilder);
+    } catch {
+      // Push is a degraded-mode hint; clients also poll. A bad deployment navigation callback must
+      // not reject hold creation or escape as an unhandled fire-and-forget promise rejection.
+      this.log("push.deep_link.invalid", { holdId: hold.id });
+      return;
+    }
     const msg: PushMessage = {
       holdId: hold.id,
       title: "Approval needed",
       body: `Pending: ${hold.action.canonical}`,
-      deepLink: `/approvals/${hold.id}`,
+      deepLink,
     };
     for (const device of this.store.listAllDevices()) {
       if (device.revokedAt !== null) continue;

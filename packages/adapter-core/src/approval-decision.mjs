@@ -75,7 +75,7 @@ export function buildApprovalReceipt({ deferredReceipt, by, ts, signer, agentId 
  * Builds the BLOCKED decision receipt for a denial. No ticket — the held call is terminally
  * refused; the session unblocks once the pending-store status becomes "denied".
  *
- * D8 / GDPR-CCPA (THREAT-MODEL-ADDENDUM §5): the `ruleId` is a FIXED machine-readable code
+ * Privacy contract (THREAT-MODEL.md, "Privacy and data minimisation"): the `ruleId` is a FIXED machine-readable code
  * `"human-denied"` — a human's free-text denial reason is NEVER folded into it (a signed, hash-chained,
  * structured field must not carry free text: PII-at-rest + injection risk). The reason, if the operator
  * supplied one, is kept only in the LOCAL non-signed pending-store index (recordDenied), never in the

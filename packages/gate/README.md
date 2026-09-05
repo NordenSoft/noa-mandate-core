@@ -25,12 +25,68 @@ The exact schemas and signing rules live in [`noa-approval-artifacts`](../approv
 
 ## Public HTTP contract
 
-The reference server exposes versioned routes to create and inspect a hold, wait for a decision,
-submit a signed decision, cancel a hold, reserve a grant before dispatch, and report the resulting
-attempt. Mutating client routes require authentication and idempotency where specified by the API.
+Every route except health requires an agent bearer credential. Routes operating on a hold or grant
+also enforce ownership, except `POST .../decision`: that route re-verifies the approver-signed
+artifact cryptographically and deliberately does not treat the transport bearer as approval
+authority.
+
+| Method and route | Purpose |
+| --- | --- |
+| `GET /health` | Process health and declared trust role |
+| `POST /v1/holds` | Create an idempotent hold from bounded request bytes |
+| `GET /v1/holds/:id` | Read an owned hold |
+| `GET /v1/holds/:id/wait?timeout=...` | Long-poll an owned hold; timeout is clamped to 25 seconds |
+| `POST /v1/holds/:id/decision` | Submit signed approval material for gate verification |
+| `POST /v1/holds/:id/cancel` | Record local-state loss without inventing an execution outcome |
+| `POST /v1/grants/:id/reserve` | Atomically reserve a single-use grant before dispatch |
+| `POST /v1/grants/:id/report` | Submit bounded attempt-report bytes; unknown outcomes remain explicit |
+
+`POST /v1/holds` requires `Idempotency-Key`. Request bodies are size-bounded and delivered to the
+engine as bytes rather than caller-owned objects.
 
 Route names and payloads are an implementation surface, not proof that a particular client,
 identity provider, notification service, storage backend, or deployment is available.
+
+## Starting the reference server
+
+`noa-gate serve` binds to `127.0.0.1:8899` by default. `NOA_GATE_TENANT`, `NOA_GATE_BIND`, and
+`NOA_GATE_PORT` select the development tenant and listener. The command refuses to keep the execution
+grant key silently in process memory: choose exactly one explicit posture.
+
+For an out-of-process grant signer, provide:
+
+```text
+NOA_GATE_GRANT_SIGNER_SOCKET
+NOA_GATE_GRANT_SIGNER_KID
+NOA_GATE_GRANT_SIGNER_PUBLIC_KEY
+NOA_GATE_APPROVER_KID
+NOA_GATE_APPROVER_PUBLIC_KEY
+NOA_GATE_APPROVER_HPKE_PUBLIC_KEY
+```
+
+For local development only, set `NOA_GATE_UNSAFE_IN_PROCESS_GRANT_KEY=1`. This is an acknowledged
+weaker custody posture, not a protected deployment mode.
+
+The command-line server does not provision a display sealer. Registered encrypted-display inputs
+can be supplied by an embedder; a raw plaintext display fails closed.
+
+## Out-of-process signer custody
+
+Start `noa-gate-grant-signer` separately with `--key-file`, `--trust-file`, and `--socket`. Optional
+bounds include `--max-approval-age-ms`, `--max-grant-ttl-ms`, and `--replay-file`.
+
+- The key and trust files must be operator-provisioned and permission-restricted.
+- The socket directory must be `0700`, or `0750` for a group shared with a separate gate OS user;
+  world access and group write are refused.
+- The socket defaults to mode `0600`; use `--socket-mode 660` only with an intentionally shared
+  group.
+- The gate pins the expected signer kid and public key from operator configuration. It does not ask
+  the socket to define its own identity.
+- Spent approvals are journaled durably so a restart cannot silently authorize a second grant from
+  one approval.
+
+Running both processes as the same OS user weakens the custody claim because that user may be able
+to read the key file. Process separation alone is not an HSM.
 
 ## Intent binding and execution
 

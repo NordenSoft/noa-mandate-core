@@ -11,15 +11,14 @@
  *   4  UNVERIFIED                               (no external trust root / checkpoint keyring supplied, F7a)
  *   5  usage / IO error
  *   6  INCONCLUSIVE                             (the settlement question was asked and not answered)
- *      DEFINED, and NOT REACHABLE from this build — no rule here assigns a settlement value that
- *      produces it. The first rule that can is the one admitting a settlement artifact with no
- *      verified params preimage. Documented now so the number is reserved and a consumer can wire
- *      it; not claimed to fire.
+ *      REACHABLE: for example, a settlement artifact with no verifiable params preimage produces
+ *      `BOUNDS_UNCHECKABLE`. The built CLI test measures the real process status.
  *   7  internal invariant violation — a (verdict, enrolment, settlement) tuple the rules cannot
  *      produce reached the exit mapper. A statement about THIS VERIFIER, never about the evidence.
  *
- * The JSON result carries two fields beyond the pre-settlement shape, both always present:
- * `enrolment` (was the enrolment question asked at all) and `dimensions.settlement`.
+ * The JSON result carries three fields beyond the pre-settlement shape, all always present:
+ * `enrolment` (was the enrolment question asked at all), `dimensions.settlement`, and the
+ * reporting-only `dimensions.settlementObserver` relationship.
  *
  * The mapping itself lives in `exit-codes.ts`, not here, and it is DERIVED from the dimension rules
  * rather than authored beside them — see that file for why an exit table written separately from the

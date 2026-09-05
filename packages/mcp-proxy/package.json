@@ -48,9 +48,10 @@
   },
   "overrides": {
     "@hono/node-server": "^2.0.5",
-    "fast-uri": "^3.1.5",
+    "fast-uri": "^3.1.7",
     "hono": "^4.12.34",
-    "ip-address": "^10.4.0"
+    "ip-address": "^10.4.0",
+    "qs": "^6.16.0"
   },
   "optionalDependencies": {
     "noa-signer-sidecar": "file:../signer-sidecar"

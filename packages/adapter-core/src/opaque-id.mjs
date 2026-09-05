@@ -6,7 +6,7 @@
  * algorithm is duplicated here — keep the two BYTE-IDENTICAL (same domain tag, separator, and
  * normalization). Same rationale as approval-decision.mjs's RECEIPT_SIG_DOMAIN mirror.
  *
- * The D8 / GDPR-CCPA "hash-only PII" contract (THREAT-MODEL-ADDENDUM §5) forbids a raw, low-entropy
+ * The public privacy and data-minimisation contract (THREAT-MODEL.md) forbids a raw, low-entropy
  * identifier (an email, a phone number) from ever entering the SIGNED receipt bytes. Approver
  * identity in a signed receipt (`governance.approval.by`) MUST therefore be an OPAQUE id — the same
  * shape the mobile/HTTP path already uses (an opaque device kid, `phone.ts:285`). This module gives

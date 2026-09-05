@@ -37,6 +37,11 @@ import { EVASION_MATRIX } from "./lib/dispatch-ast-matrix.mjs";
 import { emitGateEvidence } from "./lib/gate-event-contract.mjs";
 import { emit as emitVerdict, report as reportVerdict } from "./lib/verdict.mjs";
 import { fileSetUnder } from "./lib/enumerate.mjs";
+import {
+  exactRatchetProblems,
+  parseCountSnapshot,
+  ratchetIncreases,
+} from "./lib/security-ratchet.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const rel = (p) => path.relative(ROOT, p);
@@ -1319,13 +1324,106 @@ for (const lint of LINTS) {
   }
 }
 
+// ── THE RATCHET, WHICH UNTIL NOW WAS ONLY A SENTENCE ───────────────────────────────────────────
+//
+// The budget check above catches a count that exceeds its ceiling, but any improvement below that
+// ceiling leaves slack a later regression can spend. A ratchet compares against the LAST RECORDED
+// COUNT instead. It is intentionally tight in both directions: a rise is a regression and fails; a
+// fall means the recorded number is stale and also fails until the improvement is recorded. This
+// turns every reduction into a visible change and never carries its slack forward.
+const RATCHET_FILE = path.join(ROOT, "scripts", "security-gate-counts.json");
+const ratchetable = summary.filter((s) => s.mode === "warn" && typeof s.count === "number" && s.count >= 0);
+
+if (process.argv.includes("--write-security-counts")) {
+  // A gate whose normal update command can silently raise its own floor has no floor. Tightening is
+  // the routine operation. Raising requires a separately named flag with a written justification,
+  // so it cannot be laundered through the command used to record an improvement.
+  let prior = {};
+  if (fs.existsSync(RATCHET_FILE)) {
+    try {
+      prior = parseCountSnapshot(fs.readFileSync(RATCHET_FILE, "utf8"));
+    } catch (error) {
+      console.error(
+        `REFUSING TO OVERWRITE AN INVALID RATCHET SNAPSHOT: ${error instanceof Error ? error.message : String(error)}. ` +
+        `Inspect ${path.relative(ROOT, RATCHET_FILE)} before recording counts.`,
+      );
+      process.exit(1);
+    }
+  }
+  const increases = ratchetIncreases(ratchetable, prior)
+    .map((problem) => `${problem.id}: ${problem.was} → ${problem.current}`);
+  const overrideArg = process.argv.find((a) => a.startsWith("--allow-ratchet-increase="));
+  const justification = overrideArg ? overrideArg.slice("--allow-ratchet-increase=".length).trim() : "";
+
+  if (increases.length > 0 && justification.length < 12) {
+    console.error(
+      `\nREFUSING TO RAISE THE RATCHET.\n\n` +
+      `  ${increases.length} gate(s) would INCREASE:\n` +
+      increases.map((l) => `    ${l}`).join("\n") +
+      `\n\n  This command tightens a ratchet; it does not relax one. Raising a floor hides a new\n` +
+      `  prohibited construct on a decision path, which is the exact thing these counts exist to\n` +
+      `  make visible — and doing it through the normal re-record command makes it invisible in\n` +
+      `  review as well.\n\n` +
+      `  Fix the regression, or record a deliberate increase with a written reason:\n` +
+      `    node scripts/lint-security-gates.mjs --write-security-counts \\\n` +
+      `      --allow-ratchet-increase="why this new violation is accepted"\n`,
+    );
+    process.exit(1);
+  }
+
+  const next = Object.fromEntries(
+    ratchetable.map((s) => [s.id, s.count]).sort((a, b) => a[0].localeCompare(b[0])),
+  );
+  fs.writeFileSync(RATCHET_FILE, `${JSON.stringify(next, null, 2)}\n`);
+  console.log(`recorded ${Object.keys(next).length} warn-mode count(s) to ${path.relative(ROOT, RATCHET_FILE)}`);
+  if (increases.length > 0) {
+    console.log(`\n⚠ DELIBERATE INCREASE recorded for ${increases.length} gate(s): ${increases.join(", ")}`);
+    console.log(`  justification: ${justification}`);
+  }
+  process.exit(0);
+}
+
+let recorded = null;
+try {
+  recorded = parseCountSnapshot(fs.readFileSync(RATCHET_FILE, "utf8"));
+} catch {
+  add("RATCHET", path.relative(ROOT, RATCHET_FILE), 0,
+    `the recorded warn-mode counts are missing, unreadable, or invalid, so no regression can be detected. ` +
+    `Create them: node scripts/lint-security-gates.mjs --write-security-counts`);
+  exitCode = 1;
+}
+if (recorded !== null) {
+  for (const problem of exactRatchetProblems(ratchetable, recorded)) {
+    if (problem.kind === "missing") {
+      add("RATCHET", "-", 0,
+        `${problem.id} has no recorded count, so it has no ratchet and any number of new violations would ` +
+        `pass. Record it: node scripts/lint-security-gates.mjs --write-security-counts`);
+      exitCode = 1;
+    } else if (problem.kind === "rise") {
+      add("RATCHET", "-", 0,
+        `REGRESSION: ${problem.id} rose from ${problem.was} to ${problem.current}. A warn-mode gate blocks on ANY rise — ` +
+        `that is what "the count may only fall" means, and a budget with slack is not that.`);
+      exitCode = 1;
+    } else if (problem.kind === "fall") {
+      add("RATCHET", "-", 0,
+        `${problem.id} FELL from ${problem.was} to ${problem.current} — good, and the ratchet must be tightened to match or ` +
+        `it carries ${problem.was - problem.current} finding(s) of slack for a later regression to spend. ` +
+        `Re-record: node scripts/lint-security-gates.mjs --write-security-counts`);
+      exitCode = 1;
+    } else if (problem.kind === "obsolete") {
+      add("RATCHET", "-", 0, `${problem.id} is recorded but is no longer a warn-mode gate — re-record to drop it.`);
+      exitCode = 1;
+    }
+  }
+}
+
 // L1's registry-staleness finding blocks regardless of L1's warn mode: it is not a migration
 // scoreboard, it is "someone changed the public surface and nothing looked at it".
 if (findings.some((f) => f.lint === "L1" && f.file === "conformance/ENTRY-POINTS.md")) exitCode = 1;
 
 const blocking = findings.filter((f) => {
   const l = LINTS.find((x) => x.id === f.lint);
-  return l?.mode === "block" || f.msg.startsWith("BUDGET EXCEEDED") || f.msg.startsWith("LINT ITSELF FAILED") || f.file === "conformance/ENTRY-POINTS.md";
+  return l?.mode === "block" || f.lint === "RATCHET" || f.msg.startsWith("BUDGET EXCEEDED") || f.msg.startsWith("LINT ITSELF FAILED") || f.file === "conformance/ENTRY-POINTS.md";
 });
 
 if (process.argv.includes("--knockout-json")) {
@@ -1338,7 +1436,14 @@ if (process.argv.includes("--knockout-json")) {
 }
 
 if (process.argv.includes("--json")) {
-  console.log(JSON.stringify({ summary: summary.map((s) => ({ id: s.id, mode: s.mode, count: s.count, budget: s.budget ?? null })), findings }, null, 2));
+  // `findings` is large enough that console.log followed by an immediate process.exit can truncate
+  // a pipe mid-string. This mode is a machine contract, so wait until the writable has accepted and
+  // flushed the entire document before exiting; a one-shot sync write can itself be partial/EAGAIN
+  // on a non-blocking pipe.
+  const payload = `${JSON.stringify({ summary: summary.map((s) => ({ id: s.id, mode: s.mode, count: s.count, budget: s.budget ?? null })), findings }, null, 2)}\n`;
+  await new Promise((resolve, reject) => {
+    process.stdout.write(payload, (error) => error ? reject(error) : resolve());
+  });
   process.exit(exitCode);
 }
 

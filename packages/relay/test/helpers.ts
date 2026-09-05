@@ -14,7 +14,7 @@ import {
 import { InMemoryStore, type Store } from "../src/store.js";
 import { NoopLogPushProvider } from "../src/push.js";
 import { resolveConfig, type RelayConfig } from "../src/config.js";
-import { RelayEngine } from "../src/engine.js";
+import { RelayEngine, type ApprovalDeepLinkBuilder } from "../src/engine.js";
 import type { AgentRecord, DeviceRecord } from "../src/types.js";
 
 export const PARAMS_HASH = "sha256:" + "a".repeat(64);
@@ -50,7 +50,11 @@ export interface Harness {
   logs: Array<{ event: string; fields: Record<string, unknown> }>;
 }
 
-export function makeHarness(overrides: Partial<RelayConfig> = {}, storeOverride?: Store): Harness {
+export function makeHarness(
+  overrides: Partial<RelayConfig> = {},
+  storeOverride?: Store,
+  approvalDeepLinkBuilder?: ApprovalDeepLinkBuilder,
+): Harness {
   const clock: Clock = { t: 1_700_000_000_000 };
   // R8-07: enrolment is CLOSED by default in production, so a test harness that mints credentials
   // has to say so. Declared here once, visibly, rather than inherited from a bind address —
@@ -63,6 +67,7 @@ export function makeHarness(overrides: Partial<RelayConfig> = {}, storeOverride?
     store,
     push,
     config,
+    ...(approvalDeepLinkBuilder ? { approvalDeepLinkBuilder } : {}),
     log: (event, fields) => {
       logs[logs.length] = { event, fields };
     },

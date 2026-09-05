@@ -109,13 +109,15 @@ nothing executed*.
 
 ### The result also says what it did NOT check
 
-Two fields are present on every result, and both describe what the verifier was *asked*, not only
-what it found:
+Three fields are present on every result. The first two describe what the verifier was *asked*, not
+only what it found; the observer field reports a relationship the settlement reconciler actually
+derived and does not alter the verdict or exit code:
 
 | Field | Meaning |
 |---|---|
 | `enrolment` | whether the enrolment question was asked at all, and what it found. `NOT_EVALUATED` — nobody asked: either no registry was supplied, or the outcome asserts no execution effect for a class to be enrolled in. `UNVERIFIABLE` — registries were supplied and none authenticates, is closed, or is addressed to this reader. `OUT_OF_WINDOW` — no selected registry's window contains this bundle's authorization instant. `CLASS_ABSENT` — the class is positively absent, which buys nothing. `CONTRADICTED` — a selected registry contradicts the bundle. `ENROLLED` — settlement evidence is required for a positive. |
 | `dimensions.settlement` | the settlement question, reported beside `integrity` and `authorization` because the three can legitimately disagree. `NO_EXECUTION_BINDING` on a completed run (no execution binding was established for this bundle); `UNCHECKED` on a run that stopped before the settlement rule; `BOUNDS_UNCHECKABLE` when a settlement artifact arrived with no verifiable params preimage, so nothing about the money was compared to anything — this is **not** "passed"; `NOT_ESTABLISHED` when the class is enrolled and no admissible determinate witness answered; `ATTESTED_UNVERIFIED` when an artifact asserts settlement, ships the coordinates to check it, and **nobody checked them** — the offline ceiling, and deliberately two words so it is never read as "established"; `CONTRADICTED` when the artifact is unbound, out of bounds, mis-correlated, or asserts a non-settlement under an executed outcome. `RECONFIRMED` is declared and **not reachable in this build**: it needs a record of the relying party's own node re-answering the chain queries, an input this verifier does not take yet. **Reported independently of the failing step:** a bundle whose settlement bounds were unanswered *and* whose checkpoint is tampered is reported as the tampering (`INVALID`, exit `2`, at the checkpoint step) while still carrying `settlement: BOUNDS_UNCHECKABLE`, because the artifact really was examined and suppressing that would hide half of what is wrong. |
+| `dimensions.settlementObserver` | who signed the settlement observation relative to the execution signer. `NOT_EVALUATED` means the settlement rule did not run; `SAME_SIGNING_KEY` means the same underlying signing key, including the same key material under another key ID; `SAME_ADMINISTRATIVE_PARTY` means distinct keys anchored in the same tenant manifest, which is **not** proof of independence; `UNKNOWN` means the relationship could not be established. This field is reporting-only: it never changes a verdict, dimension, or exit code. |
 
 `EXECUTED` has never meant the money moved — it means the gate signed that it handed the request
 off. `dimensions.settlement` is where the result says so, instead of leaving it to be inferred.

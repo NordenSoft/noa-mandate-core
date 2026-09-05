@@ -9,7 +9,7 @@ import { resolveConfig, isLoopbackAddress, enrolmentRefusal, type RelayConfig } 
 import { InMemoryStore, type Store } from "./store.js";
 import { FileStore } from "./file-store.js";
 import { NoopLogPushProvider, type PushProvider } from "./push.js";
-import { RelayEngine, type EngineResult } from "./engine.js";
+import { RelayEngine, type ApprovalDeepLinkBuilder, type EngineResult } from "./engine.js";
 import { parseBearer, hashSecret } from "./auth.js";
 import { RateLimiter } from "./ratelimit.js";
 
@@ -17,6 +17,7 @@ export interface CreateRelayOptions {
   config?: Partial<RelayConfig>;
   store?: Store;
   push?: PushProvider;
+  approvalDeepLinkBuilder?: ApprovalDeepLinkBuilder;
   log?: (event: string, fields: Record<string, unknown>) => void;
 }
 
@@ -35,7 +36,15 @@ export function createRelay(opts: CreateRelayOptions = {}): Relay {
   const config = resolveConfig(opts.config);
   const store = opts.store ?? resolveStoreFromEnv(opts.log);
   const push = opts.push ?? new NoopLogPushProvider();
-  const engine = new RelayEngine({ store, push, config, ...(opts.log ? { log: opts.log } : {}) });
+  const engine = new RelayEngine({
+    store,
+    push,
+    config,
+    ...(opts.approvalDeepLinkBuilder
+      ? { approvalDeepLinkBuilder: opts.approvalDeepLinkBuilder }
+      : {}),
+    ...(opts.log ? { log: opts.log } : {}),
+  });
   const limiter = new RateLimiter({
     burst: config.rateLimitBurst,
     refillPerMin: config.rateLimitRefillPerMin,

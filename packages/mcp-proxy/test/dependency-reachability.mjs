@@ -43,29 +43,30 @@ const SUBPATH = '@hono/node-server/serve-static';
 /**
  * ─── VERSION FLOORS FOR EVERY ADVISORY WE CARRY TRANSITIVELY ─────────────────────────────────────
  *
- * Added 2026-08-03 after `supply-chain-audit` went red on three NEW advisories in this package's
- * closure. All three arrive through `@modelcontextprotocol/sdk`, which is a RUNTIME dependency of the
- * published `noa-mcp-proxy`, so they are not a developer-machine problem.
+ * Added after `supply-chain-audit` found advisories in this package's transitive runtime closure.
+ * They arrive through `@modelcontextprotocol/sdk`, which is a RUNTIME dependency of the published
+ * `noa-mcp-proxy`, so they are not a developer-machine problem.
  *
  * ⚠ READ THIS BEFORE ADDING AN "UNREACHABLE" CLAIM TO ANY ENTRY BELOW.
  *
  * The `serve-static` check above is a genuine REACHABILITY argument: it names a SUBPATH this proxy
  * has no reason to import, and asserts nothing imports it. That is a property of our own code.
  *
- * **The three entries added below have no such argument, and saying otherwise would be the overclaim
- * this repository treats as a red line.** `fast-uri`, `hono` and `ip-address` are executed BY THE SDK
- * ON OUR BEHALF — ajv parses URIs while validating schemas, hono serves the HTTP+SSE transport,
- * express-rate-limit parses client addresses. We never import them, and that proves nothing about
- * whether they run. **For these three the VERSION FLOOR is the whole control**, and it is recorded
- * that way rather than dressed up as reachability.
+ * **The version-floor entries below have no such argument, and saying otherwise would be the overclaim
+ * this repository treats as a red line.** `fast-uri`, `hono`, `ip-address`, and `qs` are executed BY THE SDK
+ * ON OUR BEHALF — ajv parses URIs while validating schemas, hono serves the HTTP+SSE transport, and
+ * express/body-parser parse request query strings through `qs` while express-rate-limit parses client
+ * addresses. We never import them, and that proves nothing about whether they run. **For these entries
+ * the VERSION FLOOR is the whole control**, and it is recorded that way rather than dressed up as
+ * reachability.
  *
  * A floor is also not a fix for CONSUMERS: npm `overrides` bind the project that declares them, never
  * a downstream installer. What protects a consumer here is that every fix falls INSIDE the SDK's own
  * semver ranges (`hono: ^4.11.4`, `ajv: ^8.17.1` -> `fast-uri: ^3.0.1`,
- * `express-rate-limit: ^8.2.1` -> `ip-address: ^10.2.0`), so a fresh install already resolves the
- * fixed versions. Our LOCKFILE was the stale thing, not the shipped dependency graph. If a future
- * advisory's fix falls OUTSIDE those ranges, an override will not help consumers and the honest
- * response is a changelog entry, not a green gate.
+ * `express-rate-limit: ^8.2.1` -> `ip-address: ^10.2.0`, and express/body-parser accept the fixed
+ * `qs@6.16.0`), so a fresh install already resolves the fixed versions. Our LOCKFILE was the stale
+ * thing, not the shipped dependency graph. If a future advisory's fix falls OUTSIDE those ranges, an
+ * override will not help consumers and the honest response is a changelog entry, not a green gate.
  */
 const FLOORS = [
   {
@@ -73,8 +74,8 @@ const FLOORS = [
     advisory: 'GHSA-frvp-7c67-39w9', control: 'version floor + the serve-static import assertion above',
   },
   {
-    name: 'fast-uri', path: ['fast-uri'], floor: '3.1.5',
-    advisory: 'GHSA-7p8r-x3mc-p8w7 (host confusion via backslash authority introducer)',
+    name: 'fast-uri', path: ['fast-uri'], floor: '3.1.6',
+    advisory: 'GHSA-5jgf-p345-68v8 + GHSA-f65p-4m7j-42xc + GHSA-fph4-wmhf-6fwf + GHSA-jqff-g426-hqxp (host confusion / SSRF normalization)',
     control: 'VERSION FLOOR ONLY — ajv runs it on our behalf while validating tool schemas',
   },
   {
@@ -86,6 +87,11 @@ const FLOORS = [
     name: 'ip-address', path: ['ip-address'], floor: '10.4.0',
     advisory: 'GHSA-mwp4-54f8-5fhr + GHSA-4xrf-jv44-h6hh + GHSA-22jq-vg5j-6vgg (SSRF / trust-boundary bypass)',
     control: 'VERSION FLOOR ONLY — express-rate-limit parses client addresses with it',
+  },
+  {
+    name: 'qs', path: ['qs'], floor: '6.16.0',
+    advisory: 'GHSA-x5fp-wj9c-mxmx + GHSA-4mjr-xmp4-gh2g (array-limit bypass / denial of service)',
+    control: 'VERSION FLOOR ONLY — express and body-parser parse query strings with it',
   },
 ];
 

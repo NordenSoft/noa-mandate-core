@@ -8,7 +8,8 @@
   "scripts": {
     "build:deps": "npm --prefix ../signer-core run build && npm --prefix ../.. run build && npm --prefix ../approval-artifacts run build && npm --prefix ../gate run build && npm --prefix ../relay run build && npm --prefix ../evidence run build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:resolver-parity:built": "npm run build:deps && node --import tsx --test test/keyring-resolver-parity.test.ts"
   },
   "dependencies": {
     "noa-approval-artifacts": "file:../approval-artifacts",
@@ -20,7 +21,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "tsx": "^4.23.11",
+    "tsx": "^4.23.12",
     "typescript": "5.9.3"
   }
 }

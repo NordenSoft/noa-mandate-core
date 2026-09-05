@@ -9,7 +9,7 @@
  * socket round trip to the same relay a curl/python client also talks to.
  *
  * HONESTY (read before wiring this into anything real): this launches the RELAY ALONE, not the
- * gate + relay + phone-pairing topology from ../../src/harness.ts. The relay's own agent-authenticated
+ * gate + relay + device topology. The relay's own agent-authenticated
  * routes (packages/relay/src/server.ts) do not require a gate — `POST /v1/holds` accepts a bare
  * `{ action: { canonical, riskClass, paramsHash } }` with no gate-issued holdEnvelope/deferredReceipt.
  * So the ALLOWED/BLOCKED verdict a client receives from `GET /v1/holds/:id/wait` here is signed by

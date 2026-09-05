@@ -3482,13 +3482,19 @@ function commitsFor(ctx, descriptor) {
   let args;
   if (descriptor.mode === "range") {
     args = ["rev-list", descriptor.range];
-  } else if (!zeroObjectId(descriptor.remoteSha)) {
-    args = ["rev-list", descriptor.localSha, "--not", descriptor.remoteSha];
   } else {
-    const tips = [...new Set([...destinationRefs(ctx).entries()]
-      .filter(([ref]) => ref !== descriptor.remoteRef)
-      .map(([, sha]) => sha))];
-    args = ["rev-list", descriptor.localSha, ...(tips.length > 0 ? ["--not", ...tips] : [])];
+    // A clean-history publication deliberately has no copy of the destination's old object graph.
+    // `rev-list --not <missing-tip>` aborts before scanning anything. Exclude only tips whose commit
+    // ancestry this local object store can actually prove; omitting an unavailable/non-commit tip
+    // can only BROADEN the set scanned, never hide an outgoing commit.
+    const candidateExclusions = !zeroObjectId(descriptor.remoteSha)
+      ? [descriptor.remoteSha]
+      : [...destinationRefs(ctx).entries()]
+        .filter(([ref]) => ref !== descriptor.remoteRef)
+        .map(([, sha]) => sha);
+    const exclusions = [...new Set(candidateExclusions)].filter((sha) =>
+      capture("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd: ctx.root, tolerate: true }).code === 0);
+    args = ["rev-list", descriptor.localSha, ...(exclusions.length > 0 ? ["--not", ...exclusions] : [])];
   }
   const shas = capture("git", args, { cwd: ctx.root }).out.trim().split("\n").filter(Boolean);
   if (shas.some((sha) => !validObjectId(sha, ctx.objectIdLength))) {
@@ -3577,7 +3583,14 @@ function laneTags(ctx) {
       if (objects.has(sha)) setupFailed("an annotated-tag object cycle was encountered", "the tag chain cannot be interpreted safely", null);
       objects.add(sha);
       const type = capture("git", ["cat-file", "-t", sha], { cwd: ctx.root }).out.trim();
-      if (type !== "tag") return;
+      if (type === "commit") return;
+      if (type !== "tag") {
+        setupFailed(
+          "a pushed tag terminates at a non-commit object",
+          "tag targets must resolve to a commit; blob and tree targets are refused because commit-history lanes cannot enumerate them",
+          null,
+        );
+      }
       const raw = capture("git", ["cat-file", "tag", sha], { cwd: ctx.root }).out;
       units.push({ path: `tag-object:${sha.slice(0, 16)}`, text: raw });
       const target = /^object ([0-9a-f]+)$/m.exec(raw)?.[1] ?? "";

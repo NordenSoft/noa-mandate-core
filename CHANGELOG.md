@@ -6,8 +6,32 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ## [Unreleased]
 
-No public entries yet. Security-sensitive changes are documented here only when a coordinated fixed
-release or advisory is available.
+### Added
+
+- The public action-digest surface now carries the additional nonce and dispatch-correlation inputs
+  implemented by `src/action-digest.ts`. These values provide deterministic linkage only; they do
+  not authenticate a dispatcher or prove an external effect.
+- `ReceiptCoseResult` exposes the native signer and envelope signer separately through
+  `nativeKid`/`agentClaim` and `envelopeKid`/`envelopeClaim`, and six public vectors under
+  `conformance/cose-attribution/` exercise both acceptance and refusal directions.
+
+### Fixed
+
+- The protected-header example in `docs/receipt-spec.md` now shows the complete two-member COSE
+  protected map rather than a one-member encoding that did not match the documented envelope.
+- The small-order Ed25519 key comment in `src/keys.ts` now describes the measured key-acceptance
+  difference without attributing it to a different verification equation. Runtime behavior is
+  unchanged by that documentation correction.
+- `receiptFromCose` verifies and attributes the enveloped receipt's native signature independently
+  of the outer COSE signature. A manifest lookup is bound to the native `sig.kid`; an envelope signer
+  cannot stand in for the agent, and an unprotected outer `kid` is not reported as an authenticated
+  identity.
+
+### Changed
+
+- `receiptFromCose` now refuses a receipt whose native signing key is absent from or retired in the
+  supplied keyring. A successful result means both the native receipt and outer envelope checks
+  required by the selected path succeeded; it is not an independent-execution or deployment claim.
 
 ## [0.8.0] - 2026-08-14
 
