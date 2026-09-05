@@ -28,9 +28,12 @@ alone do not make input trusted.
 ## 3. Slice 1 — bytes enter the boundary
 
 The gate HTTP server retains request bodies as bytes and the engine performs the parse. Duplicate
-keys, malformed JSON, oversize documents, unexpected fields, and invalid schema values fail closed.
-The same byte string is used for validation and authorization; a caller cannot provide one object
-for the check and another for later reads.
+keys, malformed JSON, oversize documents, and required-field/type failures on the current hold path
+fail closed. The request body is not a closed schema: unknown fields are not generally refused, and
+the command projection ignores fields outside its selected parameters; invalid `allowedEnvHash` and
+`stdinHash` values normalize to `null` in that projection. The same byte string is used for
+validation and authorization; a caller cannot provide one object for the check and another for later
+reads.
 
 Current evidence:
 
@@ -49,10 +52,12 @@ Approval artifacts use their own bytes-in parse boundary and deeply immutable sn
 
 ## 5. Slice 4 — one render node and verified display egress
 
-The display projection and the parameter commitment must be derived from the same canonical input.
-The gate seals the rendered display for the approver and an audit recipient. Before releasing a
-stored sealed display, it re-verifies the ciphertext against the expected associated data and hold
-identity. Replaying ciphertext from another hold therefore fails closed.
+The display projection and the parameter commitment are derived from the same canonical projection
+input. The gate seals the rendered display for the approver and an audit recipient. Before accepting
+the sealer result into a hold, it validates egress metadata: the expected associated-data labels
+(tenant, hold identity, deferred-receipt hash, and expiry) and recipient key identifiers. It does not
+decrypt or re-verify the ciphertext payload. Payload confidentiality and integrity depend on the
+injected sealer and recipient-side AEAD verification.
 
 The audit recipient is mandatory: a display that only the approver can decrypt cannot later be
 examined by an independent auditor. This does not make the audit key independent of the deployment
@@ -94,6 +99,9 @@ implementation. They do not establish:
 - immunity from a pre-load or same-realm runtime attacker;
 - authenticated or versioned tenant projection policy;
 - protected signer or provider-credential custody;
+- closed-schema rejection of every unknown request field, or binding of every raw parameter available
+  to an executor;
+- gate-side decryption or payload-integrity verification of a sealed display;
 - equality between the authorized command and an external side effect;
 - production deployment or independent observation.
 

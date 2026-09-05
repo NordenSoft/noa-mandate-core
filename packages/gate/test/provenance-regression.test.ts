@@ -176,9 +176,8 @@ test("M3 anti-vacuity: an honest DENY resolves cleanly, not as an error", () => 
 //
 // Measured pre-fix: `projections.ts:74` puts the caller's `argv` array into the snapshot as a
 // REFERENCE, not a copy. `:82` hashes the snapshot and `:90` renders `display.Args` — two separate
-// reads of a caller-owned array. NO CALLER DISPLAY FIELD IS INVOLVED, which is why neither
-// ADR-0003 nor ADR-0004 would have closed this: both were of the form "stop accepting the caller's
-// display", and M7 supplies none.
+// reads of a caller-owned array. NO CALLER DISPLAY FIELD IS INVOLVED, which is why
+// a rule that only stops caller-supplied display fields would not have closed this: M7 supplies none.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 test("M7: a mutable argv cannot show one command and authorize another", () => {

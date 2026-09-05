@@ -29,14 +29,15 @@ application, deployment, or operator ceremony consumes the mechanism.
    credential, so body-dependent exceptions are not added to the general enrolment gate.
 3. **Tenant identity is carried onto the device record.** A device that declares a tenant can be
    claimed only by that tenant; missing tenant identity does not gain production authority.
-4. **The token is bound to the device key identifier.** A different key cannot redeem a leaked
-   token.
+4. **The token is bound to the device key identifier and tenant.** Redemption rejects a different
+   identifier, while the relay validates only the presented public-key hex shape and stores that
+   value. This is not a commitment to public-key bytes or proof of possession of the key.
 5. **The token has its own bounded TTL.** Expired tokens are refused.
 6. **Tokens are hashed at rest.** Plaintext is returned only at issuance and is not stored as the
    lookup key.
 7. **The carrier is outside the frozen pairing document.** Deployment integrations must preserve
-   versioning and the mandatory key binding; this repository does not define a private application
-   bundle format.
+   versioning and the mandatory identifier and tenant binding; this repository does not define a
+   private application bundle format.
 8. **The honest property is single-use and short-lived, not revocable.** No token-revocation API is
    claimed.
 
@@ -62,7 +63,7 @@ The public tests cover the successful real-HTTP path and negative controls:
 The mechanism is conformant only if it refuses:
 
 - an agent token at the device route and a device token at the agent route;
-- redemption by a key other than the bound device key;
+- redemption under an identifier other than the bound device key identifier;
 - second redemption of a consumed token;
 - redemption after expiry;
 - token issuance without tenant or device-key binding; and
@@ -78,3 +79,7 @@ identity behind that device, a tenant's governance decision, protected device-ke
 notification channel, or an independent trust root. Development-only anonymous enrolment remains a
 separately labelled loopback facility and must not be represented as this production-oriented
 pairing path.
+
+The pairing token is bound to its recorded identifier and tenant, not to public-key bytes or a
+proof-of-possession exchange. The public relay validates the presented key's shape before storing it;
+this ADR does not claim that the token alone establishes possession of that key.

@@ -35,11 +35,15 @@ Each equality requires evidence from an authority capable of establishing it.
 Stages 1–7 may establish what was requested and approved. They cannot alone establish what an
 external provider executed.
 
-## 3. Stages 1–3 — one canonical intent
+## 3. Stages 1–3 — selected canonical intent
 
-The boundary receives bytes, rejects malformed input, creates a deeply immutable snapshot, and
-constructs the action intent. No later stage may re-read caller-owned values. The resulting canonical
-bytes are the authority source for commitments, display, and dispatch.
+The boundary receives bytes, rejects malformed input, and derives a canonical projection from the
+selected normalized command fields. The wrapper separately clones and freezes the raw parameter
+snapshot, derives the projection hash from that snapshot, and re-checks it before reservation. It
+passes the frozen raw snapshot plus that hash to the executor. This prevents later reads of the
+caller-owned graph, but it is not a claim that dispatch receives only the selected canonical fields:
+unselected extras and raw optional values normalized by the projection can remain available in the
+executor's snapshot.
 
 ## 4. Stage 4 — commitments
 
@@ -88,10 +92,12 @@ A complete stage 8 requires the grant signer to reconstruct and validate the gra
 inputs, bind audience, executor, intent, expiry, and replay state, and expose no raw-sign route for
 the grant key.
 
-The current gate constructs a typed `ExecutionCommand` from the frozen authorized snapshot and gives
-that command to the executor. This closes accidental post-approval parameter substitution inside the
-wrapper. It does **not** prove that an untrusted executor used the command, and it does not by itself
-establish protected signer custody or target-side capability validation.
+The current gate constructs a typed `ExecutionCommand` from the frozen parameter snapshot after
+re-checking the hash derived by the registered projection, then gives that command to the executor.
+This closes accidental post-approval substitution of the snapshot inside the wrapper. The current
+hash binds selected normalized projection fields, not every raw value the executor can receive. It
+does **not** prove that an untrusted executor used the command, and it does not by itself establish
+protected signer custody or target-side capability validation.
 
 Current evidence:
 
