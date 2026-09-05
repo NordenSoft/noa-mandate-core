@@ -324,6 +324,8 @@ to carry the same ten values still digests differently.
 The committed corpus is 1 ACCEPT + 33 REJECT vectors, generated from fixed seeded Ed25519 keys so
 every rejection is a cryptographically well-formed pair of documents failing a **semantic** rule.
 Each vector pins the substring of the refusal reason it measures.
+The corpus counts stated here and the uniqueness of vector names are checked by
+[`test/action-digest.test.ts`](../test/action-digest.test.ts).
 
 Two disciplines make the corpus mean something, both learned the hard way here:
 

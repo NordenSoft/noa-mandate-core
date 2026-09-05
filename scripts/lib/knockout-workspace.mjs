@@ -139,6 +139,10 @@ export const KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS =
   MAX_CAPTURE_OPERATION_DURATION_MS;
 const MAX_GIT_DIRECTORY_ENTRIES = 4096;
 const MAX_SHARED_INDEX_CANDIDATES = 128;
+// Keep descriptor inheritance well below ordinary per-process limits. Metadata subprocess count
+// is therefore bounded by the admitted node count divided by this fixed chunk size, while every
+// node still receives its own descriptor-pinned xattr observation.
+const MAC_METADATA_BATCH_NODE_LIMIT = 64;
 // `--template=` makes the observation repository shape fixed apart from admitted split indexes.
 // Every witnessed node consumes one simultaneously held descriptor, so keep that FD surface
 // substantially below ordinary process limits instead of inheriting the generic 4096-node cap.
@@ -204,7 +208,9 @@ export const KNOCKOUT_SELFTEST_SUITE = Object.freeze([
 ]);
 const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 const DIRECTORY = fs.constants.O_DIRECTORY ?? 0;
+const SYMLINK = fs.constants.O_SYMLINK ?? 0;
 const METADATA_FCHDIR_LAUNCHER = "/usr/bin/perl";
+const MAC_METADATA_HELPER = "/usr/bin/python3";
 const METADATA_FCHDIR_SCRIPT = [
   "open(my $directory, q{<&=3}) or die q{metadata directory descriptor unavailable};",
   "chdir($directory) or die q{metadata directory cannot be entered};",
@@ -212,6 +218,202 @@ const METADATA_FCHDIR_SCRIPT = [
   "exec {$ARGV[0]} @ARGV;",
   "die q{metadata tool exec failed};",
 ].join(" ");
+// Darwin's ls(1) deliberately converts some listxattr(2) and ACL read failures into an empty
+// display, while xattr(1)'s line-oriented output cannot frame arbitrary attribute names. Use the
+// native descriptor APIs directly and return one bounded JSON value only after the whole batch is
+// observed. `-I -S` at invocation ignores user configuration and skips site initialization.
+const MAC_METADATA_HELPER_SCRIPT = String.raw`
+import base64
+import ctypes
+import errno
+import json
+import os
+import stat
+import sys
+
+EXIT_REFUSED = 70
+ACL_TYPE_EXTENDED = 0x00000100
+ACL_FIRST_ENTRY = 0
+PROVENANCE = b"com.apple.provenance"
+
+def refuse(stage, error_number=0):
+    sys.stderr.write("mac metadata helper refused " + stage + " errno=" + str(error_number) + "\n")
+    raise SystemExit(EXIT_REFUSED)
+
+if sys.platform != "darwin" or len(sys.argv) != 5:
+    refuse("arguments")
+
+mode = sys.argv[1]
+try:
+    output_limit = int(sys.argv[2])
+    raw_limit = int(sys.argv[3])
+    descriptor_count = int(sys.argv[4])
+except ValueError:
+    refuse("arguments")
+if mode not in ("acl", "xattr") or output_limit < 1 or raw_limit < 1 or not 1 <= descriptor_count <= 64:
+    refuse("arguments")
+
+libc = ctypes.CDLL(None, use_errno=True)
+libc.flistxattr.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+libc.flistxattr.restype = ctypes.c_ssize_t
+libc.fgetxattr.argtypes = [
+    ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t,
+    ctypes.c_uint32, ctypes.c_int,
+]
+libc.fgetxattr.restype = ctypes.c_ssize_t
+libc.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+libc.acl_get_fd_np.restype = ctypes.c_void_p
+libc.acl_get_entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+libc.acl_get_entry.restype = ctypes.c_int
+libc.acl_free.argtypes = [ctypes.c_void_p]
+libc.acl_free.restype = ctypes.c_int
+
+def stat_record(fd):
+    try:
+        observed = os.fstat(fd)
+    except OSError as error:
+        refuse("fstat", error.errno or 0)
+    if stat.S_ISLNK(observed.st_mode):
+        node_type = "symlink"
+    elif stat.S_ISDIR(observed.st_mode):
+        node_type = "directory"
+    elif stat.S_ISREG(observed.st_mode):
+        node_type = "file"
+    else:
+        node_type = "other"
+    return {
+        "ctimeNs": str(observed.st_ctime_ns),
+        "identity": str(observed.st_dev) + ":" + str(observed.st_ino),
+        "mode": observed.st_mode & 0o7777,
+        "mtimeNs": str(observed.st_mtime_ns),
+        "nlink": observed.st_nlink,
+        "size": observed.st_size,
+        "type": node_type,
+        "uid": observed.st_uid,
+    }
+
+raw_used = 0
+def reserve_raw(size):
+    global raw_used
+    if size < 0 or size > raw_limit - raw_used:
+        refuse("resource_limit")
+    raw_used += size
+
+def list_xattrs(fd, reserve):
+    ctypes.set_errno(0)
+    needed = libc.flistxattr(fd, None, 0, 0)
+    if needed < 0:
+        refuse("flistxattr_size", ctypes.get_errno())
+    if needed > raw_limit:
+        refuse("resource_limit")
+    if reserve:
+        reserve_raw(needed)
+    if needed == 0:
+        ctypes.set_errno(0)
+        confirmed = libc.flistxattr(fd, None, 0, 0)
+        if confirmed != 0:
+            refuse("flistxattr_empty", ctypes.get_errno())
+        return b""
+    value = ctypes.create_string_buffer(needed)
+    ctypes.set_errno(0)
+    observed = libc.flistxattr(fd, value, needed, 0)
+    if observed != needed:
+        refuse("flistxattr_value", ctypes.get_errno())
+    return bytes(value.raw[:observed])
+
+def split_xattr_names(raw):
+    if raw == b"":
+        return []
+    if not raw.endswith(b"\0"):
+        refuse("xattr_name_framing")
+    names = raw[:-1].split(b"\0")
+    if any(name == b"" for name in names):
+        refuse("xattr_name_framing")
+    return names
+
+def read_xattr(fd, name, reserve):
+    ctypes.set_errno(0)
+    needed = libc.fgetxattr(fd, name, None, 0, 0, 0)
+    if needed < 0:
+        refuse("fgetxattr_size", ctypes.get_errno())
+    if needed > raw_limit:
+        refuse("resource_limit")
+    if reserve:
+        reserve_raw(needed)
+    if needed == 0:
+        ctypes.set_errno(0)
+        confirmed = libc.fgetxattr(fd, name, None, 0, 0, 0)
+        if confirmed != 0:
+            refuse("fgetxattr_empty", ctypes.get_errno())
+        return b""
+    value = ctypes.create_string_buffer(needed)
+    ctypes.set_errno(0)
+    observed = libc.fgetxattr(fd, name, value, needed, 0, 0)
+    if observed != needed:
+        refuse("fgetxattr_value", ctypes.get_errno())
+    return bytes(value.raw[:observed])
+
+def acl_present(fd):
+    ctypes.set_errno(0)
+    acl = libc.acl_get_fd_np(fd, ACL_TYPE_EXTENDED)
+    if not acl:
+        error_number = ctypes.get_errno()
+        if error_number == errno.ENOENT:
+            return False
+        refuse("acl_get_fd_np", error_number)
+    result = None
+    try:
+        entry = ctypes.c_void_p()
+        ctypes.set_errno(0)
+        status = libc.acl_get_entry(acl, ACL_FIRST_ENTRY, ctypes.byref(entry))
+        if status != 0 or not entry.value:
+            refuse("acl_get_entry", ctypes.get_errno())
+        result = True
+    finally:
+        ctypes.set_errno(0)
+        if libc.acl_free(acl) != 0:
+            refuse("acl_free", ctypes.get_errno())
+    return result
+
+records = []
+for ordinal in range(descriptor_count):
+    fd = 4 + ordinal
+    before = stat_record(fd)
+    if mode == "acl":
+        first = acl_present(fd)
+        second = acl_present(fd)
+        if first != second:
+            refuse("acl_changed")
+        record = {"fd": fd, "present": first, "stat": before}
+    else:
+        names_raw = list_xattrs(fd, True)
+        names = split_xattr_names(names_raw)
+        provenance = None
+        if PROVENANCE in names:
+            provenance = read_xattr(fd, PROVENANCE, True)
+        names_confirmed = list_xattrs(fd, False)
+        if names_confirmed != names_raw:
+            refuse("xattr_names_changed")
+        if provenance is not None:
+            provenance_confirmed = read_xattr(fd, PROVENANCE, False)
+            if provenance_confirmed != provenance:
+                refuse("provenance_changed")
+        record = {
+            "fd": fd,
+            "namesBase64": [base64.b64encode(name).decode("ascii") for name in names],
+            "provenanceBase64": None if provenance is None else base64.b64encode(provenance).decode("ascii"),
+            "stat": before,
+        }
+    after = stat_record(fd)
+    if after != before:
+        refuse("descriptor_changed")
+    records.append(record)
+
+encoded = json.dumps(records, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii")
+if len(encoded) > output_limit:
+    refuse("output_limit")
+sys.stdout.buffer.write(encoded)
+`;
 const WORKER_FCHDIR_SCRIPT = [
   "open(my $directory, q{<&=7}) or die q{worker directory descriptor unavailable};",
   "chdir($directory) or die q{worker directory cannot be entered};",
@@ -3805,12 +4007,23 @@ function toolResult(
   label,
   timeoutMs = MAX_CHILD_PROCESS_DURATION_MS,
   directoryFd,
+  inheritedDescriptors = [],
 ) {
   const boundedTimeoutMs = requireCommandTimeoutMs(timeoutMs);
   if (!Number.isInteger(directoryFd) || directoryFd < 0) {
     fail(
       KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT,
       "metadata tool requires one bound directory descriptor",
+    );
+  }
+  if (
+    !Array.isArray(inheritedDescriptors) ||
+    inheritedDescriptors.length > MAC_METADATA_BATCH_NODE_LIMIT ||
+    inheritedDescriptors.some((fd) => !Number.isInteger(fd) || fd < 0)
+  ) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT,
+      "metadata tool inherited-descriptor batch is malformed",
     );
   }
   // Node exposes no fchdir operation and Darwin's /dev/fd/<n> cannot be traversed. This fixed,
@@ -3820,12 +4033,12 @@ function toolResult(
     METADATA_FCHDIR_LAUNCHER,
     ["-e", METADATA_FCHDIR_SCRIPT, "--", executable, ...args],
     {
-    encoding: null,
-    env: { LANG: "C", LC_ALL: "C", PATH: "/usr/bin:/bin" },
-    killSignal: "SIGKILL",
-    maxBuffer: MAX_TOOL_OUTPUT_BYTES,
-    stdio: ["ignore", "pipe", "pipe", directoryFd],
-    timeout: boundedTimeoutMs,
+      encoding: null,
+      env: { LANG: "C", LC_ALL: "C", PATH: "/usr/bin:/bin" },
+      killSignal: "SIGKILL",
+      maxBuffer: MAX_TOOL_OUTPUT_BYTES,
+      stdio: ["ignore", "pipe", "pipe", directoryFd, ...inheritedDescriptors],
+      timeout: boundedTimeoutMs,
     },
   );
   if (
@@ -3861,74 +4074,160 @@ function metadataTimeout(operationBudget, label) {
     : remainingOperationMs(operationBudget, label);
 }
 
-function observeMacMetadata(abs, operand, isSymlink, operationBudget, directoryFd) {
-  const aclOutput = toolResult(
-    "/bin/ls",
-    ["-ldeb", operand],
-    KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
-    `ACLs for ${abs}`,
-    metadataTimeout(operationBudget, `metadata inspection for ${abs}`),
-    directoryFd,
+function parseMacMetadataHelperJson(output, observations, code, label) {
+  const text = decodeUtf8(
+    output,
+    label,
+    code,
   );
-  const aclLines = aclOutput.toString("utf8").split("\n");
-  if (aclLines.at(-1) === "") aclLines.pop();
-  const firstSpace = aclLines[0]?.indexOf(" ") ?? -1;
-  const modeToken = firstSpace === -1 ? "" : aclLines[0].slice(0, firstSpace);
-  if (!/^[bcdlps-][rwxStTs-]{9}[@+]?$/.test(modeToken)) {
-    fail(KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED, `unrecognized ACL observation for ${abs}`);
-  }
-  // `-b` keeps a pathname containing a newline on the record's first line. On macOS, an
-  // extended attribute changes the mode suffix to "@" even when numbered ACL entries are also
-  // printed. The suffix is therefore only a hint; any additional `ls -e` line is an ACL and must
-  // fail closed.
-  if (modeToken.endsWith("+") || aclLines.length !== 1) {
-    fail(KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED, `${abs} carries an ACL`);
-  }
-
-  const listArgs = isSymlink ? ["-s", operand] : [operand];
-  const listed = toolResult(
-    "/usr/bin/xattr",
-    listArgs,
-    KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
-    `extended attributes for ${abs}`,
-    metadataTimeout(operationBudget, `metadata inspection for ${abs}`),
-    directoryFd,
-  );
-  const names = listed.toString("utf8").split("\n").filter((name) => name.length > 0).sort();
-  if (names.some((name) => name !== PROVENANCE_XATTR) || new Set(names).size !== names.length) {
+  let parsed;
+  try { parsed = JSON.parse(text); }
+  catch (error) {
     fail(
-      KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
-      `${abs} carries an unsupported extended attribute`,
-      { names },
+      code,
+      `${label} is not one complete JSON value`,
+      null,
+      error,
     );
   }
-  if (names.length === 0) {
-    if (operationBudget !== null) remainingOperationMs(operationBudget, `metadata inspection for ${abs}`);
-    return Object.freeze({
+  if (!Array.isArray(parsed) || parsed.length !== observations.length) {
+    fail(
+      code,
+      `${label} does not cover the complete descriptor batch`,
+    );
+  }
+  let canonical;
+  try { canonical = canonicalJsonBytes(parsed); }
+  catch (error) {
+    fail(code, `${label} is not bounded canonical data`, null, error);
+  }
+  if (!canonical.equals(Buffer.concat([output, Buffer.from("\n")]))) {
+    fail(code, `${label} is not canonically and unambiguously framed`);
+  }
+  return parsed;
+}
+
+function requireMacMetadataHelperStat(value, observation, label) {
+  const expected = {
+    ctimeNs: observation.opened.ctimeNs,
+    identity: observation.opened.identity,
+    mode: observation.opened.mode,
+    mtimeNs: observation.opened.mtimeNs,
+    nlink: observation.opened.nlink,
+    size: observation.opened.size,
+    type: observation.opened.type,
+    uid: observation.opened.uid,
+  };
+  if (
+    !hasExactObjectKeys(value, [
+      "ctimeNs", "identity", "mode", "mtimeNs", "nlink", "size", "type", "uid",
+    ]) ||
+    !canonicalJsonBytes(value).equals(canonicalJsonBytes(expected))
+  ) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+      `${label} was returned for the wrong or changed descriptor`,
+      { expected, observed: value },
+    );
+  }
+}
+
+function parseMacAclObservations(output, observations) {
+  const parsed = parseMacMetadataHelperJson(
+    output,
+    observations,
+    KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
+    "macOS ACL descriptor batch",
+  );
+  for (let index = 0; index < observations.length; index++) {
+    const value = parsed[index];
+    const observation = observations[index];
+    if (
+      !hasExactObjectKeys(value, ["fd", "present", "stat"]) ||
+      value.fd !== index + 4 || typeof value.present !== "boolean"
+    ) {
+      fail(
+        KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
+        `macOS ACL output is not bound to ${observation.context.absolute}`,
+      );
+    }
+    requireMacMetadataHelperStat(value.stat, observation, "macOS ACL observation");
+    if (value.present) {
+      fail(
+        KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
+        `${observation.context.absolute} carries an ACL`,
+      );
+    }
+  }
+}
+
+function decodeMacMetadataBase64(value, label) {
+  if (typeof value !== "string" || value.length > MAX_TOOL_OUTPUT_BYTES) {
+    fail(KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED, `${label} is malformed`);
+  }
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.toString("base64") !== value) {
+    fail(KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED, `${label} is not canonical base64`);
+  }
+  return decoded;
+}
+
+function parseMacXattrObservations(output, observations) {
+  const parsed = parseMacMetadataHelperJson(
+    output,
+    observations,
+    KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
+    "macOS extended-attribute descriptor batch",
+  );
+  for (let index = 0; index < observations.length; index++) {
+    const value = parsed[index];
+    const observation = observations[index];
+    if (
+      !hasExactObjectKeys(value, ["fd", "namesBase64", "provenanceBase64", "stat"]) ||
+      value.fd !== index + 4 || !Array.isArray(value.namesBase64) ||
+      (value.provenanceBase64 !== null && typeof value.provenanceBase64 !== "string")
+    ) {
+      fail(
+        KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
+        `macOS extended-attribute output is not bound to ${observation.context.absolute}`,
+      );
+    }
+    requireMacMetadataHelperStat(
+      value.stat,
+      observation,
+      "macOS extended-attribute observation",
+    );
+    const names = value.namesBase64.map((encodedName) => decodeUtf8(
+      decodeMacMetadataBase64(encodedName, "macOS extended-attribute name"),
+      "macOS extended-attribute name",
+      KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
+    ));
+    if (
+      names.some((name) => name.length === 0 || name !== PROVENANCE_XATTR) ||
+      new Set(names).size !== names.length
+    ) {
+      fail(
+        KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
+        `${observation.context.absolute} carries an unsupported or duplicate extended attribute`,
+        { names },
+      );
+    }
+    if ((names.length === 1) !== (value.provenanceBase64 !== null)) {
+      fail(
+        KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
+        `macOS provenance presence is inconsistent for ${observation.context.absolute}`,
+      );
+    }
+    const provenance = value.provenanceBase64 === null
+      ? null
+      : decodeMacMetadataBase64(value.provenanceBase64, "macOS provenance value");
+    observation.metadata = Object.freeze({
       classification: PROVENANCE_CLASSIFICATION,
-      length: 0,
-      present: false,
-      sha256: null,
+      length: provenance?.length ?? 0,
+      present: provenance !== null,
+      sha256: provenance === null ? null : sha256(provenance),
     });
   }
-  const valueArgs = isSymlink
-    ? ["-p", "-s", PROVENANCE_XATTR, operand]
-    : ["-p", PROVENANCE_XATTR, operand];
-  const value = toolResult(
-    "/usr/bin/xattr",
-    valueArgs,
-    KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
-    `${PROVENANCE_XATTR} for ${abs}`,
-    metadataTimeout(operationBudget, `metadata inspection for ${abs}`),
-    directoryFd,
-  );
-  if (operationBudget !== null) remainingOperationMs(operationBudget, `metadata inspection for ${abs}`);
-  return Object.freeze({
-    classification: PROVENANCE_CLASSIFICATION,
-    length: value.length,
-    present: true,
-    sha256: sha256(value),
-  });
 }
 
 function findExecutable(candidates) {
@@ -4024,6 +4323,21 @@ function metadataPathContext(abs, anchorRoot) {
   });
 }
 
+function metadataPathEntry(stat, current) {
+  return Object.freeze({
+    ctimeNs: String(stat.ctimeNs),
+    identity: identityOf(stat),
+    mode: modeOf(stat),
+    mtimeNs: String(stat.mtimeNs),
+    nlink: Number(stat.nlink),
+    path: current,
+    size: Number(stat.size),
+    type: stat.isSymbolicLink() ? "symlink" : stat.isDirectory() ? "directory" :
+      stat.isFile() ? "file" : "other",
+    uid: Number(stat.uid),
+  });
+}
+
 function metadataPathChain(context, isSymlink, operationBudget = null, anchorRoot) {
   const { absolute, anchor, components } = context;
   const chain = [];
@@ -4069,18 +4383,7 @@ function metadataPathChain(context, isSymlink, operationBudget = null, anchorRoo
         },
       );
     }
-    chain.push(Object.freeze({
-      ctimeNs: String(stat.ctimeNs),
-      identity: identityOf(stat),
-      mode: modeOf(stat),
-      mtimeNs: String(stat.mtimeNs),
-      nlink: Number(stat.nlink),
-      path: current,
-      size: Number(stat.size),
-      type: stat.isSymbolicLink() ? "symlink" : stat.isDirectory() ? "directory" :
-        stat.isFile() ? "file" : "other",
-      uid: Number(stat.uid),
-    }));
+    chain.push(metadataPathEntry(stat, current));
   }
   return Object.freeze(chain);
 }
@@ -4109,6 +4412,309 @@ function expectedMetadataLeafMatches(leaf, expected) {
   );
 }
 
+function observeMacMetadataBatch(
+  requests,
+  operationBudget = null,
+  anchorRoot,
+  metadataCache = null,
+) {
+  if (!Array.isArray(requests)) {
+    fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "metadata batch is malformed");
+  }
+  const cacheState = metadataCache === null
+    ? null
+    : metadataObservationCacheStates.get(metadataCache);
+  if (metadataCache !== null && cacheState === undefined) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT,
+      "metadata observation cache is malformed",
+    );
+  }
+  if (NOFOLLOW === 0 || DIRECTORY === 0 || SYMLINK === 0) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
+      "macOS metadata batching requires O_NOFOLLOW, O_DIRECTORY, and O_SYMLINK",
+    );
+  }
+  const results = new Array(requests.length);
+  for (let offset = 0; offset < requests.length; offset += MAC_METADATA_BATCH_NODE_LIMIT) {
+    const requestedChunk = requests.slice(offset, offset + MAC_METADATA_BATCH_NODE_LIMIT);
+    let directoryFd;
+    let openedAnchorObservation;
+    const openedNodeFds = [];
+    let records = [];
+    const cacheUpdates = [];
+    let primaryError = null;
+    try {
+      const firstContext = metadataPathContext(requestedChunk[0].abs, anchorRoot);
+      try {
+        directoryFd = fs.openSync(
+          firstContext.anchor,
+          fs.constants.O_RDONLY | DIRECTORY | NOFOLLOW,
+        );
+        const openedAnchor = fs.fstatSync(directoryFd, { bigint: true });
+        if (!openedAnchor.isDirectory() || identityOf(openedAnchor) !== anchorRoot.identity) {
+          fail(
+            KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+            "metadata anchor changed while binding its batch descriptor",
+            {
+              expectedIdentity: anchorRoot.identity,
+              observedIdentity: identityOf(openedAnchor),
+              path: firstContext.absolute,
+            },
+          );
+        }
+        openedAnchorObservation = directoryObservation(openedAnchor);
+      } catch (error) {
+        if (error instanceof KnockoutWorkspaceError) throw error;
+        fail(
+          KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+          "metadata anchor could not be bound to a batch directory descriptor",
+          { path: firstContext.absolute },
+          error,
+        );
+      }
+
+      records = requestedChunk.map((request, index) => {
+        if (request === null || typeof request !== "object" || Array.isArray(request) ||
+            typeof request.isSymlink !== "boolean") {
+          fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "metadata batch entry is malformed");
+        }
+        const context = metadataPathContext(request.abs, anchorRoot);
+        if (context.anchor !== firstContext.anchor) {
+          fail(
+            KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT,
+            "metadata batch crosses anchor directories",
+          );
+        }
+        const before = metadataPathChain(
+          context,
+          request.isSymlink,
+          operationBudget,
+          anchorRoot,
+        );
+        const beforeLeaf = before.at(-1);
+        if (beforeLeaf === undefined || !expectedMetadataLeafMatches(beforeLeaf, request.expected)) {
+          fail(
+            KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+            `${context.absolute} changed before metadata inspection`,
+          );
+        }
+        if ((beforeLeaf.type === "symlink") !== request.isSymlink) {
+          fail(
+            KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+            `${context.absolute} changed node type before metadata inspection`,
+          );
+        }
+        const pathChainSha256 = sha256(canonicalJsonBytes(before));
+        const cacheKey = cacheState === null
+          ? null
+          : `${anchorRoot.identity}\0${request.isSymlink ? "symlink" : "node"}\0${context.operand}`;
+        const cached = cacheKey === null ? undefined : cacheState.entries.get(cacheKey);
+        return {
+          before,
+          beforeLeaf,
+          cacheHit: cached !== undefined && cached.pathChainSha256 === pathChainSha256,
+          cacheKey,
+          context,
+          index,
+          isSymlink: request.isSymlink,
+          metadata: cached?.pathChainSha256 === pathChainSha256 ? cached.metadata : null,
+          pathChainSha256,
+        };
+      });
+
+      const misses = records.filter((record) => !record.cacheHit);
+      for (const record of misses) {
+        const flags = record.isSymlink
+          ? fs.constants.O_RDONLY | SYMLINK
+          : fs.constants.O_RDONLY | NOFOLLOW |
+            (record.beforeLeaf.type === "directory" ? DIRECTORY : 0);
+        let fd;
+        try { fd = fs.openSync(record.context.absolute, flags); }
+        catch (error) {
+          fail(
+            KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+            `${record.context.absolute} could not be descriptor-bound for metadata inspection`,
+            null,
+            error,
+          );
+        }
+        openedNodeFds.push(fd);
+        let opened;
+        try { opened = metadataPathEntry(fs.fstatSync(fd, { bigint: true }), record.context.absolute); }
+        catch (error) {
+          fail(
+            KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+            `${record.context.absolute} metadata descriptor could not be observed`,
+            null,
+            error,
+          );
+        }
+        if (!canonicalJsonBytes(opened).equals(canonicalJsonBytes(record.beforeLeaf))) {
+          fail(
+            KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+            `${record.context.absolute} changed while binding its metadata descriptor`,
+            { before: record.beforeLeaf, opened },
+          );
+        }
+        record.fd = fd;
+        record.opened = opened;
+      }
+
+      if (misses.length > 0) {
+        const helperPrefix = [
+          "-I",
+          "-S",
+          "-c",
+          MAC_METADATA_HELPER_SCRIPT,
+        ];
+        const helperLimits = [
+          String(MAX_TOOL_OUTPUT_BYTES),
+          String(Math.floor(MAX_TOOL_OUTPUT_BYTES / 2)),
+          String(misses.length),
+        ];
+        const aclOutput = toolResult(
+          MAC_METADATA_HELPER,
+          [
+            ...helperPrefix,
+            "acl",
+            ...helperLimits,
+          ],
+          KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
+          "batched macOS ACLs",
+          metadataTimeout(operationBudget, "batched macOS ACL inspection"),
+          directoryFd,
+          openedNodeFds,
+        );
+        parseMacAclObservations(aclOutput, misses);
+        const xattrOutput = toolResult(
+          MAC_METADATA_HELPER,
+          [
+            ...helperPrefix,
+            "xattr",
+            ...helperLimits,
+          ],
+          KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
+          "batched macOS extended attributes",
+          metadataTimeout(operationBudget, "batched macOS extended-attribute inspection"),
+          directoryFd,
+          openedNodeFds,
+        );
+        parseMacXattrObservations(xattrOutput, misses);
+      }
+
+      for (const record of records) {
+        if (!record.cacheHit) {
+          const confirmed = metadataPathEntry(
+            fs.fstatSync(record.fd, { bigint: true }),
+            record.context.absolute,
+          );
+          if (!canonicalJsonBytes(confirmed).equals(canonicalJsonBytes(record.opened))) {
+            fail(
+              KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+              `${record.context.absolute} changed through its metadata descriptor`,
+              { after: confirmed, before: record.opened },
+            );
+          }
+        }
+        const after = metadataPathChain(
+          record.context,
+          record.isSymlink,
+          operationBudget,
+          anchorRoot,
+        );
+        if (!canonicalJsonBytes(record.before).equals(canonicalJsonBytes(after))) {
+          const changedIndex = record.before.findIndex((entry, index) =>
+            !canonicalJsonBytes(entry).equals(canonicalJsonBytes(after[index])));
+          fail(
+            KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+            `${record.context.absolute} or one of its pathname ancestors changed during metadata inspection`,
+            {
+              after: changedIndex < 0 ? null : after[changedIndex],
+              before: changedIndex < 0 ? null : record.before[changedIndex],
+            },
+          );
+        }
+      }
+      const confirmedAnchor = fs.fstatSync(directoryFd, { bigint: true });
+      if (
+        !confirmedAnchor.isDirectory() ||
+        !canonicalJsonBytes(directoryObservation(confirmedAnchor))
+          .equals(canonicalJsonBytes(openedAnchorObservation))
+      ) {
+        fail(
+          KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+          "metadata anchor descriptor changed during batch inspection",
+          { path: firstContext.anchor },
+        );
+      }
+      for (const record of records) {
+        if (!record.cacheHit && record.cacheKey !== null) {
+          cacheUpdates.push(Object.freeze({
+            key: record.cacheKey,
+            metadata: record.metadata,
+            pathChainSha256: record.pathChainSha256,
+          }));
+        }
+        results[offset + record.index] = record.metadata;
+      }
+    } catch (error) {
+      primaryError = error instanceof KnockoutWorkspaceError
+        ? error
+        : workspaceError(
+            KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+            "batched metadata inspection failed without stable taxonomy",
+            null,
+            error,
+          );
+    } finally {
+      const closeErrors = [];
+      for (const fd of [...openedNodeFds].reverse()) {
+        try { fs.closeSync(fd); }
+        catch (error) { closeErrors.push(error); }
+      }
+      if (directoryFd !== undefined) {
+        try { fs.closeSync(directoryFd); }
+        catch (error) { closeErrors.push(error); }
+      }
+      primaryError = combineWorkspaceFailures(
+        primaryError,
+        closeErrors,
+        KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+        "metadata batch descriptors could not be closed",
+      );
+    }
+    if (primaryError !== null) throw primaryError;
+    for (const update of cacheUpdates) {
+      if (
+        cacheState.entries.has(update.key) ||
+        cacheState.entries.size < cacheState.maxEntries
+      ) {
+        cacheState.entries.set(update.key, Object.freeze({
+          metadata: update.metadata,
+          pathChainSha256: update.pathChainSha256,
+        }));
+      }
+    }
+  }
+  return Object.freeze(results);
+}
+
+function observeMetadataBatch(requests, operationBudget, anchorRoot, metadataCache) {
+  if (process.platform === "darwin") {
+    return observeMacMetadataBatch(requests, operationBudget, anchorRoot, metadataCache);
+  }
+  return Object.freeze(requests.map((request) => observeMetadata(
+    request.abs,
+    request.isSymlink,
+    operationBudget,
+    request.expected,
+    anchorRoot,
+    metadataCache,
+  )));
+}
+
 function observeMetadata(
   abs,
   isSymlink,
@@ -4117,6 +4723,14 @@ function observeMetadata(
   anchorRoot,
   metadataCache = null,
 ) {
+  if (process.platform === "darwin") {
+    return observeMacMetadataBatch(
+      [{ abs, expected, isSymlink }],
+      operationBudget,
+      anchorRoot,
+      metadataCache,
+    )[0];
+  }
   const context = metadataPathContext(abs, anchorRoot);
   const cacheState = metadataCache === null
     ? null
@@ -4136,6 +4750,7 @@ function observeMetadata(
   let directoryFd;
   let openedAnchorObservation;
   let metadata;
+  let cacheUpdate = null;
   let pendingError = null;
   try {
     try {
@@ -4185,14 +4800,6 @@ function observeMetadata(
     const cacheHit = cached !== undefined && cached.pathChainSha256 === beforeSha256;
     if (cacheHit) {
       metadata = cached.metadata;
-    } else if (process.platform === "darwin") {
-      metadata = observeMacMetadata(
-        context.absolute,
-        context.operand,
-        isSymlink,
-        operationBudget,
-        directoryFd,
-      );
     } else if (process.platform === "linux") {
       metadata = observeLinuxMetadata(
         context.absolute,
@@ -4236,10 +4843,11 @@ function observeMetadata(
       !cacheHit && cacheKey !== null &&
       (cacheState.entries.has(cacheKey) || cacheState.entries.size < cacheState.maxEntries)
     ) {
-      cacheState.entries.set(cacheKey, Object.freeze({
+      cacheUpdate = Object.freeze({
+        key: cacheKey,
         metadata,
         pathChainSha256: beforeSha256,
-      }));
+      });
     }
   } catch (error) {
     pendingError = error instanceof KnockoutWorkspaceError
@@ -4266,6 +4874,12 @@ function observeMetadata(
     }
   }
   if (pendingError !== null) throw pendingError;
+  if (cacheUpdate !== null) {
+    cacheState.entries.set(cacheUpdate.key, Object.freeze({
+      metadata: cacheUpdate.metadata,
+      pathChainSha256: cacheUpdate.pathChainSha256,
+    }));
+  }
   return metadata;
 }
 
@@ -4797,6 +5411,7 @@ export function censusWorkspace(root, options = {}) {
     );
   }
   const provisional = [];
+  const metadataRequests = [];
   const regularByIdentity = new Map();
   let pendingNodeReservations = 0;
   let allocatedBytes = 0;
@@ -4820,10 +5435,11 @@ export function censusWorkspace(root, options = {}) {
     }
   };
 
-  const addNode = (node, depth) => {
+  const addNode = (node, depth, metadataRequest) => {
     assertNodeAdmission(node.path, depth);
     observedMaxDepth = Math.max(observedMaxDepth, depth);
     provisional.push(node);
+    metadataRequests.push(metadataRequest);
   };
 
   const addDirectory = (abs, rel, stat, depth) => {
@@ -4836,16 +5452,9 @@ export function censusWorkspace(root, options = {}) {
       mode: modeOf(stat),
       observation: directoryObservation(stat),
       path: rel,
-      provenance: observeMetadata(
-        abs,
-        false,
-        operationBudget,
-        stat,
-        workspaceDirectory,
-        metadataCache,
-      ),
+      provenance: null,
       type: "directory",
-    }, depth);
+    }, depth, { abs, expected: stat, isSymlink: false });
   };
 
   const readBoundedDirectoryEntries = (absDir, relDir) => {
@@ -5015,19 +5624,16 @@ export function censusWorkspace(root, options = {}) {
           mode: observed.observation.mode,
           observation: observed.observation,
           path: rel,
-          provenance: observeMetadata(
-            abs,
-            false,
-            operationBudget,
-            observed.observation,
-            workspaceDirectory,
-            metadataCache,
-          ),
+          provenance: null,
           sha256: observed.sha256,
           size: observed.observation.size,
           type: "file",
         };
-        addNode(node, depth + 1);
+        addNode(
+          node,
+          depth + 1,
+          { abs, expected: observed.observation, isSymlink: false },
+        );
         const aliases = regularByIdentity.get(observed.observation.identity) ?? [];
         if (aliases.length === 0) {
           logicalBytes += observed.observation.size;
@@ -5111,17 +5717,10 @@ export function censusWorkspace(root, options = {}) {
             nlink: Number(stat.nlink),
           }),
           path: rel,
-          provenance: observeMetadata(
-            abs,
-            true,
-            operationBudget,
-            stat,
-            workspaceDirectory,
-            metadataCache,
-          ),
+          provenance: null,
           target,
           type: "symlink",
-        }, depth + 1);
+        }, depth + 1, { abs, expected: stat, isSymlink: true });
         continue;
       }
       fail(
@@ -5151,6 +5750,21 @@ export function censusWorkspace(root, options = {}) {
   walk(physical, ".", 0);
   if (pendingNodeReservations !== 0) {
     fail(KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE, "workspace node reservations leaked");
+  }
+  const metadata = observeMetadataBatch(
+    metadataRequests,
+    operationBudget,
+    workspaceDirectory,
+    metadataCache,
+  );
+  if (metadata.length !== provisional.length) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+      "workspace metadata batch returned an incomplete observation",
+    );
+  }
+  for (let index = 0; index < provisional.length; index++) {
+    provisional[index].provenance = metadata[index];
   }
   for (const aliases of regularByIdentity.values()) {
     aliases.sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)));
@@ -11488,7 +12102,9 @@ function verifySealedSeedDescriptor(descriptor, options = {}) {
     typeof descriptor.workspaceIdentity !== "string" ||
     typeof descriptor.evidenceIdentity !== "string" ||
     !validDirectoryObservation(descriptor.seedRootObservation) ||
-    !validFileObservation(descriptor.manifestObservation)
+    !validFileObservation(descriptor.manifestObservation) ||
+    (descriptor.metadataCache !== undefined &&
+      !metadataObservationCacheStates.has(descriptor.metadataCache))
   ) {
     fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "sealed capture capability is malformed");
   }
@@ -11676,7 +12292,8 @@ function verifySealedSeedDescriptor(descriptor, options = {}) {
       error,
     );
   }
-  const metadataCache = options.metadataCache ?? createMetadataObservationCache(limits.maxNodes);
+  const metadataCache = options.metadataCache ?? descriptor.metadataCache ??
+    createMetadataObservationCache(limits.maxNodes);
   if (!metadataObservationCacheStates.has(metadataCache)) {
     fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "metadata observation cache is malformed");
   }
@@ -12321,12 +12938,25 @@ export function openKnockoutCustody(captureCapability, options = {}) {
     snapshot.maxRetainedBytes,
   );
   const operationBudget = createOperationBudget(commandTimeoutMs);
+  const metadataCache = captureDescriptor.metadataCache;
+  if (!metadataObservationCacheStates.has(metadataCache)) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.CAPABILITY_INVALID,
+      "registered capture capability lacks its metadata observation cache",
+    );
+  }
   const seedCensus = verifySealedSeedDescriptor(captureDescriptor, {
     commandTimeoutMs,
     gitExecutable,
+    metadataCache,
     operationBudget,
   });
   const limits = normalizeCaptureLimits(snapshot.limits ?? seedCensus.limits);
+  const metadataCacheState = metadataObservationCacheStates.get(metadataCache);
+  metadataCacheState.maxEntries = Math.max(
+    metadataCacheState.maxEntries,
+    limits.maxNodes * 4,
+  );
   const admittedSeed = workspaceEvidenceFromNodes(seedCensus.nodes, limits, {
     operationBudget,
   });
@@ -12370,7 +13000,7 @@ export function openKnockoutCustody(captureCapability, options = {}) {
     lastPlanSha256: null,
     lastTerminalSha256: null,
     limits,
-    metadataCache: createMetadataObservationCache(limits.maxNodes * 4),
+    metadataCache,
     nextBatch: 1,
     reservedArms: 0,
     reservedBytes: 0,
@@ -16245,6 +16875,7 @@ export function captureAndSealCandidate(options) {
       // verifySealedSeed revalidates the same evidence against this descriptor.
       const capabilityDescriptor = Object.freeze({
         ...finalVerificationDescriptor,
+        metadataCache,
         stateFileSha256: statePublication.sha256,
         stateObservation: statePublication.createdObservation,
         statePath: statePublication.path,

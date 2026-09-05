@@ -1,7 +1,7 @@
 name: branch-hygiene
 
 # STRANDED-BRANCH SWEEP. Runs on a schedule, not on push, because the defect it looks for is an
-# ABSENCE: a branch that was pushed and then never turned into a pull request emits no event at all.
+# ABSENCE: a branch tip that was pushed without a current open pull request emits no review event.
 # Nothing on the push path can catch it — by the time it matters, the push is weeks in the past.
 #
 # Manual sweeps can find stranded work, but they are incomplete and non-repeatable. This scheduled
@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read      # the sweep must prove an exact same-repository open PR at the current tip
   issues: write            # the report IS the output; without this the job can only fail silently
 
 concurrency:
@@ -32,8 +33,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # REQUIRED. The gate compares branch tips against main's history and refuses to run on a
-          # shallow clone (a shallow clone would report zero stranded branches — a false GREEN).
+          # REQUIRED, but not trusted by itself. The gate also compares every local origin-tracking
+          # ref with two authoritative `ls-remote` snapshots and refuses partial/racing views.
           fetch-depth: 0
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -45,46 +46,49 @@ jobs:
         # reports a clean repository, which is indistinguishable from success and worse than no job.
         run: node scripts/lint-stranded-branches.mjs --selftest
 
+      - name: Materialize every authoritative remote head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # fetch-depth: 0 supplies full history. This separate exact positive refspec supplies every
+        # provider head as refs/remotes/origin/*; the Node contract compares it with stable A/B
+        # ls-remote snapshots and fails on any missing, extra, changed, or malformed ref.
+        run: node scripts/lint-stranded-branches.mjs --prepare-github-actions-refs
+
       - name: Sweep for stranded branches
         id: sweep
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set +e
-          node scripts/lint-stranded-branches.mjs --grace-days 3 > sweep.txt 2>&1
-          echo "code=$?" >> "$GITHUB_OUTPUT"
-          set -e
-          cat sweep.txt
-          {
-            echo '## Stranded-branch sweep'
-            echo '```'
-            cat sweep.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+        # One Node process measures, writes the report, safely publishes the tilde-fenced summary,
+        # and emits exact 0/1 outputs. UNKNOWN or any publication failure exits nonzero.
+        run: node scripts/lint-stranded-branches.mjs --github-actions --grace-days 3
 
-      - name: The gate could not measure — fail loudly
-        # Exit 2 means UNKNOWN (no `gh`, shallow clone, unparseable API answer). UNKNOWN is not GREEN:
-        # a sweep that cannot see is exactly the state this whole job exists to end.
-        if: steps.sweep.outputs.code == '2'
-        run: |
-          echo "::error::the stranded-branch gate could not measure — see the log. This is not a clean result."
-          exit 1
+      - name: Validate sweep outcome
+        # `always()` makes missing output and a failed sweep visible instead of letting all later
+        # conditional steps skip. Only an actually successful sweep carrying exact code 0 or 1 may
+        # reach issue reconciliation.
+        if: always()
+        env:
+          SWEEP_CODE: ${{ steps.sweep.outputs.code }}
+          SWEEP_OUTCOME: ${{ steps.sweep.outcome }}
+          SWEEP_REPORT: ${{ steps.sweep.outputs.report }}
+        run: node scripts/lint-stranded-branches.mjs --validate-github-actions-output
 
       - name: Open or update the tracking issue
         if: steps.sweep.outputs.code == '1'
         env:
           GH_TOKEN: ${{ github.token }}
+          REPORT_FILE: ${{ steps.sweep.outputs.report }}
         run: |
           set -euo pipefail
-          TITLE="Branch hygiene: work sitting on branches with no pull request"
+          TITLE="Branch hygiene: live branch tips without qualifying pull-request evidence"
           BODY_FILE=issue.md
           {
-            echo "Branches below carry commits \`main\` does not have, and have **no pull request in any state**."
-            echo "Nothing runs CI on them and no reviewer sees them, so the work is invisible until someone sweeps by hand."
+            echo "Branches below carry commits \`main\` does not have, without a same-repository OPEN PR for their exact current tip."
+            echo "No qualifying current pull-request review is recorded at those exact tips."
             echo
-            echo '```'
-            cat sweep.txt
-            echo '```'
+            echo '~~~text'
+            cat "$REPORT_FILE"
+            echo '~~~'
             echo
             echo "Updated automatically by \`.github/workflows/branch-hygiene.yml\` — run \`$GITHUB_RUN_ID\`."
           } > "$BODY_FILE"
@@ -95,8 +99,7 @@ jobs:
             gh issue edit "$NUM" --body-file "$BODY_FILE"
             echo "updated issue #$NUM"
           else
-            gh issue create --title "$TITLE" --body-file "$BODY_FILE" --label "chore" 2>/dev/null \
-              || gh issue create --title "$TITLE" --body-file "$BODY_FILE"
+            gh issue create --title "$TITLE" --body-file "$BODY_FILE"
           fi
 
       - name: Close the tracking issue when the sweep is clean
@@ -107,11 +110,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TITLE="Branch hygiene: work sitting on branches with no pull request"
+          TITLE="Branch hygiene: live branch tips without qualifying pull-request evidence"
           NUM="$(gh issue list --state open --search "$TITLE in:title" --json number,title \
                  --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")"
           if [ -n "$NUM" ]; then
-            gh issue close "$NUM" --comment "Sweep is clean: every branch is either in \`main\` or has a pull request."
+            gh issue close "$NUM" --comment "Sweep is clean: no authoritative provider branch violates the open-PR/grace policy."
             echo "closed issue #$NUM"
           else
             echo "clean, and no open issue to close"

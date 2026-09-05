@@ -89,6 +89,26 @@ test("the corpus is the shape the runner expects and is non-trivial", () => {
   }
 });
 
+test("the specification's corpus counts match the committed vectors", () => {
+  const spec = readFileSync(join(ROOT, "docs", "action-digest-spec.md"), "utf8");
+  const stated = /The committed corpus is (\d+) ACCEPT \+ (\d+) REJECT vectors/.exec(spec);
+  assert.ok(stated, "the specification must state the corpus counts this check verifies");
+  const accepts = corpus.vectors.filter((v) => v.expect.ok).length;
+  const rejects = corpus.vectors.length - accepts;
+  assert.equal(Number(stated[1]), accepts, "the specification's ACCEPT count differs from the corpus");
+  assert.equal(Number(stated[2]), rejects, "the specification's REJECT count differs from the corpus");
+});
+
+test("every corpus vector has a unique name", () => {
+  const seen = new Set<string>();
+  const duplicated: string[] = [];
+  for (const vector of corpus.vectors) {
+    if (seen.has(vector.name)) duplicated.push(vector.name);
+    else seen.add(vector.name);
+  }
+  assert.deepEqual(duplicated, [], `duplicated vector names: ${duplicated.join(", ")}`);
+});
+
 for (const vec of corpus.vectors) {
   test(`action-digest/${vec.name} → ${vec.expect.ok ? "ACCEPT" : "REJECT"}`, () => {
     const res = verifyActionDigest(bytesOf(vec, "claim"), bytesOf(vec, "context"));

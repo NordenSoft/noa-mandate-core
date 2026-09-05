@@ -54,6 +54,7 @@ type WorkspaceError = Error & {
     launcher?: string;
     launcherUnavailable?: boolean;
     maxAttempts?: number;
+    names?: string[];
     observedEffectiveUid?: number;
     outstandingArmIds?: string[];
     pathIdentity?: string;
@@ -435,7 +436,17 @@ const workspace = await import(
     materialSha256: string;
     maxDepth: number;
     nodeCount: number;
-    nodes: Array<{ path: string; sha256?: string; type: string }>;
+    nodes: Array<{
+      path: string;
+      provenance: {
+        classification: string;
+        length: number;
+        present: boolean;
+        sha256: string | null;
+      };
+      sha256?: string;
+      type: string;
+    }>;
     observationSha256: string;
   };
   resolveGitExecutable: () => string;
@@ -2375,7 +2386,10 @@ test("descriptor-pinned metadata prevents parent-subtree ABA laundering", {
   let swapped = false;
   let restored = false;
   try {
-    const expectedCode = process.platform === "linux" ? "ACL_UNSUPPORTED" : "XATTR_UNSUPPORTED";
+    // The Darwin batch binds every pathname chain before opening its node descriptors. This
+    // fixture swaps the admitted root during that bind, so the earliest deterministic refusal is
+    // the root descriptor disagreeing with its already witnessed identity.
+    const expectedCode = process.platform === "linux" ? "ACL_UNSUPPORTED" : "SNAPSHOT_UNSTABLE";
     if (process.platform === "linux") {
       const setfacl = requiredExecutable(["/usr/bin/setfacl", "/bin/setfacl"], "setfacl");
       requiredExecutable(["/usr/bin/getfacl", "/bin/getfacl"], "getfacl");
@@ -2414,7 +2428,11 @@ test("descriptor-pinned metadata prevents parent-subtree ABA laundering", {
     });
     assert.throws(
       () => workspace.censusWorkspace(root, { rootGitPolicy: "absent" }),
-      (error: WorkspaceError) => error.code === workspaceErrorCode(expectedCode),
+      (error: WorkspaceError) =>
+        error.code === workspaceErrorCode(expectedCode) &&
+        (process.platform === "linux" || error.message.includes(
+          "changed while binding its metadata descriptor",
+        )),
     );
     assert.equal(swapped, true, "parent-subtree substitution was not exercised");
   } finally {
@@ -2503,6 +2521,411 @@ test("metadata launcher diagnostics and absence fail closed", {
   } finally {
     Object.defineProperty(childProcess, "spawnSync", descriptor);
     syncBuiltinESMExports();
+    removeFixturePath(root);
+  }
+});
+
+test("macOS descriptor metadata batches preserve exact bytes and fixed chunk bounds", (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("requires Darwin descriptor metadata APIs");
+    return;
+  }
+  for (const executable of ["/usr/bin/perl", "/usr/bin/python3", "/usr/bin/xattr"]) {
+    try { fs.accessSync(executable, fs.constants.X_OK); }
+    catch {
+      t.skip(`required metadata tool is unavailable: ${executable}`);
+      return;
+    }
+  }
+
+  const root = fs.realpathSync(privateTemp("noa-kws-metadata-batch-"));
+  const directory = path.join(root, "directory");
+  const unusual = path.join(directory, "line\nname\tfile");
+  const link = path.join(root, "link");
+  const symlinkFlag = fs.constants.O_SYMLINK;
+  assert.ok(Number.isSafeInteger(symlinkFlag) && symlinkFlag > 0);
+  const requestedProvenance = Buffer.from([
+    0x00, 0x01, 0x02, 0x03, 0x0a, 0x0d, 0xff, 0x80, 0x41, 0x42, 0x43,
+  ]);
+  const exactXattrFixture = String.raw`
+import base64
+import ctypes
+import os
+import stat
+import sys
+value = base64.b64decode(sys.argv[2], validate=True)
+link_flags = int(sys.argv[3])
+fd = os.open(sys.argv[1], os.O_RDONLY | link_flags)
+try:
+    if stat.S_ISLNK(os.fstat(fd).st_mode) != (link_flags != 0):
+        raise ValueError("fixture descriptor has the wrong node type")
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.fsetxattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+    libc.fsetxattr.restype = ctypes.c_int
+    libc.fgetxattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+    libc.fgetxattr.restype = ctypes.c_ssize_t
+    name = b"com.apple.provenance"
+    source = ctypes.create_string_buffer(value, len(value))
+    if libc.fsetxattr(fd, name, source, len(value), 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "fsetxattr")
+    size = libc.fgetxattr(fd, name, None, 0, 0, 0)
+    if size < 0:
+        raise OSError(ctypes.get_errno(), "fgetxattr size")
+    observed = ctypes.create_string_buffer(size)
+    if libc.fgetxattr(fd, name, observed, size, 0, 0) != size:
+        raise OSError(ctypes.get_errno(), "fgetxattr value")
+    sys.stdout.write(base64.b64encode(bytes(observed.raw[:size])).decode("ascii"))
+finally:
+    os.close(fd)
+`;
+  const directXattrOracle = String.raw`
+import base64
+import ctypes
+import errno
+import json
+import os
+import stat
+import sys
+request = json.loads(sys.stdin.buffer.read())
+symlink_flag = int(sys.argv[1])
+if symlink_flag <= 0:
+    raise ValueError("a nonzero Darwin symlink flag is required")
+libc = ctypes.CDLL(None, use_errno=True)
+libc.fgetxattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+libc.fgetxattr.restype = ctypes.c_ssize_t
+name = sys.argv[2].encode("ascii")
+absent_errnos = {getattr(errno, "ENOATTR", -1), getattr(errno, "ENODATA", -1)}
+result = []
+for item in request:
+    flags = os.O_RDONLY | (symlink_flag if item["symlink"] else 0)
+    fd = os.open(item["operand"], flags)
+    try:
+        if stat.S_ISLNK(os.fstat(fd).st_mode) != item["symlink"]:
+            raise ValueError("oracle descriptor has the wrong node type")
+        ctypes.set_errno(0)
+        size = libc.fgetxattr(fd, name, None, 0, 0, 0)
+        if size < 0:
+            observed_errno = ctypes.get_errno()
+            if observed_errno not in absent_errnos:
+                raise OSError(observed_errno, "fgetxattr size")
+            value = None
+        else:
+            observed = ctypes.create_string_buffer(size)
+            ctypes.set_errno(0)
+            read = libc.fgetxattr(fd, name, observed, size, 0, 0)
+            if read != size:
+                observed_errno = ctypes.get_errno()
+                raise OSError(observed_errno, "fgetxattr value")
+            value = base64.b64encode(bytes(observed.raw[:size])).decode("ascii")
+        result.append({"path": item["path"], "valueBase64": value})
+    finally:
+        os.close(fd)
+sys.stdout.write(json.dumps(result, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+`;
+  const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+  assert.ok(spawnDescriptor !== undefined);
+  const originalSpawnSync = childProcess.spawnSync;
+  const helperCalls = { acl: 0, xattr: 0 };
+  try {
+    fs.mkdirSync(directory, { mode: 0o700 });
+    for (let index = 0; index < 126; index++) {
+      fs.writeFileSync(path.join(directory, `file-${index.toString().padStart(3, "0")}`), "x", {
+        mode: 0o600,
+      });
+    }
+    fs.writeFileSync(unusual, "unusual\n", { mode: 0o600 });
+    fs.symlinkSync(path.join("directory", "file-000"), link);
+    const oracleAttribute = "com.noa.metadata-oracle";
+    const distinctNodes = [
+      { operand: path.join(directory, "file-000"), path: "directory/file-000", symlink: false,
+        value: Buffer.from("TARGET\0\xff", "latin1") },
+      { operand: link, path: "link", symlink: true, value: Buffer.from("LINK\0\x80", "latin1") },
+    ];
+    for (const node of distinctNodes) {
+      execFileSync("/usr/bin/xattr", [
+        "-w", "-x", ...(node.symlink ? ["-s"] : []),
+        oracleAttribute, node.value.toString("hex"), node.operand,
+      ]);
+    }
+    const distinctReadback = execFileSync("/usr/bin/python3", [
+      "-I", "-S", "-c", directXattrOracle, String(symlinkFlag), oracleAttribute,
+    ], { encoding: "utf8", input: JSON.stringify(distinctNodes) });
+    assert.deepEqual(JSON.parse(distinctReadback), distinctNodes.map((node) => ({
+      path: node.path, valueBase64: node.value.toString("base64"),
+    })), "the independent oracle must distinguish the link object from its target");
+    for (const node of distinctNodes) {
+      execFileSync("/usr/bin/xattr", [
+        "-d", ...(node.symlink ? ["-s"] : []), oracleAttribute, node.operand,
+      ]);
+    }
+    const readBackValues = [];
+    for (const [target, symlink] of [
+      [root, false], [directory, false], [unusual, false], [link, true],
+    ] as const) {
+      const readBack = execFileSync("/usr/bin/python3", [
+        "-I", "-S", "-c", exactXattrFixture, target, requestedProvenance.toString("base64"),
+        String(symlink ? symlinkFlag : 0),
+      ], { encoding: "utf8" });
+      const readBackValue = Buffer.from(readBack, "base64");
+      assert.equal(readBackValue.toString("base64"), readBack);
+      readBackValues.push(readBackValue);
+    }
+    const provenance = readBackValues[0];
+    assert.ok(provenance !== undefined && provenance.includes(0x00));
+    for (const readBack of readBackValues) assert.deepEqual(readBack, provenance);
+
+    const oracleRequest = [
+      { operand: root, path: ".", symlink: false },
+      { operand: directory, path: "directory", symlink: false },
+      ...Array.from({ length: 126 }, (_, index) => {
+        const name = `file-${index.toString().padStart(3, "0")}`;
+        return { operand: path.join(directory, name), path: `directory/${name}`, symlink: false };
+      }),
+      { operand: unusual, path: "directory/line\nname\tfile", symlink: false },
+      { operand: link, path: "link", symlink: true },
+    ];
+    const oracleOutput = execFileSync(
+      "/usr/bin/python3",
+      ["-I", "-S", "-c", directXattrOracle, String(symlinkFlag), "com.apple.provenance"],
+      { encoding: "utf8", input: JSON.stringify(oracleRequest), maxBuffer: 1024 * 1024 },
+    );
+    const oracleRecords = JSON.parse(oracleOutput) as Array<{
+      path: string;
+      valueBase64: string | null;
+    }>;
+    assert.equal(oracleRecords.length, oracleRequest.length);
+    const expectedProvenance = new Map<string, {
+      classification: string;
+      length: number;
+      present: boolean;
+      sha256: string | null;
+    }>();
+    for (const record of oracleRecords) {
+      assert.equal(expectedProvenance.has(record.path), false, `duplicate oracle path ${record.path}`);
+      if (record.valueBase64 === null) {
+        expectedProvenance.set(record.path, {
+          classification: "NON_SEMANTIC_OS_MANAGED_PATH_LOCAL",
+          length: 0,
+          present: false,
+          sha256: null,
+        });
+        continue;
+      }
+      const value = Buffer.from(record.valueBase64, "base64");
+      assert.equal(value.toString("base64"), record.valueBase64);
+      expectedProvenance.set(record.path, {
+        classification: "NON_SEMANTIC_OS_MANAGED_PATH_LOCAL",
+        length: value.length,
+        present: true,
+        sha256: crypto.createHash("sha256").update(value).digest("hex"),
+      });
+    }
+    assert.deepEqual(
+      [".", "directory", "directory/line\nname\tfile", "link"].map((operand) =>
+        expectedProvenance.get(operand)),
+      Array.from({ length: 4 }, () => ({
+        classification: "NON_SEMANTIC_OS_MANAGED_PATH_LOCAL",
+        length: provenance.length,
+        present: true,
+        sha256: crypto.createHash("sha256").update(provenance).digest("hex"),
+      })),
+    );
+
+    Object.defineProperty(childProcess, "spawnSync", {
+      ...spawnDescriptor,
+      value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
+        const childArgs = args[1];
+        if (
+          args[0] === "/usr/bin/perl" && Array.isArray(childArgs) &&
+          childArgs.includes("/usr/bin/python3")
+        ) {
+          if (childArgs.includes("acl")) helperCalls.acl += 1;
+          if (childArgs.includes("xattr")) helperCalls.xattr += 1;
+        }
+        return Reflect.apply(originalSpawnSync, childProcess, args);
+      }) as typeof childProcess.spawnSync,
+    });
+    syncBuiltinESMExports();
+
+    const census = workspace.censusWorkspace(root, {
+      commandTimeoutMs: 10_000,
+      rootGitPolicy: "absent",
+    });
+    assert.equal(census.nodeCount, 130);
+    const expectedChunks = Math.ceil(census.nodeCount / 64);
+    assert.deepEqual(helperCalls, { acl: expectedChunks, xattr: expectedChunks });
+    for (const node of census.nodes) {
+      const expected = expectedProvenance.get(node.path);
+      assert.ok(expected !== undefined, `oracle omitted ${JSON.stringify(node.path)}`);
+      assert.deepEqual(
+        node.provenance,
+        expected,
+        `unexpected metadata for ${JSON.stringify(node.path)}`,
+      );
+    }
+    assert.equal(census.nodes.find((node) => node.path === "link")?.type, "symlink");
+  } finally {
+    Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+    syncBuiltinESMExports();
+    removeFixturePath(root);
+  }
+});
+
+test("macOS descriptor metadata helper errors and partial output fail closed", async (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("requires Darwin descriptor metadata APIs");
+    return;
+  }
+  const cases: Array<{
+    expectedCode: string;
+    label: string;
+    mode: "acl" | "xattr";
+    response: "api-error" | "duplicate" | "noncanonical" | "partial" | "wrong-fd";
+  }> = [
+    { expectedCode: "ACL_UNSUPPORTED", label: "ACL API error", mode: "acl", response: "api-error" },
+    {
+      expectedCode: "XATTR_UNSUPPORTED",
+      label: "xattr API error",
+      mode: "xattr",
+      response: "api-error",
+    },
+    {
+      expectedCode: "XATTR_UNSUPPORTED",
+      label: "partial successful batch",
+      mode: "xattr",
+      response: "partial",
+    },
+    {
+      expectedCode: "XATTR_UNSUPPORTED",
+      label: "duplicate attribute record",
+      mode: "xattr",
+      response: "duplicate",
+    },
+    {
+      expectedCode: "XATTR_UNSUPPORTED",
+      label: "noncanonical output framing",
+      mode: "xattr",
+      response: "noncanonical",
+    },
+    {
+      expectedCode: "XATTR_UNSUPPORTED",
+      label: "wrong descriptor ordinal",
+      mode: "xattr",
+      response: "wrong-fd",
+    },
+  ];
+  for (const fixtureCase of cases) {
+    await t.test(fixtureCase.label, () => {
+      const root = fs.realpathSync(privateTemp("noa-kws-metadata-helper-refusal-"));
+      fs.writeFileSync(path.join(root, "leaf"), "stable\n", { mode: 0o600 });
+      const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+      assert.ok(spawnDescriptor !== undefined);
+      const originalSpawnSync = childProcess.spawnSync;
+      let injected = 0;
+      try {
+        Object.defineProperty(childProcess, "spawnSync", {
+          ...spawnDescriptor,
+          value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
+            const childArgs = args[1];
+            if (
+              injected === 0 && args[0] === "/usr/bin/perl" && Array.isArray(childArgs) &&
+              childArgs.includes("/usr/bin/python3") && childArgs.includes(fixtureCase.mode)
+            ) {
+              injected += 1;
+              let stdout = Buffer.alloc(0);
+              if (fixtureCase.response === "partial") stdout = Buffer.from("[]");
+              if (["duplicate", "noncanonical", "wrong-fd"].includes(fixtureCase.response)) {
+                const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
+                assert.ok(Array.isArray(stdio));
+                const records = stdio.slice(4).map((fd, index) => {
+                  assert.equal(typeof fd, "number");
+                  const observed = fs.fstatSync(fd as number, { bigint: true });
+                  return {
+                    fd: fixtureCase.response === "wrong-fd" && index === 0 ? 99 : index + 4,
+                    namesBase64: fixtureCase.response === "duplicate"
+                      ? [
+                          Buffer.from("com.apple.provenance").toString("base64"),
+                          Buffer.from("com.apple.provenance").toString("base64"),
+                        ]
+                      : [],
+                    provenanceBase64: fixtureCase.response === "duplicate" ? "" : null,
+                    stat: {
+                      ctimeNs: String(observed.ctimeNs),
+                      identity: `${observed.dev}:${observed.ino}`,
+                      mode: Number(observed.mode & 0o7777n),
+                      mtimeNs: String(observed.mtimeNs),
+                      nlink: Number(observed.nlink),
+                      size: Number(observed.size),
+                      type: observed.isSymbolicLink() ? "symlink" : observed.isDirectory()
+                        ? "directory" : observed.isFile() ? "file" : "other",
+                      uid: Number(observed.uid),
+                    },
+                  };
+                });
+                stdout = Buffer.from(
+                  `${fixtureCase.response === "noncanonical" ? " " : ""}${JSON.stringify(records)}`,
+                );
+              }
+              const stderr = Buffer.from(
+                fixtureCase.response === "api-error"
+                  ? "mac metadata helper refused injected errno=5\n"
+                  : "",
+              );
+              return {
+                pid: 123,
+                output: [null, stdout, stderr],
+                signal: null,
+                status: fixtureCase.response === "api-error" ? 70 : 0,
+                stderr,
+                stdout,
+              };
+            }
+            return Reflect.apply(originalSpawnSync, childProcess, args);
+          }) as typeof childProcess.spawnSync,
+        });
+        syncBuiltinESMExports();
+        assert.throws(
+          () => workspace.censusWorkspace(root, {
+            commandTimeoutMs: 10_000,
+            rootGitPolicy: "absent",
+          }),
+          (error: WorkspaceError) => error.code === workspaceErrorCode(fixtureCase.expectedCode),
+        );
+        assert.equal(injected, 1);
+      } finally {
+        Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+        syncBuiltinESMExports();
+        removeFixturePath(root);
+      }
+    });
+  }
+});
+
+test("macOS descriptor xattr framing refuses newline-bearing attribute names", (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("requires Darwin descriptor metadata APIs");
+    return;
+  }
+  const root = fs.realpathSync(privateTemp("noa-kws-metadata-xattr-name-"));
+  const leaf = path.join(root, "line\nname\tfile");
+  const unsupportedName = "user.noa\nambiguous";
+  try {
+    fs.writeFileSync(leaf, "stable\n", { mode: 0o600 });
+    try { execFileSync("/usr/bin/xattr", ["-w", unsupportedName, "value", leaf]); }
+    catch {
+      t.skip("the local filesystem cannot create a newline-bearing xattr name");
+      return;
+    }
+    assert.throws(
+      () => workspace.censusWorkspace(root, {
+        commandTimeoutMs: 10_000,
+        rootGitPolicy: "absent",
+      }),
+      (error: WorkspaceError) =>
+        error.code === workspaceErrorCode("XATTR_UNSUPPORTED") &&
+        Array.isArray(error.details?.names) && error.details.names.includes(unsupportedName),
+    );
+  } finally {
     removeFixturePath(root);
   }
 });
@@ -8663,20 +9086,125 @@ test("capture does not register a capability after its final freeze exceeds the 
   }
 });
 
-test("capture reuses ACL and xattr evidence only across unchanged pathname chains", () => {
+test("Linux metadata is observed again after an anchor close failure", (t) => {
+  if (process.platform !== "linux") {
+    t.skip("requires the Linux metadata backend");
+    return;
+  }
+  const fixture = minimalCaptureFixture("metadata-close-failure");
+  const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+  const closeDescriptor = Object.getOwnPropertyDescriptor(fs, "closeSync");
+  assert.ok(spawnDescriptor !== undefined);
+  assert.ok(closeDescriptor !== undefined);
+  const originalSpawn = childProcess.spawnSync;
+  const originalClose = fs.closeSync;
+  let captured: Capture | null = null;
+  let metadataCalls = 0;
+  let failCloseFd: number | null = null;
+  let closeFailed = false;
+  try {
+    captured = workspace.captureAndSealCandidate({
+      custodyRoot: fixture.custody,
+      maxAttempts: 1,
+      sourceRoot: fixture.source,
+    });
+    const sealedCapture = captured;
+    const tracked = path.join(sealedCapture.workspaceRoot, "tracked.txt");
+    const before = fs.lstatSync(tracked, { bigint: true });
+    // A real stat change requires a fresh observation. This seed must remain refused on retry.
+    fs.chmodSync(tracked, Number(before.mode & 0o777n));
+    assert.notEqual(fs.lstatSync(tracked, { bigint: true }).ctimeNs, before.ctimeNs);
+    Object.defineProperty(childProcess, "spawnSync", {
+      ...spawnDescriptor,
+      value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
+        const childArgs = args[1];
+        if (
+          Array.isArray(childArgs) &&
+          childArgs.some((argument) =>
+            typeof argument === "string" && path.basename(argument) === "getfacl") &&
+          childArgs.includes(`.${path.sep}tracked.txt`)
+        ) {
+          const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
+          const fd = Array.isArray(stdio) ? stdio[3] : null;
+          assert.equal(typeof fd, "number");
+          const anchor = fs.fstatSync(fd as number, { bigint: true });
+          assert.equal(`${anchor.dev}:${anchor.ino}`, sealedCapture.workspaceIdentity);
+          metadataCalls += 1;
+          if (!closeFailed) failCloseFd = fd as number;
+        }
+        return Reflect.apply(originalSpawn, childProcess, args);
+      }) as typeof childProcess.spawnSync,
+    });
+    Object.defineProperty(fs, "closeSync", {
+      ...closeDescriptor,
+      value: (...args: Parameters<typeof fs.closeSync>) => {
+        const failThisClose = args[0] === failCloseFd;
+        if (failThisClose) failCloseFd = null;
+        const result = Reflect.apply(originalClose, fs, args);
+        if (failThisClose) {
+          closeFailed = true;
+          throw Object.assign(new Error("one-shot metadata anchor close failure"), { code: "EIO" });
+        }
+        return result;
+      },
+    });
+    syncBuiltinESMExports();
+    const openCustody = () => workspace.openKnockoutCustody(sealedCapture, {
+      maxRetainedArms: 1,
+      maxRetainedBytes: 16 * 1024 * 1024,
+    });
+    assert.throws(openCustody, (error: WorkspaceError) =>
+      error.code === workspaceErrorCode("SNAPSHOT_UNSTABLE"));
+    assert.equal(closeFailed, true, "the metadata anchor close failure was not reached");
+    assert.equal(metadataCalls, 1);
+    assert.throws(openCustody, (error: WorkspaceError) =>
+      error.code === workspaceErrorCode("MANIFEST_MISMATCH"));
+    assert.equal(metadataCalls, 2, "failed cleanup left reusable metadata evidence");
+    assert.equal(fs.readFileSync(fixture.trackedPath, "utf8"), "stable source bytes\n");
+  } finally {
+    Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+    Object.defineProperty(fs, "closeSync", closeDescriptor);
+    syncBuiltinESMExports();
+    cleanupReportedScratchRoots(captured?.retainedPrivateRoots ?? []);
+    removeFixturePath(fixture.source);
+    removeFixturePath(fixture.custody);
+  }
+});
+
+test("capture reuses metadata evidence while each fresh arm is observed in fixed chunks", async () => {
   const fixture = minimalCaptureFixture("metadata-cache");
   const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
   assert.ok(spawnDescriptor !== undefined);
   const originalSpawnSync = childProcess.spawnSync;
-  const trackedAclAnchors: string[] = [];
+  const metadataBatches: Array<{ anchor: string; mode: "acl" | "xattr"; nodes: string[] }> = [];
+  const legacyTrackedAclAnchors: string[] = [];
   let captured: Capture | null = null;
+  let cooperativeLease: CooperativeSourceLease | null = null;
+  let arm: DisposableArm | null = null;
+  let released: SourceRelease | null = null;
   try {
     try {
       Object.defineProperty(childProcess, "spawnSync", {
         ...spawnDescriptor,
         value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
           const childArgs = args[1];
-          if (
+          if (Array.isArray(childArgs) && childArgs.includes("/usr/bin/python3")) {
+            const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
+            const directoryFd = Array.isArray(stdio) ? stdio[3] : null;
+            if (typeof directoryFd === "number") {
+              const stat = fs.fstatSync(directoryFd, { bigint: true });
+              const mode = childArgs.includes("acl") ? "acl" : "xattr";
+              metadataBatches.push({
+                anchor: `${stat.dev}:${stat.ino}`,
+                mode,
+                nodes: stdio!.slice(4).map((fd) => {
+                  assert.equal(typeof fd, "number");
+                  const node = fs.fstatSync(fd as number, { bigint: true });
+                  return `${node.dev}:${node.ino}`;
+                }),
+              });
+            }
+          } else if (
             Array.isArray(childArgs) &&
             childArgs.some((argument) =>
               argument === "/bin/ls" ||
@@ -8687,7 +9215,7 @@ test("capture reuses ACL and xattr evidence only across unchanged pathname chain
             const directoryFd = Array.isArray(stdio) ? stdio[3] : null;
             if (typeof directoryFd === "number") {
               const stat = fs.fstatSync(directoryFd, { bigint: true });
-              trackedAclAnchors.push(`${stat.dev}:${stat.ino}`);
+              legacyTrackedAclAnchors.push(`${stat.dev}:${stat.ino}`);
             }
           }
           return Reflect.apply(originalSpawnSync, childProcess, args);
@@ -8699,19 +9227,103 @@ test("capture reuses ACL and xattr evidence only across unchanged pathname chain
         maxAttempts: 1,
         sourceRoot: fixture.source,
       });
+      const sealedCapture = captured;
       const sourceStat = fs.lstatSync(fixture.source, { bigint: true });
+      const sourceTracked = fs.lstatSync(path.join(fixture.source, "tracked.txt"), { bigint: true });
+      const destinationTracked = fs.lstatSync(
+        path.join(sealedCapture.workspaceRoot, "tracked.txt"),
+        { bigint: true },
+      );
+      const trackedIdentities = new Set([
+        `${sourceTracked.dev}:${sourceTracked.ino}`,
+        `${destinationTracked.dev}:${destinationTracked.ino}`,
+      ]);
+      const trackedAclAnchors = process.platform === "darwin"
+        ? metadataBatches
+            .filter((batch) =>
+              batch.mode === "acl" && batch.nodes.some((identity) => trackedIdentities.has(identity)))
+            .map((batch) => batch.anchor)
+        : legacyTrackedAclAnchors;
       assert.deepEqual(
         trackedAclAnchors.sort(),
-        [`${sourceStat.dev}:${sourceStat.ino}`, captured.workspaceIdentity].sort(),
+        [`${sourceStat.dev}:${sourceStat.ino}`, sealedCapture.workspaceIdentity].sort(),
         "source/destination ACL metadata must each be externally observed exactly once",
       );
-      assert.doesNotThrow(() => workspace.verifySealedSeed(captured!));
+      const destinationTrackedIdentity = `${destinationTracked.dev}:${destinationTracked.ino}`;
+      const trackedObservationCount = () => process.platform === "darwin"
+        ? metadataBatches.filter((batch) => batch.nodes.includes(destinationTrackedIdentity)).length
+        : legacyTrackedAclAnchors.length;
+      const destinationTrackedCallsAfterCapture = trackedObservationCount();
+      assert.equal(destinationTrackedCallsAfterCapture, 2);
+      assert.doesNotThrow(() => workspace.verifySealedSeed(sealedCapture));
+      assert.equal(
+        trackedObservationCount(),
+        destinationTrackedCallsAfterCapture,
+        "unchanged seed verification re-observed cached tracked-file metadata",
+      );
+      if (process.platform === "darwin") {
+        const custody = workspace.openKnockoutCustody(sealedCapture, {
+          maxRetainedArms: 1,
+          maxRetainedBytes: 64 * 1024 * 1024,
+        });
+        const sourceLease = workspace.acquireSourceLease(custody);
+        cooperativeLease = await workspace.acquireCooperativeSourceLease(sourceLease);
+        const plan = workspace.admitArmPlan(cooperativeLease, {
+          arms: [{ armId: "metadata-batch", role: "SELFTEST", subjectSha256: "1".repeat(64) }],
+        });
+        assert.equal(
+          metadataBatches.filter((batch) => batch.nodes.includes(destinationTrackedIdentity)).length,
+          destinationTrackedCallsAfterCapture,
+          "opening custody or leasing an unchanged seed re-observed cached tracked metadata",
+        );
+        arm = workspace.materializeArm(plan, "metadata-batch");
+        const armStat = fs.lstatSync(arm.workspaceRoot, { bigint: true });
+        const armIdentity = `${armStat.dev}:${armStat.ino}`;
+        const completeArmCensusBatches = metadataBatches.filter((batch) =>
+          batch.anchor === armIdentity &&
+          batch.nodes.length === sealedCapture.workspaceObservation.nodeCount);
+        assert.deepEqual(
+          completeArmCensusBatches.map((batch) => batch.mode).sort(),
+          ["acl", "xattr"],
+          "the fresh arm census did not batch all fixture nodes once per native API",
+        );
+        const armTracked = fs.lstatSync(path.join(arm.workspaceRoot, "tracked.txt"), {
+          bigint: true,
+        });
+        const armTrackedBatches = metadataBatches.filter((batch) =>
+          batch.nodes.includes(`${armTracked.dev}:${armTracked.ino}`));
+        assert.deepEqual(
+          armTrackedBatches.map((batch) => batch.mode).sort(),
+          ["acl", "xattr"],
+          "the fresh arm tracked file was not observed exactly once by each native API batch",
+        );
+        assert.equal(
+          arm.seedObservationSha256,
+          sealedCapture.workspaceObservation.observationSha256,
+        );
+        workspace.cancelMaterializedArm(cooperativeLease, arm, "TEST_COMPLETE");
+        arm = null;
+        const closed = await workspace.closeCooperativeSourceLease(cooperativeLease);
+        cooperativeLease = null;
+        released = closed.sourceRelease;
+        assert.equal(released.status, "RELEASED");
+      }
     } finally {
       Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
       syncBuiltinESMExports();
     }
   } finally {
-    cleanupReportedScratchRoots(captured?.retainedPrivateRoots ?? []);
+    if (cooperativeLease !== null) {
+      if (arm !== null) {
+        try { workspace.cancelMaterializedArm(cooperativeLease, arm, "TEST_CLEANUP"); }
+        catch {}
+      }
+      try {
+        const closed = await workspace.closeCooperativeSourceLease(cooperativeLease);
+        released = closed.sourceRelease;
+      } catch {}
+    }
+    cleanupReportedScratchRoots(released?.retainedPrivateRoots ?? captured?.retainedPrivateRoots ?? []);
     removeFixturePath(fixture.source);
     removeFixturePath(fixture.custody);
   }

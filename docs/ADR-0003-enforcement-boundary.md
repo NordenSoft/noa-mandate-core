@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | **PROPOSED.** This architecture record is not implementation, deployment, or release evidence. |
+| **Status** | **RECORDED DIRECTION / PROPOSED ARCHITECTURE.** The direction in §1 is recorded; the detailed architecture remains proposed. This record is not implementation, deployment, or release evidence. |
 | **Date** | 2026-07-29 |
 | **Scope** | Architecture proposal for capability enforcement, credential custody, and boundary-owned dispatch. |
 | **Evidence class** | Recorded analysis. Exact-current implementation and deployment evidence must be established separately. |
@@ -14,9 +14,9 @@ private deployment, provider, customer environment, or approved product roadmap.
 claim requires revision-bound code and test evidence; any deployment claim requires separate runtime
 evidence.
 
-## 1. Recorded architecture direction
+## 1. Recorded direction; proposed architecture
 
-The proposed direction is target-validated, boundary-issued capability enforcement, with
+The recorded direction is target-validated, boundary-issued capability enforcement, with
 boundary-owned dispatch where target-native validation is unavailable. The boundary is scoped for
 enforcement, credential custody, capability issuance, and optional dispatch; it is not merely a
 signing or throughput service.
@@ -90,8 +90,10 @@ Use target-native capabilities where the target can validate all required bindin
 boundary-owned dispatch where it cannot. Keep evidence-only integrations explicitly classified and
 do not upgrade their claims.
 
-This hybrid is a proposal, not an accepted or implemented decision. A concrete integration must name
-which branch it uses and prove that no parallel ungoverned credential or endpoint remains.
+This hybrid describes a proposed architecture for the recorded direction. The recorded direction does
+not make the detailed architecture an accepted decision, and it is not implementation, deployment,
+or release evidence. A concrete integration must name which branch it uses and prove that no parallel
+ungoverned credential or endpoint remains.
 
 ## 5. Required capability semantics
 
@@ -165,4 +167,4 @@ restore a credential path that bypasses the boundary while continuing to claim e
 
 This document does not establish implementation, deployment, production use, customer demand,
 standards adoption, independent interoperability, or protection against compromise of the target or
-enforcement authority. The status conflict at the top remains unresolved by this sanitized copy.
+enforcement authority.
