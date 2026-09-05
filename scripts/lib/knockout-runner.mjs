@@ -77,7 +77,9 @@ import {
   closeCooperativeSourceLease,
   consumeBoundaryKnockoutBootstrapToken,
   createKnockoutWorkerSubject,
+  KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS,
   KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS,
+  KNOCKOUT_WORKSPACE_COMMAND_TIMEOUT_LIMIT_MS,
   KNOCKOUT_SELFTEST_GATE,
   KNOCKOUT_WORKER_OPERATIONS,
   KNOCKOUT_WORKER_RELATIVE_PATH,
@@ -6501,6 +6503,14 @@ export function createIsolatedCustodyRoot(cacheHome = userCacheHome()) {
   return custodyRoot;
 }
 
+export const ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS = Object.freeze({
+  captureTimeoutMs: KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS,
+  minimumWorkerEnvelopeMs: KNOCKOUT_WORKSPACE_COMMAND_TIMEOUT_LIMIT_MS,
+  suiteTimeoutMs: KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS -
+    KNOCKOUT_WORKSPACE_COMMAND_TIMEOUT_LIMIT_MS,
+  workerTimeoutMs: KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS,
+});
+
 function isolatedSweepFailure(code, message, cause = null, details = null) {
   const error = new Error(message, cause === null ? undefined : { cause });
   error.name = "IsolatedKnockoutSweepError";
@@ -6513,9 +6523,12 @@ function isolatedSweepFailure(code, message, cause = null, details = null) {
  * Execute the selected knockout registry only in candidate-bound disposable workspaces. This
  * function owns every asynchronous lifecycle edge and returns verdict-bearing bytes only after the
  * cooperative lease has re-opened all worker evidence and revalidated both source and sealed seed.
+ * Capture, inner-suite, and outer-worker deadlines are deliberately independent. `timeoutMs` is a
+ * compatibility alias for `suiteTimeoutMs`; the worker must retain its fixed cleanup envelope.
  */
 export async function runIsolatedKnockoutSweep({
   candidateSubject = null,
+  captureTimeoutMs = ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS.captureTimeoutMs,
   custodyRoot: requestedCustodyRoot = null,
   maxRetainedArms,
   maxRetainedBytes,
@@ -6524,15 +6537,56 @@ export async function runIsolatedKnockoutSweep({
   registry,
   root,
   selected,
-  timeoutMs = 900_000,
+  suiteTimeoutMs = undefined,
+  timeoutMs = undefined,
+  workerTimeoutMs = ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS.workerTimeoutMs,
 }) {
+  const resolvedSuiteTimeoutMs = suiteTimeoutMs === undefined
+    ? (timeoutMs === undefined ? ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS.suiteTimeoutMs : timeoutMs)
+    : suiteTimeoutMs;
   if (
-    !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 ||
-    timeoutMs > KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS
+    timeoutMs !== undefined && suiteTimeoutMs !== undefined &&
+    timeoutMs !== suiteTimeoutMs
   ) {
     throw isolatedSweepFailure(
       "SWEEP_TIMEOUT_INVALID",
-      `isolated sweep timeoutMs must be between 1 and ${KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS}`,
+      "isolated sweep timeoutMs alias conflicts with suiteTimeoutMs",
+    );
+  }
+  if (
+    !Number.isSafeInteger(captureTimeoutMs) || captureTimeoutMs < 1 ||
+    captureTimeoutMs > KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS
+  ) {
+    throw isolatedSweepFailure(
+      "SWEEP_TIMEOUT_INVALID",
+      `isolated sweep captureTimeoutMs must be between 1 and ${KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS}`,
+    );
+  }
+  if (
+    !Number.isSafeInteger(resolvedSuiteTimeoutMs) || resolvedSuiteTimeoutMs < 1 ||
+    resolvedSuiteTimeoutMs > ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS.suiteTimeoutMs
+  ) {
+    throw isolatedSweepFailure(
+      "SWEEP_TIMEOUT_INVALID",
+      `isolated sweep suite timeout must be between 1 and ${ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS.suiteTimeoutMs}`,
+    );
+  }
+  if (
+    !Number.isSafeInteger(workerTimeoutMs) || workerTimeoutMs < 1 ||
+    workerTimeoutMs > KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS
+  ) {
+    throw isolatedSweepFailure(
+      "SWEEP_TIMEOUT_INVALID",
+      `isolated sweep workerTimeoutMs must be between 1 and ${KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS}`,
+    );
+  }
+  if (
+    workerTimeoutMs - resolvedSuiteTimeoutMs <
+    ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS.minimumWorkerEnvelopeMs
+  ) {
+    throw isolatedSweepFailure(
+      "SWEEP_TIMEOUT_INVALID",
+      `isolated sweep workerTimeoutMs must reserve at least ${ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS.minimumWorkerEnvelopeMs}ms beyond the suite timeout`,
     );
   }
   const registryById = validateKnockoutRegistry(registry);
@@ -6617,7 +6671,7 @@ export async function runIsolatedKnockoutSweep({
     currentArm = materializeArm(currentPlan, armId);
     const completed = await runArmWorker(cooperativeLease, currentArm, {
       subject,
-      timeoutMs,
+      timeoutMs: workerTimeoutMs,
     });
     currentPlan = null;
     currentArm = null;
@@ -6683,7 +6737,7 @@ export async function runIsolatedKnockoutSweep({
   try {
     capture = captureAndSealCandidate({
       custodyRoot,
-      operationTimeoutMs: timeoutMs,
+      operationTimeoutMs: captureTimeoutMs,
       sourceRoot,
     });
     const workerPath = path.join(
@@ -6701,7 +6755,7 @@ export async function runIsolatedKnockoutSweep({
     const selftestKeySha256 = knockoutSelftestKeySha256();
     const selftestSubject = createKnockoutWorkerSubject({
       operation: KNOCKOUT_WORKER_OPERATIONS.RUN_KNOCKOUT_SELFTEST,
-      request: { selftestKeySha256, suiteTimeoutMs: timeoutMs },
+      request: { selftestKeySha256, suiteTimeoutMs: resolvedSuiteTimeoutMs },
       workerSha256,
     });
     const selftestCompleted = await runOneArm({
@@ -6763,7 +6817,7 @@ export async function runIsolatedKnockoutSweep({
           kind: entry.kind,
           registrySha256,
           suite: entry.suite,
-          suiteTimeoutMs: timeoutMs,
+          suiteTimeoutMs: resolvedSuiteTimeoutMs,
         },
         workerSha256,
       });
@@ -6827,7 +6881,7 @@ export async function runIsolatedKnockoutSweep({
           entry,
           pairedEntry,
           registrySha256,
-          suiteTimeoutMs: timeoutMs,
+          suiteTimeoutMs: resolvedSuiteTimeoutMs,
         },
         workerSha256,
       });
@@ -6884,7 +6938,7 @@ export async function runIsolatedKnockoutSweep({
             mutantTerminalSha256: completed.terminalPublication.sha256,
             pairedEntry,
             registrySha256,
-            suiteTimeoutMs: timeoutMs,
+            suiteTimeoutMs: resolvedSuiteTimeoutMs,
           },
           workerSha256,
         });

@@ -43,7 +43,7 @@ import { fileURLToPath } from "node:url";
 import {
   BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION,
   baselineEvidenceSummary, partitionIntoShards, PASSING,
-  runIsolatedKnockoutSweep, validateKnockoutRegistry,
+  ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS, runIsolatedKnockoutSweep, validateKnockoutRegistry,
 } from "./lib/knockout-runner.mjs";
 import {
   deriveBoundaryKnockoutCandidateSubject,
@@ -4473,6 +4473,7 @@ if (DIRECT_ENTRY) {
   let sweep = null;
   try {
     sweep = await runIsolatedKnockoutSweep({
+      captureTimeoutMs: ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS.captureTimeoutMs,
       maxRetainedArms: KNOCKOUT_WORKSPACE_ARM_LIMITS.maxRetainedArms,
       maxRetainedBytes: KNOCKOUT_WORKSPACE_ARM_LIMITS.maxRetainedBytes,
       onProgress: ({ completed, id, total, verdict }) => {
@@ -4483,7 +4484,8 @@ if (DIRECT_ENTRY) {
       root: ROOT,
       selected,
       candidateSubject,
-      timeoutMs: 900_000,
+      suiteTimeoutMs: ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS.suiteTimeoutMs,
+      workerTimeoutMs: ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS.workerTimeoutMs,
     });
   } catch (error) {
     const code = typeof error?.code === "string" ? error.code : "ISOLATED_SWEEP_FAILED";

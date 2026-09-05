@@ -279,8 +279,10 @@ const workspace = await import(
   KNOCKOUT_WORKSPACE_ERROR_CODES: Record<string, string>;
   KNOCKOUT_WORKSPACE_ARM_LIMITS: { maxRetainedArms: number; maxRetainedBytes: number };
   KNOCKOUT_WORKSPACE_ARM_ROLES: string[];
+  KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS: number;
   KNOCKOUT_WORKSPACE_CAPTURE_LIMITS: CaptureLimits;
   KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS: number;
+  KNOCKOUT_WORKSPACE_COMMAND_TIMEOUT_LIMIT_MS: number;
   KNOCKOUT_WORKSPACE_CAPTURE_STATUS?: string;
   KNOCKOUT_WORKSPACE_PROTOCOLS: Record<string, string> & { workerSubject: string };
   KNOCKOUT_WORKSPACE_STATE_EVIDENCE_ROLE?: string;
@@ -467,6 +469,12 @@ const knockoutRunner = await import(
     cacheDir: string;
     release: () => boolean;
     start: () => { ok: boolean; kind?: string; detail?: string };
+  };
+  ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS: {
+    captureTimeoutMs: number;
+    minimumWorkerEnvelopeMs: number;
+    suiteTimeoutMs: number;
+    workerTimeoutMs: number;
   };
   createIsolatedCustodyRoot: (cacheHome?: string) => string;
   finalizeIsolatedSetupIntegrityPostcheck: (options: Record<string, unknown>) => {
@@ -3684,6 +3692,7 @@ test("terminal SEALED commit is witnessed against the verified seed in its exact
               },
             },
             maxAttempts: 1,
+            operationTimeoutMs: 5 * 60_000,
             sourceRoot: fixture.source,
           });
         } catch (error) {
@@ -5658,15 +5667,15 @@ test("an admitted retry preserves prior instability when the shared deadline exp
   const fixture = minimalCaptureFixture("retry-deadline-overrun");
   const clockDescriptor = Object.getOwnPropertyDescriptor(process.hrtime, "bigint");
   assert.ok(clockDescriptor !== undefined);
-  const originalClock = process.hrtime.bigint;
+  const operationTimeoutMs = 60_000;
   const attempts: number[] = [];
-  let virtualOffsetNs = 0n;
+  let virtualNowNs = 0n;
   let refusal: WorkspaceError | null = null;
   try {
     try {
       Object.defineProperty(process.hrtime, "bigint", {
         ...clockDescriptor,
-        value: () => originalClock() + virtualOffsetNs,
+        value: () => virtualNowNs,
       });
       assert.throws(
         () => workspace.captureAndSealCandidate({
@@ -5677,12 +5686,13 @@ test("an admitted retry preserves prior instability when the shared deadline exp
               attempts.push(attempt);
               if (attempt === 1) {
                 fs.writeFileSync(fixture.trackedPath, "first attempt drift\n", { mode: 0o600 });
-                virtualOffsetNs = 20_000_000_000n;
+                virtualNowNs = 20_000_000_000n;
               } else {
-                virtualOffsetNs = 61_000_000_000n;
+                virtualNowNs = 61_000_000_000n;
               }
             },
           },
+          operationTimeoutMs,
           sourceRoot: fixture.source,
         }),
         (error: WorkspaceError) => {
@@ -8297,6 +8307,8 @@ test("one operation deadline includes time spent in capture hooks", () => {
   const descriptor = Object.getOwnPropertyDescriptor(process.hrtime, "bigint");
   assert.ok(descriptor !== undefined);
   const original = process.hrtime.bigint;
+  const operationTimeoutMs = workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS;
+  const expiredClockOffsetNs = BigInt(operationTimeoutMs + 1) * 1_000_000n;
   let expire = false;
   let refusal: WorkspaceError | null = null;
   try {
@@ -8318,7 +8330,7 @@ test("one operation deadline includes time spent in capture hooks", () => {
     try {
       Object.defineProperty(process.hrtime, "bigint", {
         ...descriptor,
-        value: () => original() + (expire ? 600_000_000_000n : 0n),
+        value: () => original() + (expire ? expiredClockOffsetNs : 0n),
       });
       assert.throws(
         () => workspace.captureAndSealCandidate({
@@ -8326,7 +8338,7 @@ test("one operation deadline includes time spent in capture hooks", () => {
           custodyRoot: fixture.custody,
           hooks: { afterPreObservation() { expire = true; } },
           maxAttempts: 1,
-          operationTimeoutMs: 5_000,
+          operationTimeoutMs,
           sourceRoot: fixture.source,
         }),
         (error: WorkspaceError) => {
@@ -10148,7 +10160,7 @@ test("Phase 2 worker operations have one closed execution-role mapping", () => {
   );
 });
 
-test("Phase 2 invalid retention preflight creates no custody directory", async () => {
+test("Phase 2 invalid timeout or retention preflight creates no custody directory", async () => {
   const fixture = minimalCaptureFixture("phase2-runner-preflight");
   const custodyRoot = path.join(fixture.custody, "must-not-exist");
   const entry = {
@@ -10163,7 +10175,24 @@ test("Phase 2 invalid retention preflight creates no custody directory", async (
     suite: [".", "node", ["fixture-gate.mjs"]],
   };
   try {
-    for (const timeoutMs of [0, workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS + 1]) {
+    const suiteTimeoutLimitMs = workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS -
+      workspace.KNOCKOUT_WORKSPACE_COMMAND_TIMEOUT_LIMIT_MS;
+    const invalidTimeoutOptions = [
+      { timeoutMs: 0 },
+      { timeoutMs: suiteTimeoutLimitMs + 1 },
+      { captureTimeoutMs: 0 },
+      { captureTimeoutMs: workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS + 1 },
+      { suiteTimeoutMs: 0 },
+      { suiteTimeoutMs: suiteTimeoutLimitMs + 1 },
+      { workerTimeoutMs: 0 },
+      { workerTimeoutMs: workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS + 1 },
+      {
+        suiteTimeoutMs: 60_000,
+        workerTimeoutMs: 60_000 + workspace.KNOCKOUT_WORKSPACE_COMMAND_TIMEOUT_LIMIT_MS - 1,
+      },
+      { suiteTimeoutMs: 60_001, timeoutMs: 60_000 },
+    ];
+    for (const timeoutOptions of invalidTimeoutOptions) {
       await assert.rejects(
         () => knockoutRunner.runIsolatedKnockoutSweep({
           custodyRoot,
@@ -10173,7 +10202,7 @@ test("Phase 2 invalid retention preflight creates no custody directory", async (
           registry: [entry],
           root: fixture.source,
           selected: [entry],
-          timeoutMs,
+          ...timeoutOptions,
         }),
         (error: WorkspaceError) => error.code === "SWEEP_TIMEOUT_INVALID",
       );
@@ -10188,7 +10217,10 @@ test("Phase 2 invalid retention preflight creates no custody directory", async (
         registry: [entry],
         root: fixture.source,
         selected: [entry],
+        captureTimeoutMs: workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS,
+        suiteTimeoutMs: 60_000,
         timeoutMs: 60_000,
+        workerTimeoutMs: workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS,
       }),
       (error: WorkspaceError) => error.code === "RETENTION_BUDGET_INSUFFICIENT",
     );
@@ -10351,7 +10383,11 @@ test("Phase 2 isolated runner executes one real baseline and mutant in separate 
     const statusBefore = git(fixture.source, ["status", "--porcelain=v1", "-z"]);
     const indexBefore = sha256File(path.join(fixture.source, ".git", "index"));
     const controlBefore = sha256File(path.join(fixture.source, "control.mjs"));
+    const captureTimeoutMs = workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS;
+    const suiteTimeoutMs = 600_000;
+    const workerTimeoutMs = workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS;
     const sweep = await knockoutRunner.runIsolatedKnockoutSweep({
+      captureTimeoutMs,
       custodyRoot: fixture.custody,
       maxRetainedArms: 3,
       maxRetainedBytes: 512 * 1024 * 1024,
@@ -10359,7 +10395,8 @@ test("Phase 2 isolated runner executes one real baseline and mutant in separate 
       registry: [entry],
       root: fixture.source,
       selected: [entry],
-      timeoutMs: 600_000,
+      suiteTimeoutMs,
+      workerTimeoutMs,
     });
 
     assert.equal(sweep.status, "COMPLETE");
@@ -10369,7 +10406,7 @@ test("Phase 2 isolated runner executes one real baseline and mutant in separate 
     const candidateManifest = JSON.parse(
       fs.readFileSync(candidateManifestFiles[0]!, "utf8"),
     ) as Capture["manifest"];
-    assert.equal(candidateManifest.resourceAdmission.operationDeadlineMs, 600_000);
+    assert.equal(candidateManifest.resourceAdmission.operationDeadlineMs, captureTimeoutMs);
     assert.equal(candidateManifest.resourceAdmission.childCommandTimeoutMs, 300_000);
     assert.equal(sweep.closeEvidence.sourceRelease.status, "RELEASED");
     assert.equal(sweep.baselines.length, 1);
@@ -10542,6 +10579,7 @@ test("Phase 2 supervisor refuses a retained mutant changed by a delayed same-gro
     const controlBefore = sha256File(path.join(fixture.source, "control.mjs"));
     await assert.rejects(
       () => knockoutRunner.runIsolatedKnockoutSweep({
+        captureTimeoutMs: workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS,
         custodyRoot: fixture.custody,
         maxRetainedArms: 3,
         maxRetainedBytes: 512 * 1024 * 1024,
@@ -10549,7 +10587,8 @@ test("Phase 2 supervisor refuses a retained mutant changed by a delayed same-gro
         registry: [entry],
         root: fixture.source,
         selected: [entry],
-        timeoutMs: 60_000,
+        suiteTimeoutMs: 60_000,
+        workerTimeoutMs: workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS,
       }),
       (error: WorkspaceError) => {
         const details = (error as unknown as { details?: { status?: unknown } }).details;
@@ -10852,6 +10891,7 @@ test("Phase 2 setup-integrity credit waits for a fresh pristine POSTCHECK arm", 
     const indexBefore = sha256File(path.join(fixture.source, ".git", "index"));
     const controlBefore = sha256File(path.join(fixture.source, "control.mjs"));
     const sweep = await knockoutRunner.runIsolatedKnockoutSweep({
+      captureTimeoutMs: workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS,
       custodyRoot: fixture.custody,
       maxRetainedArms: 4,
       maxRetainedBytes: 768 * 1024 * 1024,
@@ -10859,7 +10899,8 @@ test("Phase 2 setup-integrity credit waits for a fresh pristine POSTCHECK arm", 
       registry: [entry],
       root: fixture.source,
       selected: [entry],
-      timeoutMs: 60_000,
+      suiteTimeoutMs: 60_000,
+      workerTimeoutMs: workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS,
     });
 
     const result = sweep.results[0];
@@ -10952,6 +10993,7 @@ test("Phase 2 isolated selftest failure stops before every baseline and cannot p
     const indexBefore = sha256File(path.join(fixture.source, ".git", "index"));
     await assert.rejects(
       () => knockoutRunner.runIsolatedKnockoutSweep({
+        captureTimeoutMs: workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS,
         custodyRoot: fixture.custody,
         maxRetainedArms: 3,
         maxRetainedBytes: 512 * 1024 * 1024,
@@ -10959,7 +11001,8 @@ test("Phase 2 isolated selftest failure stops before every baseline and cannot p
         registry: [entry],
         root: fixture.source,
         selected: [entry],
-        timeoutMs: 60_000,
+        suiteTimeoutMs: 60_000,
+        workerTimeoutMs: workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS,
       }),
       (error: WorkspaceError & { details?: { gateFindings?: unknown[] } }) =>
         error.code === "SELFTEST_FAILED" && error.details?.gateFindings?.length === 1,
@@ -11028,6 +11071,7 @@ test("Phase 2 isolated runner refuses a captured registry mismatch before suite 
     const controlBefore = sha256File(path.join(fixture.source, "control.mjs"));
     await assert.rejects(
       () => knockoutRunner.runIsolatedKnockoutSweep({
+        captureTimeoutMs: workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS,
         custodyRoot: fixture.custody,
         maxRetainedArms: 3,
         maxRetainedBytes: 512 * 1024 * 1024,
@@ -11035,7 +11079,8 @@ test("Phase 2 isolated runner refuses a captured registry mismatch before suite 
         registry: [supervisorEntry],
         root: fixture.source,
         selected: [supervisorEntry],
-        timeoutMs: 60_000,
+        suiteTimeoutMs: 60_000,
+        workerTimeoutMs: workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS,
       }),
       (error: WorkspaceError) => error.code === "ARM_REFUSED",
     );
@@ -11286,16 +11331,14 @@ test("Phase 2 worker timeout rejects active close and reaps a stubborn original 
     });
     arm = workspace.materializeArm(plan, "timeout-group");
 
-    const running = workspace.runArmWorker(cooperativeLease, arm, { subject, timeoutMs: 1_000 });
+    const running = workspace.runArmWorker(cooperativeLease, arm, { subject, timeoutMs: 30_000 });
     await assert.rejects(
       () => workspace.closeCooperativeSourceLease(cooperativeLease!),
       (error: WorkspaceError) => error.code === workspaceErrorCode("CAPABILITY_INVALID"),
     );
+    const result = await running;
+    terminal = true;
     const processMarker = path.join(arm.workspaceRoot, "worker-processes.json");
-    const markerDeadline = Date.now() + 10_000;
-    while (!fs.existsSync(processMarker) && Date.now() < markerDeadline) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
     assert.equal(fs.existsSync(processMarker), true, "stubborn worker never published its PID marker");
     const processIds = JSON.parse(fs.readFileSync(processMarker, "utf8")) as {
       descendantPid: number;
@@ -11311,8 +11354,6 @@ test("Phase 2 worker timeout rejects active close and reaps a stubborn original 
       "a consumed FD3 transport was claimed twice",
     );
 
-    const result = await running;
-    terminal = true;
     const terminalRecord = result.terminalPublication.terminal as {
       lifecycle: {
         directChildClosed: boolean;
