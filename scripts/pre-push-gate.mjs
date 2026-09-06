@@ -137,6 +137,10 @@ export function buildPrepushChildEnvironment({ scratchRoot, source = process.env
 }
 
 const PREPUSH_CHILD_ENV = buildPrepushChildEnvironment({ scratchRoot: PREPUSH_SCRATCH });
+// The selftest starts another gate process, which realpaths TMPDIR before it can initialize anything.
+// Materialize the shared private temp root before any command receives the isolated environment.
+mkdirSync(PREPUSH_CHILD_ENV.TMPDIR, { recursive: true, mode: 0o700 });
+chmodSync(PREPUSH_CHILD_ENV.TMPDIR, 0o700);
 function discoverRepositoryRoot() {
   const observed = spawnSync("git", ["rev-parse", "--show-toplevel"], {
     encoding: "utf8",
@@ -486,6 +490,8 @@ if (process.argv.includes("--selftest")) {
   ];
   const environmentOk = ambientNames.every((name) => isolatedEnvironment[name] === undefined)
     && isolatedEnvironment.GIT_NO_REPLACE_OBJECTS === "1"
+    && existsSync(isolatedEnvironment.TMPDIR)
+    && realpathSync(isolatedEnvironment.TMPDIR) === resolve(isolatedEnvironment.TMPDIR)
     && pathNames.every((name) => {
       const target = resolve(isolatedEnvironment[name]);
       return target === resolve(PREPUSH_SCRATCH) || target.startsWith(`${resolve(PREPUSH_SCRATCH)}${sep}`);
