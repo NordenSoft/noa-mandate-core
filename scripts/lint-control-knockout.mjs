@@ -3398,8 +3398,8 @@ const KNOCKOUTS = [
       "early and false of one that finished; the two are the difference between an unfinished check " +
       "and an unasked question, and the result carries exactly one of them.",
     file: "packages/evidence/src/verify-evidence.ts",
-    find: "    { integrity: \"INTACT\", authorization: ctx.authorization, settlement: \"NO_EXECUTION_BINDING\", settlementObserver: ctx.settlementObserver ?? \"NOT_EVALUATED\" },",
-    replace: "    { integrity: \"INTACT\", authorization: ctx.authorization, settlement: \"UNCHECKED\", settlementObserver: ctx.settlementObserver ?? \"NOT_EVALUATED\" },",
+    find: "    {\n      integrity: \"INTACT\",\n      authorization: ctx.authorization,\n      settlement: \"NO_EXECUTION_BINDING\",\n      settlementObserver: ctx.settlementObserver ?? \"NOT_EVALUATED\",\n      ...(historical !== undefined ? { historical } : {}),\n    },",
+    replace: "    {\n      integrity: \"INTACT\",\n      authorization: ctx.authorization,\n      settlement: \"UNCHECKED\",\n      settlementObserver: ctx.settlementObserver ?? \"NOT_EVALUATED\",\n      ...(historical !== undefined ? { historical } : {}),\n    },",
     kind: "tests",
     suite: ["packages/evidence", "npm", ["test"]],
   },
@@ -3556,8 +3556,8 @@ const KNOCKOUTS = [
       "because the corpus runner never passes `purpose`: it was invisible to every fixture-driven " +
       "assertion, which is why the behavioural two-run pin exists.",
     file: "packages/evidence/src/verify-evidence.ts",
-    find: "settlement: \"NO_EXECUTION_BINDING\", settlementObserver: ctx.settlementObserver ?? \"NOT_EVALUATED\" },",
-    replace: "settlement: purpose === \"authorize\" ? \"ATTESTED_UNVERIFIED\" : \"NO_EXECUTION_BINDING\", settlementObserver: ctx.settlementObserver ?? \"NOT_EVALUATED\" },",
+    find: "      settlement: \"NO_EXECUTION_BINDING\",\n      settlementObserver: ctx.settlementObserver ?? \"NOT_EVALUATED\",\n      ...(historical !== undefined ? { historical } : {}),\n    },",
+    replace: "      settlement: purpose === \"authorize\" ? \"ATTESTED_UNVERIFIED\" : \"NO_EXECUTION_BINDING\",\n      settlementObserver: ctx.settlementObserver ?? \"NOT_EVALUATED\",\n      ...(historical !== undefined ? { historical } : {}),\n    },",
     kind: "tests",
     suite: ["packages/evidence", "npm", ["test"]],
   },
