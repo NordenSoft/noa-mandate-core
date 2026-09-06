@@ -96,6 +96,16 @@ artifact never proves a negative; a compromised gate cannot launder a side-chann
 ANY "nothing / cancelled / unknown" label. Hold Resolution proves *when/who decided*, never *that
 nothing executed*.
 
+For `purpose=audit`, when a receipt signer is actually retired in the signed lifecycle, steps 17 and
+18 consume `noa-receipt`'s canonical `noa.historical-verification/0.1` result. Only an authenticated
+exact-head checkpoint from the separately supplied checkpoint root, signed by different key
+material and within the receipt signer's explicit `[validFrom, retiredAt)` interval, permits that
+receipt-only signer to remain attributable. The lower bound is inclusive and carried only when the
+signed manifest supplies it; legacy absence does not create an activation timestamp.
+The same retired key on any side artifact remains refused. `purpose=authorize` stays on the
+current-use path and refuses the retired receipt signer. The optional `dimensions.historical` field
+exposes the exact result used; it never upgrades a prefix or unsupported attribution to a positive.
+
 ### Tiered verdicts
 
 | Verdict | Meaning |
@@ -109,15 +119,18 @@ nothing executed*.
 
 ### The result also says what it did NOT check
 
-Three fields are present on every result. The first two describe what the verifier was *asked*, not
-only what it found; the observer field reports a relationship the settlement reconciler actually
-derived and does not alter the verdict or exit code:
+Three fields are present on every result, with a fourth present only for a retired-key audit. The
+first two describe what the verifier was *asked*, not only what it found; the observer field reports
+a relationship the settlement reconciler actually derived and does not alter the verdict or exit
+code:
 
 | Field | Meaning |
 |---|---|
+| `dimensions.integrity` | `INTACT` when the supplied bytes and dedicated trust inputs establish integrity, `BROKEN` for a proved integrity failure, and `UNANSWERED` when an unavailable or untrusted historical witness prevents the verifier from deciding. `UNANSWERED` is never rewritten to `BROKEN` merely because the legacy tiered verdict also refuses authorization. |
 | `enrolment` | whether the enrolment question was asked at all, and what it found. `NOT_EVALUATED` — nobody asked: either no registry was supplied, or the outcome asserts no execution effect for a class to be enrolled in. `UNVERIFIABLE` — registries were supplied and none authenticates, is closed, or is addressed to this reader. `OUT_OF_WINDOW` — no selected registry's window contains this bundle's authorization instant. `CLASS_ABSENT` — the class is positively absent, which buys nothing. `CONTRADICTED` — a selected registry contradicts the bundle. `ENROLLED` — settlement evidence is required for a positive. |
 | `dimensions.settlement` | the settlement question, reported beside `integrity` and `authorization` because the three can legitimately disagree. `NO_EXECUTION_BINDING` on a completed run (no execution binding was established for this bundle); `UNCHECKED` on a run that stopped before the settlement rule; `BOUNDS_UNCHECKABLE` when a settlement artifact arrived with no verifiable params preimage, so nothing about the money was compared to anything — this is **not** "passed"; `NOT_ESTABLISHED` when the class is enrolled and no admissible determinate witness answered; `ATTESTED_UNVERIFIED` when an artifact asserts settlement, ships the coordinates to check it, and **nobody checked them** — the offline ceiling, and deliberately two words so it is never read as "established"; `CONTRADICTED` when the artifact is unbound, out of bounds, mis-correlated, or asserts a non-settlement under an executed outcome. `RECONFIRMED` is declared and **not reachable in this build**: it needs a record of the relying party's own node re-answering the chain queries, an input this verifier does not take yet. **Reported independently of the failing step:** a bundle whose settlement bounds were unanswered *and* whose checkpoint is tampered is reported as the tampering (`INVALID`, exit `2`, at the checkpoint step) while still carrying `settlement: BOUNDS_UNCHECKABLE`, because the artifact really was examined and suppressing that would hide half of what is wrong. |
 | `dimensions.settlementObserver` | who signed the settlement observation relative to the execution signer. `NOT_EVALUATED` means the settlement rule did not run; `SAME_SIGNING_KEY` means the same underlying signing key, including the same key material under another key ID; `SAME_ADMINISTRATIVE_PARTY` means distinct keys anchored in the same tenant manifest, which is **not** proof of independence; `UNKNOWN` means the relationship could not be established. This field is reporting-only: it never changes a verdict, dimension, or exit code. |
+| `dimensions.historical` | optional canonical `noa.historical-verification/0.1` result used only for an audit containing an actually retired receipt signer. `PARTIAL` + `PREFIX_ANCHORED` is the documented replacement for the earlier informal `DEGRADED` label. `organizationalIndependence` remains `UNVERIFIED`; separate signing keys alone cannot prove separate organizations. |
 
 `EXECUTED` has never meant the money moved — it means the gate signed that it handed the request
 off. `dimensions.settlement` is where the result says so, instead of leaving it to be inferred.
@@ -160,7 +173,8 @@ its own. It refuses — rather than answering `0` — for a tuple no rule produc
 Per-artifact schema, Ed25519 signature, signer role/type, and revocation checks come from
 [`noa-approval-artifacts`](../approval-artifacts) (`verifyArtifact`, `refHash`); receipt-chain
 integrity and the checkpoint tail-truncation contract come from [`noa-receipt`](../..)
-(`verifyChain`, `verifyCheckpoint`, `buildReceipt`, `buildCheckpoint`). Nothing is re-implemented.
+(`verifyChain`, `verifyHistoricalChain`, `verifyCheckpoint`, `buildReceipt`, `buildCheckpoint`).
+Nothing is re-implemented.
 
 ## Conformance
 

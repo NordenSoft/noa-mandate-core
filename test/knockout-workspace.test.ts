@@ -86,6 +86,7 @@ type SourceSnapshot = {
     configFile?: GitFileEvidence;
     gitDirectoryIdentity?: string;
     head?: string;
+    headRef?: string | null;
     index: { path: string; sha256: string };
     topology?: string;
     sharedIndex: { path: string; sha256: string } | null;
@@ -1185,6 +1186,23 @@ function linkedWorktreeFixture(prefix: string): {
   return { custody, fixtureRoot, linked, main };
 }
 
+function configureCanonicalOriginUpstream(fixture: ReturnType<typeof linkedWorktreeFixture>): {
+  branchName: string;
+  headRef: string;
+} {
+  const branchName = (git(fixture.linked, ["branch", "--show-current"]) as string).trim();
+  assert.notEqual(branchName, "", "linked worktree fixture unexpectedly has a detached HEAD");
+  const head = (git(fixture.linked, ["rev-parse", "HEAD"]) as string).trim();
+  git(fixture.main, ["remote", "add", "origin", fixture.main]);
+  git(fixture.main, ["update-ref", `refs/remotes/origin/${branchName}`, head]);
+  git(fixture.linked, ["branch", "--set-upstream-to", `origin/${branchName}`]);
+  assert.equal(
+    (git(fixture.linked, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]) as string).trim(),
+    `origin/${branchName}`,
+  );
+  return { branchName, headRef: `refs/heads/${branchName}` };
+}
+
 function captureLimits(overrides: Partial<CaptureLimits> = {}): CaptureLimits {
   return { ...workspace.KNOCKOUT_WORKSPACE_CAPTURE_LIMITS, ...overrides };
 }
@@ -2122,6 +2140,146 @@ test("descriptor-bound Git config bytes use Git's portable stdin sentinel", () =
     removeFixturePath(fixture.source);
     removeFixturePath(fixture.custody);
     removeFixturePath(tools);
+  }
+});
+
+test("descriptor-bound config admits an exact current linked-worktree origin upstream pair", () => {
+  const fixture = linkedWorktreeFixture("current-origin-upstream");
+  try {
+    const { branchName, headRef } = configureCanonicalOriginUpstream(fixture);
+    assert.equal(
+      (git(fixture.linked, ["config", "--local", "--get", `branch.${branchName}.remote`]) as string).trim(),
+      "origin",
+    );
+    assert.equal(
+      (git(fixture.linked, ["config", "--local", "--get", `branch.${branchName}.merge`]) as string).trim(),
+      headRef,
+    );
+    const observed = workspace.observeSourceGit(fixture.linked, { scratchRoot: fixture.custody });
+    assert.equal(observed.headRef, headRef);
+    assert.equal(observed.worktreeRoot, fs.realpathSync(fixture.linked));
+  } finally {
+    removeFixturePath(fixture.fixtureRoot);
+    removeFixturePath(fixture.custody);
+  }
+});
+
+test("branch upstream config remains closed and refuses before any object command", async (t) => {
+  const cases: Array<{
+    label: string;
+    mutate: (
+      fixture: ReturnType<typeof linkedWorktreeFixture>,
+      branchName: string,
+      headRef: string,
+    ) => void;
+  }> = [
+    {
+      label: "detached HEAD",
+      mutate(fixture) {
+        git(fixture.linked, ["checkout", "--detach", "-q"]);
+      },
+    },
+    {
+      label: "missing merge",
+      mutate(fixture, branchName) {
+        git(fixture.linked, ["config", "--local", "--unset", `branch.${branchName}.merge`]);
+      },
+    },
+    {
+      label: "missing remote",
+      mutate(fixture, branchName) {
+        git(fixture.linked, ["config", "--local", "--unset", `branch.${branchName}.remote`]);
+      },
+    },
+    {
+      label: "other branch pair",
+      mutate(fixture) {
+        git(fixture.linked, ["config", "--local", "branch.other-branch.remote", "origin"]);
+        git(fixture.linked, ["config", "--local", "branch.other-branch.merge", "refs/heads/other-branch"]);
+      },
+    },
+    {
+      label: "duplicate remote",
+      mutate(fixture, branchName) {
+        fs.appendFileSync(
+          path.join(fixture.main, ".git", "config"),
+          `\n[branch ${JSON.stringify(branchName)}]\n\tremote = origin\n`,
+        );
+      },
+    },
+    {
+      label: "pushRemote",
+      mutate(fixture, branchName) {
+        git(fixture.linked, ["config", "--local", `branch.${branchName}.pushRemote`, "origin"]);
+      },
+    },
+    {
+      label: "rebase",
+      mutate(fixture, branchName) {
+        git(fixture.linked, ["config", "--local", `branch.${branchName}.rebase`, "true"]);
+      },
+    },
+    {
+      label: "non-origin remote",
+      mutate(fixture, branchName) {
+        git(fixture.linked, ["config", "--local", `branch.${branchName}.remote`, "."]);
+      },
+    },
+    {
+      label: "merge mismatch",
+      mutate(fixture, branchName) {
+        git(fixture.linked, [
+          "config", "--local", `branch.${branchName}.merge`, `refs/heads/${branchName}-other`,
+        ]);
+      },
+    },
+    {
+      label: "case-variant branch subsection",
+      mutate(fixture, branchName, headRef) {
+        git(fixture.linked, ["config", "--local", "--unset", `branch.${branchName}.remote`]);
+        git(fixture.linked, ["config", "--local", "--unset", `branch.${branchName}.merge`]);
+        const variant = `${branchName[0]!.toUpperCase()}${branchName.slice(1)}`;
+        git(fixture.linked, ["config", "--local", `branch.${variant}.remote`, "origin"]);
+        git(fixture.linked, ["config", "--local", `branch.${variant}.merge`, headRef]);
+      },
+    },
+  ];
+
+  for (const fixtureCase of cases) {
+    await t.test(fixtureCase.label, () => {
+      const fixture = linkedWorktreeFixture(`upstream-${fixtureCase.label.replaceAll(" ", "-")}`);
+      const tools = privateTemp(`noa-kws-upstream-${fixtureCase.label.replaceAll(" ", "-")}-tools-`);
+      const marker = path.join(tools, "object-command-reached");
+      const observingGit = path.join(tools, "git-object-marker");
+      try {
+        const { branchName, headRef } = configureCanonicalOriginUpstream(fixture);
+        fixtureCase.mutate(fixture, branchName, headRef);
+        fs.writeFileSync(observingGit, [
+          "#!/bin/sh",
+          "if [ \"${GIT_DIR-}\" = \"..\" ]; then",
+          `  /usr/bin/printf reached > ${JSON.stringify(marker)}`,
+          "fi",
+          `exec ${JSON.stringify(gitExecutable)} \"$@\"`,
+          "",
+        ].join("\n"), { mode: 0o700 });
+        assert.throws(
+          () => workspace.captureAndSealCandidate({
+            custodyRoot: fixture.custody,
+            gitExecutable: observingGit,
+            maxAttempts: 1,
+            sourceRoot: fixture.linked,
+          }),
+          (error: WorkspaceError) =>
+            error.code === workspaceErrorCode("SOURCE_GIT_LAYOUT_UNSUPPORTED"),
+        );
+        assert.equal(pathExistsNoFollow(marker), false, "an object command ran before config refusal");
+        assert.deepEqual(fs.readdirSync(fixture.custody), []);
+      } finally {
+        removeFixturePath(fixture.fixtureRoot);
+        removeFixturePath(fixture.custody);
+        removeFixturePath(tools);
+      }
+    });
   }
 });
 

@@ -96,9 +96,20 @@ export {
 } from "./keys.js";
 export { buildReceipt, buildReceiptAsync, buildCheckpoint, BuilderError, type Signer, type RemoteSigner, type BuildInput } from "./builder.js";
 export {
+  HISTORICAL_VERIFICATION_SPEC,
   verifyChain,
   verifyChainText,
+  verifyHistoricalChain,
   verifyCheckpoint,
+  type HistoricalAttribution,
+  type HistoricalCompleteness,
+  type HistoricalEvidenceAvailability,
+  type HistoricalIntegrity,
+  type HistoricalVerificationClassification,
+  type HistoricalVerificationCode,
+  type HistoricalVerificationDimensions,
+  type HistoricalVerificationResult,
+  type HistoricalVerifyOptions,
   type VerifyOptions,
   type VerifyResult,
   type VerifyStatus,

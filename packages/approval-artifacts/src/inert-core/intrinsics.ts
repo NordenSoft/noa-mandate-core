@@ -281,6 +281,7 @@ const _taByteLengthGet = _taDesc("byteLength");
 const _Set = Set;
 const _Map = Map;
 const _WeakSet = WeakSet;
+const _WeakMap = WeakMap;
 // `util.types.isProxy` — the only way to detect a Proxy without giving it a turn. Captured at load
 // like everything else; `src/opts.ts` imports the wrapper instead of the builtin (added 2026-07-29).
 const _isProxy = _nodeUtilTypes.isProxy;
@@ -725,6 +726,10 @@ export function newSet<T>(init?: readonly T[]): Set<T> {
 export function newMap<K, V>(): Map<K, V> { return new _Map() as Map<K, V>; }
 /** `new WeakSet()` through the captured constructor — same class as `newSet`/`newMap`. */
 export function newWeakSet(): WeakSet<object> { return new _WeakSet() as WeakSet<object>; }
+/** `new WeakMap()` through the captured constructor — same class as `newWeakSet`. */
+export function newWeakMap<K extends object, V>(): WeakMap<K, V> {
+  return new _WeakMap() as WeakMap<K, V>;
+}
 
 /** `util.types.isProxy` through the load-time capture — a Proxy must be detected without reading it. */
 export function isProxy(v: unknown): boolean { return _apply(_isProxy as never, undefined as never, [v] as never) as boolean; }

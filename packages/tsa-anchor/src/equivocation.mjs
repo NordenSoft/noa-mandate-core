@@ -65,7 +65,13 @@
 
 import { verifyEd25519, anchorSigningInput, canonicalize, sha256Hex, intrinsics } from "noa-receipt";
 import { anchorHash } from "./anchor-hash.mjs";
-import { verifyStamp } from "./verify.mjs";
+import {
+  createVerificationResourceBudget,
+  DEFAULT_VERIFICATION_COMMAND_TIMEOUT_MS,
+  MAX_VERIFICATION_UNIQUE_ANCHORS,
+  OPENSSL_PROCESS_BUDGET_PER_STAMP,
+  verifyStamp,
+} from "./verify.mjs";
 
 // Captured at load, exactly as the kernel TCB and packages/adapter-core do it: a later
 // `Map.prototype.get = …` cannot reach these bindings.
@@ -108,7 +114,7 @@ const DEFAULT_MAX_HISTORY = 1000000;
 const DEFAULT_MAX_FINDINGS = 100;
 /** Branches carried inside ONE finding. Two are enough to prove a contradiction; the rest are
  *  corroboration, and an unbounded pool must not be able to inflate a single finding without limit. */
-const DEFAULT_MAX_BRANCHES = 16;
+const DEFAULT_MAX_BRANCHES = MAX_VERIFICATION_UNIQUE_ANCHORS;
 
 /** Composite Map key: SEQ first, then the chain id. Injective with an ordinary separator, so the
  *  source stays plain text: a decimal seq contains no ":", so the first ":" always splits the two
@@ -149,8 +155,9 @@ const UNDETECTED = objectFreeze([
     "not cryptographic. This scan enforces distinct KEYS, never distinct organisations (NC-4.1).",
   "WHICH BRANCH IS TRUE: a proof shows two signed statements contradict each other. It does not " +
     "adjudicate which one is the real history.",
-  "TSA SIGNATURE CHAIN: an attached stamp is parsed and matched structurally; its CMS signature and " +
-    "certificate chain are NOT validated here (see README, `openssl ts -verify`).",
+  "TSA POLICY AVAILABILITY: an attached stamp is marked verified only when the caller supplies the " +
+    "OpenSSL 3 executable, trust roots, allowed policy OIDs, current CRLs, and explicit clock policy. " +
+    "Missing or unavailable verification inputs leave the stamp unattested; they never become structural success.",
 ]);
 
 const SCAN_NOTE =
@@ -235,6 +242,76 @@ function isSafeNonNegInt(n) {
 function ownGet(obj, key) {
   if (typeof obj !== "object" || obj === null) return undefined;
   return hasOwn(obj, key) ? obj[key] : undefined;
+}
+
+/** Bind a cached verdict to both the signed anchor identity and the exact TSR input. */
+function stampJobKey(anchorHashValue, stampRecord) {
+  const tsr = typeof stampRecord === "object" && stampRecord !== null ? stampRecord.tsr : undefined;
+  return anchorHashValue + "\u0000" + typeof tsr + "\u0000" + (typeof tsr === "string" ? tsr : "");
+}
+
+function verificationResourceReason(uniqueAnchors) {
+  return (
+    `authenticated stamp verification requires ${uniqueAnchors} unique anchors, exceeding the fixed limit ` +
+    `of ${MAX_VERIFICATION_UNIQUE_ANCHORS}; refusing before OpenSSL work`
+  );
+}
+
+function proofResourceFailure(reason, uniqueAnchors) {
+  return {
+    ok: false,
+    transferable: false,
+    resourceLimited: true,
+    code: "VERIFICATION_RESOURCE_LIMIT",
+    reason,
+    uniqueAnchors,
+  };
+}
+
+/**
+ * Snapshot the sidecar entries reachable from an admitted pool before any OpenSSL work. A library
+ * caller gets the same fixed resource boundary as the CLI; the CLI may additionally supply its
+ * opaque command-wide capability so parsing and all monitor paths share one deadline.
+ */
+function preparePoolStampVerification(records, stamps, tsaVerification, suppliedBudget) {
+  const recordsByAnchor = newMap();
+  if (stamps !== undefined) {
+    for (let i = 0; i < arrayLength(records); i++) {
+      const rec = records[i];
+      if (mapHas(recordsByAnchor, rec.hash)) continue;
+      const suppliedRecord = ownGet(stamps, rec.hash);
+      if (suppliedRecord !== undefined) {
+        const record = typeof suppliedRecord === "object" && suppliedRecord !== null
+          ? { tsr: suppliedRecord.tsr, anchorHash: suppliedRecord.anchorHash, tsaUrl: suppliedRecord.tsaUrl }
+          : suppliedRecord;
+        mapSet(recordsByAnchor, rec.hash, record);
+      }
+    }
+  }
+  const uniqueAnchors = mapSize(recordsByAnchor);
+  if (uniqueAnchors > MAX_VERIFICATION_UNIQUE_ANCHORS) {
+    return { ok: false, uniqueAnchors, reason: verificationResourceReason(uniqueAnchors) };
+  }
+  let resourceBudget = suppliedBudget;
+  if (resourceBudget === undefined && uniqueAnchors > 0) {
+    resourceBudget = createVerificationResourceBudget(
+      DEFAULT_VERIFICATION_COMMAND_TIMEOUT_MS,
+      uniqueAnchors * OPENSSL_PROCESS_BUDGET_PER_STAMP,
+    );
+    if (resourceBudget === null) {
+      return { ok: false, uniqueAnchors, reason: "could not create the bounded stamp-verification resource capability" };
+    }
+  }
+  return {
+    ok: true,
+    uniqueAnchors,
+    recordsByAnchor,
+    tsaVerification,
+    resourceBudget,
+    results: newMap(),
+    resourceLimited: false,
+    reason: undefined,
+  };
 }
 
 // -- admission ----------------------------------------------------------------------------------
@@ -441,6 +518,7 @@ function invalidScan(reason) {
     historyChecked: false,
     historyVerified: false,
     stampsChecked: false,
+    resourceLimited: false,
     truncatedFindings: false,
     truncated: { findings: 0, branches: 0 },
     note: SCAN_NOTE,
@@ -448,8 +526,28 @@ function invalidScan(reason) {
   };
 }
 
+function resourceLimitedScan(reason, prepared, uniqueAnchors) {
+  const result = invalidScan(reason);
+  result.verdict = "RESOURCE_LIMIT";
+  result.resourceLimited = true;
+  result.code = "VERIFICATION_RESOURCE_LIMIT";
+  result.resourceLimitReason = reason;
+  result.uniqueAnchors = uniqueAnchors;
+  result.pinned = prepared.ts.k;
+  result.trustSetDigest = prepared.ts.digest;
+  result.admitted = prepared.pool.admitted;
+  result.dropped = prepared.pool.dropped;
+  result.rejected = prepared.pool.rejected;
+  result.extensions = prepared.pool.extensions;
+  result.chains = setToArray(prepared.pool.chains);
+  result.historyChecked = prepared.historyMap !== undefined;
+  result.historyVerified = prepared.historyMap !== undefined && prepared.historyVerified === true;
+  result.stampsChecked = true;
+  return result;
+}
+
 /** Attach an independent TSA time attestation to a branch, when the caller supplied the sidecar. */
-function branchOf(rec, stamps) {
+function branchOf(rec, stampVerification) {
   const branch = {
     headHash: rec.headHash,
     witnessKid: rec.kid,
@@ -458,10 +556,24 @@ function branchOf(rec, stamps) {
     anchorHash: rec.hash,
     anchor: rec.anchor,
   };
-  if (stamps !== undefined) {
-    const record = ownGet(stamps, rec.hash);
+  if (mapHas(stampVerification.recordsByAnchor, rec.hash)) {
+    const record = mapGet(stampVerification.recordsByAnchor, rec.hash);
     if (record !== undefined) {
-      const res = verifyStamp(rec.anchor, record);
+      const jobKey = stampJobKey(rec.hash, record);
+      let res = mapGet(stampVerification.results, jobKey);
+      if (res === undefined) {
+        res = verifyStamp(
+          rec.anchor,
+          record,
+          stampVerification.tsaVerification,
+          stampVerification.resourceBudget,
+        );
+        mapSet(stampVerification.results, jobKey, res);
+      }
+      if (res.code === "VERIFICATION_RESOURCE_LIMIT") {
+        stampVerification.resourceLimited = true;
+        if (stampVerification.reason === undefined) stampVerification.reason = res.reason;
+      }
       // CARRY THE TOKEN BYTES, not only a summary of them. A finding travels; a derived
       // {verified, genTime, tsaUrl} triple inside a travelling document is an unauthenticated
       // CLAIM, and it was reproduced being rewritten to `verified:true` with a 1900 timestamp and
@@ -469,6 +581,8 @@ function branchOf(rec, stamps) {
       // claim as refuted when the bytes disagree.
       branch.stamp = {
         verified: res.ok === true,
+        authenticated: res.authenticated === true,
+        code: res.code,
         reason: res.reason,
         genTime: res.genTime,
         tsaUrl: typeof record === "object" && record !== null ? record.tsaUrl : undefined,
@@ -486,11 +600,13 @@ function branchOf(rec, stamps) {
  * The count is the point: a legal `maxBranches` silently discarding corroborating witnesses leaves
  * the reader holding a summary that looks like the whole picture.
  */
-function branchesOf(recs, stamps, maxBranches) {
+function branchesOf(recs, maxBranches, stampVerification) {
   const total = arrayLength(recs);
   const capped = arraySlice(recs, 0, maxBranches);
   const out = [];
-  for (let i = 0; i < arrayLength(capped); i++) arrayPush(out, branchOf(capped[i], stamps));
+  for (let i = 0; i < arrayLength(capped); i++) {
+    arrayPush(out, branchOf(capped[i], stampVerification));
+  }
   return { branches: out, dropped: total - arrayLength(out) };
 }
 
@@ -503,12 +619,16 @@ function branchesOf(recs, stamps, maxBranches) {
  *                 pool is the "views meeting"; a pool with only one party's view in it finds nothing.
  * @param trustSet the verifier's own out-of-band pinned set (federation-spec section 2.2). Sovereign:
  *                 an anchor from a key not pinned here is dropped, so a pool cannot inject a fork.
- * @param opts     `{ history?, stamps?, maxAnchors?, maxHistory?, maxFindings?, maxBranches? }`
+ * @param opts     `{ history?, stamps?, tsaVerification?, maxAnchors?, maxHistory?, maxFindings?, maxBranches? }`
  *                 - `history`: `[{seq, hash, source?}]` for the chain the prover presented (build it
  *                   with `historyFromReceipts`). Enables HISTORY_CONTRADICTION, the retroactive-edit
  *                   detector. This is the artifact under adjudication, not private state.
  *                 - `stamps`: the `.tsr` sidecar OBJECT (`anchorHash -> stamp record`) from
  *                   `noa-tsa stamp`, so each branch of a finding carries an independent TSA time.
+ *                 - `tsaVerification`: the explicit OpenSSL/root/policy/CRL/clock inputs required
+ *                   by `verifyStamp`. Without it, attached stamps remain fail-closed and unverified.
+ *                   Multi-stamp work is capped at 16 unique anchors, 80 OpenSSL processes, and one
+ *                   30000-ms aggregate deadline; exact repeated anchor/TSR inputs reuse a verdict.
  *
  * Three finding kinds, in descending strength of attribution:
  *
@@ -542,8 +662,24 @@ function scanForEquivocationInner(anchors, trustSet, opts) {
   const ts = prepared.ts;
   const pool = prepared.pool;
   const historyMap = prepared.historyMap;
+  const stampVerification = preparePoolStampVerification(
+    pool.records,
+    prepared.stamps,
+    prepared.tsaVerification,
+    prepared.tsaResourceBudget,
+  );
+  if (!stampVerification.ok) {
+    return resourceLimitedScan(stampVerification.reason, prepared, stampVerification.uniqueAnchors);
+  }
 
-  const scanned = scanRecords(pool, historyMap, prepared.stamps, prepared.bounds, undefined, ts.digest);
+  const scanned = scanRecords(
+    pool,
+    historyMap,
+    prepared.bounds,
+    undefined,
+    ts.digest,
+    stampVerification,
+  );
   const findings = scanned.findings;
   const found = arrayLength(findings) > 0;
   const unusable = pool.rejected.malformed + pool.rejected.badSignature;
@@ -603,6 +739,9 @@ function scanForEquivocationInner(anchors, trustSet, opts) {
     // result that does not pretend otherwise.
     historyVerified: historyMap !== undefined && prepared.historyVerified === true,
     stampsChecked: prepared.stamps !== undefined,
+    resourceLimited: scanned.resourceLimited,
+    code: scanned.resourceLimited ? "VERIFICATION_RESOURCE_LIMIT" : undefined,
+    resourceLimitReason: scanned.resourceLimitReason,
     truncatedFindings: scanned.truncatedFindings,
     truncated: scanned.truncated,
     note: SCAN_NOTE,
@@ -680,6 +819,10 @@ function prepare(anchors, trustSet, opts, extraHistory) {
   if (stamps !== undefined && (typeof stamps !== "object" || stamps === null)) {
     return { ok: false, reason: "opts.stamps must be an object (anchorHash -> stamp record)" };
   }
+  const tsaVerification = opts.tsaVerification;
+  // CLI-only opaque capability. A caller-created lookalike cannot authorize or bypass work:
+  // verifyStamp resolves it through verify.mjs's private capability map and fails closed.
+  const tsaResourceBudget = opts.tsaResourceBudget;
 
   // -- admit + group. Maps, never plain objects: chain ids and head hashes are attacker-chosen
   //    strings, and "__proto__" as an object key is a foot-gun with no upside here. --------------
@@ -725,6 +868,8 @@ function prepare(anchors, trustSet, opts, extraHistory) {
     historyMap,
     historyVerified: opts.historyVerified === true,
     stamps,
+    tsaVerification,
+    tsaResourceBudget,
     bounds,
     pool: { byFrontier, frontierMeta, chains, records, admitted, dropped, rejected, extensions },
   };
@@ -773,7 +918,7 @@ function addHistory(historyMap, entries) {
  * is not evidence against it (H2, reproduced). `scanForEquivocation` leaves it unset, because a
  * monitor's job is the whole pool.
  */
-function scanRecords(pool, historyMap, stamps, bounds, onlyChain, trustSetDigest) {
+function scanRecords(pool, historyMap, bounds, onlyChain, trustSetDigest, stampVerification) {
   const findings = [];
   let truncatedFindings = false;
   // TRUNCATION IS A MEASUREMENT, NOT A SILENT CAP. Refusing a degenerate bound closed the case
@@ -782,7 +927,7 @@ function scanRecords(pool, historyMap, stamps, bounds, onlyChain, trustSetDigest
   // are holding is a summary rather than the whole picture.
   let truncatedBranches = 0;
   const takeBranches = (recs) => {
-    const r = branchesOf(recs, stamps, bounds.maxBranches);
+    const r = branchesOf(recs, bounds.maxBranches, stampVerification);
     truncatedBranches += r.dropped;
     return r.branches;
   };
@@ -908,7 +1053,13 @@ function scanRecords(pool, historyMap, stamps, bounds, onlyChain, trustSetDigest
     }
   }
 
-  return { findings, truncatedFindings, truncated: { findings: truncatedFindings ? 1 : 0, branches: truncatedBranches } };
+  return {
+    findings,
+    truncatedFindings,
+    truncated: { findings: truncatedFindings ? 1 : 0, branches: truncatedBranches },
+    resourceLimited: stampVerification.resourceLimited,
+    resourceLimitReason: stampVerification.reason,
+  };
 }
 
 /** Find two records at one frontier with different heads AND different signing keys, or null. */
@@ -939,17 +1090,18 @@ function findCrossKeyPair(headEntries) {
  * `transferable` is reported separately from `ok` and is deliberately FALSE for
  * HISTORY_CONTRADICTION: one side of that contradiction is the presented chain or checkpoint, which
  * is not a signed artifact carried inside the proof. Calling that transferable would be exactly the
- * kind of quiet overstatement this package exists to avoid.
+ * kind of quiet overstatement this package exists to avoid. At most 16 branches are accepted; all
+ * attached stamps share a private 80-process/30000-ms ceiling and exact repeats are verified once.
  */
-export function verifyEquivocationProof(proof, trustSet) {
+export function verifyEquivocationProof(proof, trustSet, opts = {}) {
   try {
-    return verifyEquivocationProofInner(proof, trustSet);
+    return verifyEquivocationProofInner(proof, trustSet, opts);
   } catch (e) {
     return { ok: false, transferable: false, reason: `proof or trust-set threw while being read: ${describeThrown(e)}` };
   }
 }
 
-function verifyEquivocationProofInner(proof, trustSet) {
+function verifyEquivocationProofInner(proof, trustSet, opts) {
   const ts = admitTrustSet(trustSet);
   if (!ts.ok) return { ok: false, transferable: false, reason: `unusable trust-set: ${ts.reason}` };
   if (typeof proof !== "object" || proof === null) return { ok: false, transferable: false, reason: "proof is not an object" };
@@ -962,12 +1114,19 @@ function verifyEquivocationProofInner(proof, trustSet) {
   if (!isArray(branches) || arrayLength(branches) === 0) {
     return { ok: false, transferable: false, reason: "proof.branches must be a non-empty array" };
   }
+  const nb = arrayLength(branches);
+  if (nb > MAX_VERIFICATION_UNIQUE_ANCHORS) {
+    return proofResourceFailure(
+      `proof carries ${nb} branches, exceeding the fixed verification limit of ` +
+        `${MAX_VERIFICATION_UNIQUE_ANCHORS}; refusing before OpenSSL work`,
+      nb,
+    );
+  }
 
   // Re-admit every carried anchor from scratch: signature, structure, pinning. The proof's own
   // summary fields (headHash, witnessKid, anchorHash) are treated as UNTRUSTED claims and are
   // checked against the re-derived values rather than believed.
   const recs = [];
-  const nb = arrayLength(branches);
   for (let i = 0; i < nb; i++) {
     const b = branches[i];
     if (typeof b !== "object" || b === null) return { ok: false, transferable: false, reason: `branch ${i} is not an object` };
@@ -997,27 +1156,79 @@ function verifyEquivocationProofInner(proof, trustSet) {
   // claim: it was reproduced rewritten to a 1900 timestamp and an attacker URL while the proof still
   // returned ok. A refuted stamp does NOT flip `ok` — the signature contradiction stands on its own,
   // and letting an attached bad stamp destroy a genuine fork proof would be its own defect.
-  const stampEvidence = [];
-  let stampClaimsRefuted = 0;
+  // Snapshot every carried stamp before starting OpenSSL, count distinct anchor+TSR jobs, and mint
+  // a private aggregate budget. Identical repeated branches retain their evidence positions but
+  // reuse the one actual verifier result; different TSR bytes never alias in the cache.
+  const proofStampClaims = [];
+  const uniqueStampJobs = newMap();
   for (let i = 0; i < nb; i++) {
     const b = branches[i];
     const claim = typeof b === "object" && b !== null ? b.stamp : undefined;
     if (claim === undefined || claim === null) continue;
     const rec = recs[i];
     const claimedVerified = typeof claim === "object" && claim.verified === true;
-    const res = verifyStamp(rec.anchor, { tsr: typeof claim === "object" ? claim.tsr : undefined, anchorHash: rec.hash });
+    const record = { tsr: typeof claim === "object" ? claim.tsr : undefined, anchorHash: rec.hash };
+    const jobKey = stampJobKey(rec.hash, record);
+    if (!mapHas(uniqueStampJobs, jobKey)) mapSet(uniqueStampJobs, jobKey, true);
+    arrayPush(proofStampClaims, {
+      branch: i,
+      rec,
+      record,
+      jobKey,
+      claimedVerified,
+      tsaUrlClaimed: typeof claim === "object" ? claim.tsaUrl : undefined,
+    });
+  }
+  const uniqueStampJobCount = mapSize(uniqueStampJobs);
+  if (uniqueStampJobCount > MAX_VERIFICATION_UNIQUE_ANCHORS) {
+    return proofResourceFailure(verificationResourceReason(uniqueStampJobCount), uniqueStampJobCount);
+  }
+  let proofResourceBudget = typeof opts === "object" && opts !== null ? opts.tsaResourceBudget : undefined;
+  if (proofResourceBudget === undefined && uniqueStampJobCount > 0) {
+    proofResourceBudget = createVerificationResourceBudget(
+      DEFAULT_VERIFICATION_COMMAND_TIMEOUT_MS,
+      uniqueStampJobCount * OPENSSL_PROCESS_BUDGET_PER_STAMP,
+    );
+    if (proofResourceBudget === null) {
+      return proofResourceFailure("could not create the bounded proof-verification resource capability", uniqueStampJobCount);
+    }
+  }
+
+  const proofStampResults = newMap();
+  const stampEvidence = [];
+  let stampClaimsRefuted = 0;
+  let stampResourceLimited = false;
+  let stampResourceLimitReason;
+  for (let i = 0; i < arrayLength(proofStampClaims); i++) {
+    const item = proofStampClaims[i];
+    let res = mapGet(proofStampResults, item.jobKey);
+    if (res === undefined) {
+      res = verifyStamp(
+        item.rec.anchor,
+        item.record,
+        typeof opts === "object" && opts !== null ? opts.tsaVerification : undefined,
+        proofResourceBudget,
+      );
+      mapSet(proofStampResults, item.jobKey, res);
+    }
+    if (res.code === "VERIFICATION_RESOURCE_LIMIT") {
+      stampResourceLimited = true;
+      if (stampResourceLimitReason === undefined) stampResourceLimitReason = res.reason;
+    }
     const verified = res.ok === true;
-    if (claimedVerified && !verified) stampClaimsRefuted++;
+    if (item.claimedVerified && !verified) stampClaimsRefuted++;
     // ONLY `verified` AND `genTime` ARE RE-DERIVED. A TSA URL is not inside an RFC 3161 token, so
     // it cannot be re-derived from anything — copying it out of the claim into a field sitting next
     // to `verified:true` laundered an attacker-chosen string into what reads as attested evidence.
     // It is carried under a name that says what it is, and nowhere else.
     arrayPush(stampEvidence, {
-      branch: i,
+      branch: item.branch,
       verified,
-      claimedVerified,
+      authenticated: verified && res.authenticated === true,
+      code: res.code,
+      claimedVerified: item.claimedVerified,
       genTime: verified ? res.genTime : undefined,
-      tsaUrlClaimed: typeof claim === "object" ? claim.tsaUrl : undefined,
+      tsaUrlClaimed: item.tsaUrlClaimed,
       reason: res.reason,
     });
   }
@@ -1050,6 +1261,9 @@ function verifyEquivocationProofInner(proof, trustSet) {
       trustSetMatches: proof.trustSetDigest === undefined ? undefined : proof.trustSetDigest === ts.digest,
       stampEvidence,
       stampClaimsRefuted,
+      resourceLimited: stampResourceLimited,
+      code: stampResourceLimited ? "VERIFICATION_RESOURCE_LIMIT" : undefined,
+      resourceLimitReason: stampResourceLimitReason,
       reason:
         `a witness signature says chain "${rec.chain}" seq ${rec.seq} was ${rec.headHash}. This proof is HALF SIGNED: the ` +
         `other side is an unsigned assertion carried in the proof itself, so recompute the presented artifact yourself and ` +
@@ -1125,6 +1339,9 @@ function verifyEquivocationProofInner(proof, trustSet) {
       trustSetMatches: proof.trustSetDigest === undefined ? undefined : proof.trustSetDigest === ts.digest,
       stampEvidence,
       stampClaimsRefuted,
+      resourceLimited: stampResourceLimited,
+      code: stampResourceLimited ? "VERIFICATION_RESOURCE_LIMIT" : undefined,
+      resourceLimitReason: stampResourceLimitReason,
       reason:
         `the key pinned here as "${kid}" signed ${setSize(headSet)} different heads at chain "${chain}" seq ${seq}; every ` +
         "signature verifies under that key. What transfers is the KEY (see attributedToPubkey) - the name is this " +
@@ -1159,6 +1376,9 @@ function verifyEquivocationProofInner(proof, trustSet) {
     trustSetMatches: proof.trustSetDigest === undefined ? undefined : proof.trustSetDigest === ts.digest,
     stampEvidence,
     stampClaimsRefuted,
+    resourceLimited: stampResourceLimited,
+    code: stampResourceLimited ? "VERIFICATION_RESOURCE_LIMIT" : undefined,
+    resourceLimitReason: stampResourceLimitReason,
     reason:
       `two independent pinned witnesses signed different heads at chain "${chain}" seq ${seq}; both signatures verify. ` +
       "This proves the chain was presented two ways - it does not convict either witness, and it does not say which head " +
@@ -1283,9 +1503,25 @@ function checkpointCorroborationInner(checkpoint, anchors, trustSet, opts) {
   if (!prepared.ok) return invalidCorroboration(prepared.reason);
   const ts = prepared.ts;
   const pool = prepared.pool;
+  const stampVerification = preparePoolStampVerification(
+    pool.records,
+    prepared.stamps,
+    prepared.tsaVerification,
+    prepared.tsaResourceBudget,
+  );
+  if (!stampVerification.ok) {
+    return resourceLimitedCorroboration(stampVerification.reason, prepared, stampVerification.uniqueAnchors);
+  }
   // ONLY THIS CHAIN. A checkpoint speaks for its own chain; a fork on some unrelated chain sharing
   // the pool is not evidence against it, and treating it as such convicted an honest checkpoint.
-  const scanned = scanRecords(pool, prepared.historyMap, prepared.stamps, prepared.bounds, cp.chain, ts.digest);
+  const scanned = scanRecords(
+    pool,
+    prepared.historyMap,
+    prepared.bounds,
+    cp.chain,
+    ts.digest,
+    stampVerification,
+  );
   const findings = scanned.findings;
   const equivocationFound = arrayLength(findings) > 0;
 
@@ -1350,6 +1586,9 @@ function checkpointCorroborationInner(checkpoint, anchors, trustSet, opts) {
     pinned: ts.k,
     freshnessEnforced,
     equivocationFound,
+    resourceLimited: scanned.resourceLimited,
+    code: scanned.resourceLimited ? "VERIFICATION_RESOURCE_LIMIT" : undefined,
+    resourceLimitReason: scanned.resourceLimitReason,
     findings,
     truncatedFindings: scanned.truncatedFindings,
     trustSetDigest: ts.digest,
@@ -1372,6 +1611,7 @@ function invalidCorroboration(reason) {
     pinned: 0,
     freshnessEnforced: false,
     equivocationFound: false,
+    resourceLimited: false,
     findings: [],
     truncatedFindings: false,
     trustSetDigest: undefined,
@@ -1381,4 +1621,20 @@ function invalidCorroboration(reason) {
     note: SCAN_NOTE,
     undetected: UNDETECTED,
   };
+}
+
+function resourceLimitedCorroboration(reason, prepared, uniqueAnchors) {
+  const result = invalidCorroboration(reason);
+  result.verdict = "RESOURCE_LIMIT";
+  result.resourceLimited = true;
+  result.code = "VERIFICATION_RESOURCE_LIMIT";
+  result.resourceLimitReason = reason;
+  result.uniqueAnchors = uniqueAnchors;
+  result.quorum = prepared.ts.quorum;
+  result.pinned = prepared.ts.k;
+  result.trustSetDigest = prepared.ts.digest;
+  result.admitted = prepared.pool.admitted;
+  result.dropped = prepared.pool.dropped;
+  result.rejected = prepared.pool.rejected;
+  return result;
 }

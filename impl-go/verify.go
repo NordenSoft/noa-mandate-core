@@ -383,48 +383,51 @@ func authorized(manifest *Value, agentID, kid string) bool {
 	return false
 }
 
-// verifyCheckpoint mirrors impl-py _verify_checkpoint. Returns "bad" (structurally invalid /
-// authentication failure), "unverified" (kid not resolvable in the keyring), or "ok".
-func verifyCheckpoint(cp *Value, keyring *Value) string {
+func checkpointShapeOK(cp *Value) bool {
 	if cp == nil || cp.Kind != KindObject {
-		return "bad"
+		return false
 	}
-	for k := range cp.Obj {
-		if !checkpointKeys[k] {
-			return "bad"
-		}
+	if !checkExactKeys(cp, []string{"spec", "chain", "highestSeq", "headHash", "ts", "sig"}, nil) {
+		return false
 	}
 	if sp := cp.get("spec"); !sp.isStr() || sp.Str != "noa.checkpoint/0.1" {
-		return "bad"
+		return false
 	}
 	if c := cp.get("chain"); !c.isStr() || len(c.Str) == 0 {
-		return "bad"
+		return false
 	}
 	if hs := cp.get("highestSeq"); !hs.isInt() || hs.Int < 0 || hs.Int > maxSafeInt {
-		return "bad"
+		return false
 	}
 	if hh := cp.get("headHash"); !hh.isStr() || !hashRe.MatchString(hh.Str) {
-		return "bad"
+		return false
 	}
 	if ts := cp.get("ts"); !ts.isStr() || !rfc3339Instant(ts.Str) {
-		return "bad"
+		return false
 	}
 	sig := cp.get("sig")
 	if !sig.isObj() {
-		return "bad"
+		return false
 	}
-	for k := range sig.Obj {
-		if k != "alg" && k != "kid" && k != "value" {
-			return "bad"
-		}
+	if !checkExactKeys(sig, []string{"alg", "kid", "value"}, nil) {
+		return false
 	}
 	if alg := sig.get("alg"); !alg.isStr() || alg.Str != "ed25519" {
-		return "bad"
+		return false
 	}
 	if kid := sig.get("kid"); !kid.isStr() || len(kid.Str) == 0 {
-		return "bad"
+		return false
 	}
 	if val := sig.get("value"); !val.isStr() || len(val.Str) == 0 {
+		return false
+	}
+	return true
+}
+
+// verifyCheckpoint mirrors impl-py _verify_checkpoint. Returns "bad" (structurally invalid /
+// authentication failure), "unverified" (kid not resolvable in the keyring), or "ok".
+func verifyCheckpoint(cp *Value, keyring *Value) string {
+	if !checkpointShapeOK(cp) {
 		return "bad"
 	}
 	pub := keyring.get(cp.get("sig").get("kid").Str)

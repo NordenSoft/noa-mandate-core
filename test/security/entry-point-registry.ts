@@ -87,6 +87,7 @@ export const NOA_RECEIPT: EntryPoint[] = [
   // ── verifiers: ingest ──────────────────────────────────────────────────────────────────────────
   { name: "verifyChain", cls: "bytes-in", why: "receipts are Uint8Array|string; every document option is decoded once at the boundary" },
   { name: "verifyChainText", cls: "bytes-in", why: "a pure alias for verifyChain; the two entry points can no longer disagree about what a valid document is" },
+  { name: "verifyHistoricalChain", cls: "bytes-in", why: "receipts, lifecycle roots and checkpoint evidence are byte documents; the audit parses the receipt chain once and never upgrades retired material into current authority" },
   { name: "verifyCheckpoint", cls: "bytes-in", why: "checkpoint AND keyring are both documents; review #6 C2 was exactly the asymmetry of snapshotting one and not the other" },
   { name: "verifyCompleteness", cls: "bytes-in", why: "head, anchors and trustSet are all bytes; freshness is admitted by the option schema" },
   { name: "verifyChainWitnessed", cls: "bytes-in", why: "chain, keyring, anchors and trustSet are bytes; the head is derived from the SAME bytes verifyChain parsed" },

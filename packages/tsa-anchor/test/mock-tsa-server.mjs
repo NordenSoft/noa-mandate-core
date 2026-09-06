@@ -37,7 +37,11 @@ function buildTimeStampResp({ hashAlgOid, hashedMessage, genTime = new Date(), s
   return encSequence([statusInfo, buildContentInfo(buildTstInfo({ hashAlgOid, hashedMessage, genTime, serial, nonce }))]);
 }
 
-/** Start a mock TSA on 127.0.0.1:0 (OS-assigned port). `mode`: "ok" | "reject" | "wrong-hash" | "drop-nonce". */
+/**
+ * Start an intentionally unsigned structural mock on 127.0.0.1:0 (OS-assigned port).
+ * It exercises request/transport binding only and MUST be rejected by authenticated verifyStamp.
+ * `mode`: "ok" | "reject" | "wrong-hash" | "drop-nonce".
+ */
 export function startMockTsa({ mode = "ok" } = {}) {
   const server = createServer((req, res) => {
     const chunks = [];

@@ -62,25 +62,35 @@ public static class Verifier
     }
 
     // ── checkpoint verification (mirrors _verify_checkpoint) ───────────────────
-    private enum CpVerdict { Ok, Unverified, Bad }
+    internal enum CpVerdict { Ok, Unverified, Bad }
 
-    private static CpVerdict VerifyCheckpoint(JVal cpVal, JObj? keyring)
+    internal static bool CheckpointShapeOk(JVal cpVal)
     {
-        if (cpVal is not JObj cp) return CpVerdict.Bad;
+        if (cpVal is not JObj cp || cp.Keys.Count != 6) return false;
         foreach (string k in cp.Keys)
-            if (!CheckpointKeys.Contains(k)) return CpVerdict.Bad;
-        if (StrOf(cp, "spec") != "noa.checkpoint/0.1") return CpVerdict.Bad;
-        if (!(cp.Get("chain") is JStr chn && chn.Value.Length > 0)) return CpVerdict.Bad;
-        if (cp.Get("highestSeq") is not JInt hs || hs.Value < 0 || hs.Value > SafeIntMax) return CpVerdict.Bad;
-        if (!(cp.Get("headHash") is JStr hh && Schema.HashFormat(hh.Value))) return CpVerdict.Bad;
-        if (!(cp.Get("ts") is JStr ts && Schema.Rfc3339Instant(ts.Value))) return CpVerdict.Bad;
+            if (!CheckpointKeys.Contains(k)) return false;
+        if (StrOf(cp, "spec") != "noa.checkpoint/0.1") return false;
+        if (!(cp.Get("chain") is JStr chn && chn.Value.Length > 0)) return false;
+        if (cp.Get("highestSeq") is not JInt hs || hs.Value < 0 || hs.Value > SafeIntMax) return false;
+        if (!(cp.Get("headHash") is JStr hh && Schema.HashFormat(hh.Value))) return false;
+        if (!(cp.Get("ts") is JStr ts && Schema.Rfc3339Instant(ts.Value))) return false;
 
-        if (cp.Get("sig") is not JObj sig) return CpVerdict.Bad;
+        if (cp.Get("sig") is not JObj sig || sig.Keys.Count != 3) return false;
         foreach (string k in sig.Keys)
-            if (k != "alg" && k != "kid" && k != "value") return CpVerdict.Bad;
-        if (StrOf(sig, "alg") != "ed25519") return CpVerdict.Bad;
-        if (!(sig.Get("kid") is JStr kid && kid.Value.Length > 0)) return CpVerdict.Bad;
-        if (!(sig.Get("value") is JStr sval && sval.Value.Length > 0)) return CpVerdict.Bad;
+            if (k != "alg" && k != "kid" && k != "value") return false;
+        if (StrOf(sig, "alg") != "ed25519") return false;
+        if (!(sig.Get("kid") is JStr kid && kid.Value.Length > 0)) return false;
+        if (!(sig.Get("value") is JStr sval && sval.Value.Length > 0)) return false;
+        return true;
+    }
+
+    internal static CpVerdict VerifyCheckpoint(JVal cpVal, JObj? keyring)
+    {
+        if (!CheckpointShapeOk(cpVal)) return CpVerdict.Bad;
+        var cp = (JObj)cpVal;
+        var sig = (JObj)cp.Get("sig")!;
+        var kid = (JStr)sig.Get("kid")!;
+        var sval = (JStr)sig.Get("value")!;
 
         JVal? pub = keyring?.Get(kid.Value);
         if (pub is not JStr pubStr) return CpVerdict.Unverified;

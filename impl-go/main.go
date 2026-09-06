@@ -4,8 +4,10 @@
 // frozen rules from scratch (its own strict JSON parser, its own RFC-8785 JCS, its own SPKI decode)
 // and returns the SAME verdict as impl-py/noa_verify.py + src/verify.ts across the conformance corpus.
 //
-// Usage:  noa-verify <receipts.json> [keyring.json] [--identity <m.json>] [--checkpoint <cp.json>]
-// Exit:   0 VALID · 1 UNVERIFIED (no keyring) · 2 TAMPERED · 3 MALFORMED · 4 usage · 5 UNTRUSTED
+// Usage:  noa-verify <receipts.json> [keyring.json] [--purpose current|historical]
+// Exit:   current: 0 VALID · 1 UNVERIFIED · 2 TAMPERED · 3 MALFORMED · 4 usage · 5 UNTRUSTED
+//
+//	historical: 0 VERIFIED · 1 PARTIAL/UNVERIFIED · 7 CONFLICT · 8 INTEGRITY_FAILURE
 package main
 
 import (
@@ -38,12 +40,20 @@ func run(argv []string) (code int) {
 	}()
 
 	args := argv[1:]
-	var receiptsPath, keyringPath, identityPath, checkpointPath string
-	const usage = "usage: noa-verify <receipts.json> [keyring.json] [--identity <m.json>] [--checkpoint <cp.json>]\n"
+	var receiptsPath, keyringPath, identityPath, checkpointPath, checkpointKeyringPath string
+	purpose := "current"
+	const usage = "usage: noa-verify <receipts.json> [keyring.json] [--purpose current|historical] [--identity <m.json>] [--checkpoint <cp.json>] [--checkpoint-keyring <k.json>]\n"
 
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
+		case a == "--purpose":
+			if i+1 >= len(args) || (args[i+1] != "current" && args[i+1] != "historical") {
+				fmt.Fprint(os.Stderr, usage)
+				return 4
+			}
+			i++
+			purpose = args[i]
 		case a == "--identity":
 			if i+1 >= len(args) {
 				fmt.Fprint(os.Stderr, usage)
@@ -58,6 +68,13 @@ func run(argv []string) (code int) {
 			}
 			i++
 			checkpointPath = args[i]
+		case a == "--checkpoint-keyring":
+			if i+1 >= len(args) {
+				fmt.Fprint(os.Stderr, usage)
+				return 4
+			}
+			i++
+			checkpointKeyringPath = args[i]
 		case strings.HasPrefix(a, "--"):
 			fmt.Fprintf(os.Stderr, "unknown flag: %s\n", a)
 			return 4
@@ -74,12 +91,24 @@ func run(argv []string) (code int) {
 		fmt.Fprint(os.Stderr, usage)
 		return 4
 	}
+	if purpose == "historical" && keyringPath == "" {
+		fmt.Fprint(os.Stderr, usage)
+		return 4
+	}
+	if purpose == "current" && checkpointKeyringPath != "" {
+		fmt.Fprint(os.Stderr, usage)
+		return 4
+	}
+	if checkpointKeyringPath != "" && checkpointPath == "" {
+		fmt.Fprint(os.Stderr, usage)
+		return 4
+	}
 
 	receipts, err := loadFile(receiptsPath)
 	if err != nil {
 		return malformed(err.Error())
 	}
-	var keyring, identity, checkpoint *Value
+	var keyring, identity, checkpoint, checkpointKeyring *Value
 	if keyringPath != "" {
 		if keyring, err = loadFile(keyringPath); err != nil {
 			return malformed(err.Error())
@@ -95,6 +124,11 @@ func run(argv []string) (code int) {
 			return malformed(err.Error())
 		}
 	}
+	if checkpointKeyringPath != "" {
+		if checkpointKeyring, err = loadFile(checkpointKeyringPath); err != nil {
+			return malformed(err.Error())
+		}
+	}
 
 	// Parity with impl-py _main: an aux file that WAS given but loaded to a non-object is an
 	// operator error → MALFORMED (never silently dropped, which would weaken enforcement).
@@ -106,6 +140,27 @@ func run(argv []string) (code int) {
 	}
 	if keyringPath != "" && (keyring == nil || keyring.Kind != KindObject) {
 		return malformed("keyring must be an object (kid -> base64 SPKI)")
+	}
+	if checkpointKeyringPath != "" && (checkpointKeyring == nil || checkpointKeyring.Kind != KindObject) {
+		return malformed("checkpoint keyring must be an object")
+	}
+	if purpose == "historical" {
+		result := verifyHistoricalChain(receipts, keyring, checkpoint, checkpointKeyring, identity)
+		b, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(b))
+		switch result.Classification {
+		case "VERIFIED":
+			return 0
+		case "PARTIAL", "UNVERIFIED":
+			return 1
+		case "CONFLICT":
+			return 7
+		default:
+			if result.Code == "RECEIPT_INTEGRITY_FAILURE" || result.Code == "WITNESS_INTEGRITY_FAILURE" {
+				return 8
+			}
+			return 3
+		}
 	}
 
 	status := verifyChain(receipts, keyring, identity, checkpoint)

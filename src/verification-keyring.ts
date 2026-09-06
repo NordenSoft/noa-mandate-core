@@ -8,6 +8,8 @@ import {
   jsonStringify,
   objectCreateNull,
   objectGetOwnPropertyNames,
+  strCharCodeAt,
+  toBigInt,
 } from "./intrinsics.js";
 import { isRfc3339Instant } from "./scan.js";
 
@@ -16,6 +18,11 @@ export const SIGNING_KEY_LIFECYCLE_SPEC = "noa.signing-key-lifecycle/0.1";
 
 export interface SigningKeyLifecycleEntry {
   readonly publicKey: string;
+  /**
+   * Explicit activation bound for historical attribution. Absent/null preserves the legacy
+   * always-active lower bound; a verifier must never invent one for old two-field records.
+   */
+  readonly validFrom?: string | null;
   /** Any non-null value marks the key retired. Artifact timestamps never override this state. */
   readonly retiredAt: string | null;
 }
@@ -28,12 +35,48 @@ export interface SigningKeyLifecycle {
 export interface ParsedVerificationKeyring {
   readonly keyring: Keyring;
   readonly retiredKids: Readonly<Record<string, true>>;
+  /** Explicit activation instants by kid; null means the source declared no lower bound. */
+  readonly validFromByKid: Readonly<Record<string, string | null>>;
+  /**
+   * Lifecycle retirement instants by kid. Empty for the legacy static keyring form.
+   *
+   * `retiredKids` remains the current-use, fail-closed projection consumed by authorization
+   * surfaces. Historical verification needs the authenticated policy instant as data, not merely
+   * the boolean projection, so it can compare an independently witnessed checkpoint time without
+   * consulting a signer-authored receipt timestamp.
+   */
+  readonly retiredAtByKid: Readonly<Record<string, string | null>>;
   readonly lifecycle: boolean;
 }
 
 export type ParseVerificationKeyringResult =
   | { readonly ok: true; readonly value: ParsedVerificationKeyring }
   | { readonly ok: false; readonly reason: string };
+
+/** Exact RFC 3339 instant used by lifecycle parsing and historical interval evaluation. */
+export function lifecycleInstantNanos(value: string): bigint | null {
+  if (!isRfc3339Instant(value)) return null;
+  const epochMilliseconds = dateParse(value);
+  if (isNaNValue(epochMilliseconds)) return null;
+  let fractionalNanoseconds = 0;
+  let fractionalDigits = 0;
+  if (value[19] === ".") {
+    let i = 20;
+    while (i < value.length) {
+      const code = strCharCodeAt(value, i);
+      if (code < 48 || code > 57) break;
+      fractionalNanoseconds = fractionalNanoseconds * 10 + code - 48;
+      fractionalDigits++;
+      i++;
+    }
+    while (fractionalDigits < 9) {
+      fractionalNanoseconds *= 10;
+      fractionalDigits++;
+    }
+  }
+  return toBigInt(epochMilliseconds) * 1_000_000n
+    + toBigInt(fractionalNanoseconds % 1_000_000);
+}
 
 /**
  * Parse the one trust-root shape used by every JavaScript/TypeScript verification surface.
@@ -61,6 +104,8 @@ export function parseVerificationKeyring(
   const looksLikeLifecycle = hasLifecycleSpec || hasStructuredKeys;
   const keyring = objectCreateNull<Keyring>();
   const retiredKids = objectCreateNull<Record<string, true>>();
+  const validFromByKid = objectCreateNull<Record<string, string | null>>();
+  const retiredAtByKid = objectCreateNull<Record<string, string | null>>();
 
   if (!looksLikeLifecycle) {
     for (let i = 0; i < topNames.length; i++) {
@@ -71,7 +116,7 @@ export function parseVerificationKeyring(
       }
       keyring[kid] = publicKey;
     }
-    return { ok: true, value: { keyring, retiredKids, lifecycle: false } };
+    return { ok: true, value: { keyring, retiredKids, validFromByKid, retiredAtByKid, lifecycle: false } };
   }
 
   if (
@@ -97,28 +142,47 @@ export function parseVerificationKeyring(
     }
     const fields = objectGetOwnPropertyNames(entry);
     if (
-      fields.length !== 2
+      (fields.length !== 2 && fields.length !== 3)
       || !arrayIncludes(fields, "publicKey")
       || !arrayIncludes(fields, "retiredAt")
+      || (fields.length === 3 && !arrayIncludes(fields, "validFrom"))
     ) {
-      return { ok: false, reason: `lifecycle entry for signing key ${jsonStringify(kid)} must contain exactly publicKey + retiredAt` };
+      return { ok: false, reason: `lifecycle entry for signing key ${jsonStringify(kid)} must contain publicKey + retiredAt and only the optional validFrom` };
     }
     const publicKey = (entry as Record<string, unknown>).publicKey;
+    const validFrom = fields.length === 3
+      ? (entry as Record<string, unknown>).validFrom
+      : null;
     const retiredAt = (entry as Record<string, unknown>).retiredAt;
     if (typeof publicKey !== "string" || publicKey.length === 0) {
       return { ok: false, reason: `lifecycle publicKey for signing key ${jsonStringify(kid)} must be a non-empty string` };
     }
     if (
+      validFrom !== null
+      && (typeof validFrom !== "string" || lifecycleInstantNanos(validFrom) === null)
+    ) {
+      return { ok: false, reason: `lifecycle validFrom for signing key ${jsonStringify(kid)} must be null or a parseable RFC 3339 instant` };
+    }
+    if (
       retiredAt !== null
-      && (typeof retiredAt !== "string" || !isRfc3339Instant(retiredAt) || isNaNValue(dateParse(retiredAt)))
+      && (typeof retiredAt !== "string" || lifecycleInstantNanos(retiredAt) === null)
     ) {
       return { ok: false, reason: `lifecycle retiredAt for signing key ${jsonStringify(kid)} must be null or a parseable RFC 3339 instant` };
     }
+    if (
+      typeof validFrom === "string"
+      && typeof retiredAt === "string"
+      && (lifecycleInstantNanos(validFrom) as bigint) >= (lifecycleInstantNanos(retiredAt) as bigint)
+    ) {
+      return { ok: false, reason: `lifecycle interval for signing key ${jsonStringify(kid)} must satisfy validFrom < retiredAt` };
+    }
     keyring[kid] = publicKey;
+    validFromByKid[kid] = validFrom;
+    retiredAtByKid[kid] = retiredAt;
     if (retiredAt !== null) retiredKids[kid] = true;
   }
 
-  return { ok: true, value: { keyring, retiredKids, lifecycle: true } };
+  return { ok: true, value: { keyring, retiredKids, validFromByKid, retiredAtByKid, lifecycle: true } };
 }
 
 export type ResolveVerificationKeyResult =

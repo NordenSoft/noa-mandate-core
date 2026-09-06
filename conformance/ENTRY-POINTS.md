@@ -5,9 +5,9 @@ waiting to happen and, worse, a list that can drift from the code it claims to d
 
 Source: `src/index.ts` value exports, resolved through the TypeScript compiler API.
 
-- total value exports: **74**
-- security-sensitive: **19**
-- security-sensitive already bytes-in: **19**
+- total value exports: **76**
+- security-sensitive: **21**
+- security-sensitive already bytes-in: **21**
 - security-sensitive NOT yet bytes-in (ADR §3.1 target): **0**
 
 | Export | Kind | First parameter | Bytes-in | Declared in | Exemption reason |
@@ -44,6 +44,7 @@ Source: `src/index.ts` value exports, resolved through the TypeScript compiler A
 | `frozenSet` | INERT_CONSTRUCTOR | `readonly T[]` | n/a | `src/inert.ts` | builds THIS package's literal membership table (ADR §5.6); its subject is prototype+mutability, which bytes cannot express |
 | `frozenTable` | INERT_CONSTRUCTOR | `T` | n/a | `src/inert.ts` | builds THIS package's literal policy table (ADR §5.6); serializing it would produce a different table, not a safer one |
 | `generateKeyPair` | PRODUCER | `string` | n/a | `src/keys.ts` | generates the caller's own key |
+| `HISTORICAL_VERIFICATION_SPEC` | SECURITY_SENSITIVE | `—` | n/a | `src/verify.ts` |  |
 | `INERT_ARRAY_PROTOTYPE` | CONSTANT | `—` | n/a | `src/intrinsics.ts` |  |
 | `inertViolations` | INERT_CONSTRUCTOR | `unknown` | n/a | `src/inert.ts` | the audit walker BEHIND the policy-table control (test/security/policy-tables-inert.test.ts); reports findings, decides nothing |
 | `intrinsics` | SECURITY_SENSITIVE | `—` | n/a | `src/intrinsics.ts` |  |
@@ -85,4 +86,5 @@ Source: `src/index.ts` value exports, resolved through the TypeScript compiler A
 | `verifyCheckpoint` | SECURITY_SENSITIVE | `string \| Uint8Array<ArrayBufferLike>` | YES | `src/verify.ts` |  |
 | `verifyCompleteness` | SECURITY_SENSITIVE | `string \| Uint8Array<ArrayBufferLike>` | YES | `src/federation/acceptance.ts` |  |
 | `verifyEd25519` | SECURITY_SENSITIVE | `string` | YES | `src/keys.ts` |  |
+| `verifyHistoricalChain` | SECURITY_SENSITIVE | `string \| Uint8Array<ArrayBufferLike>` | YES | `src/verify.ts` |  |
 | `verifyReceiptCompliance` | SECURITY_SENSITIVE | `string \| Uint8Array<ArrayBufferLike>` | YES | `src/policy/compliance.ts` |  |

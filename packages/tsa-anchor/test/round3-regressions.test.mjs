@@ -19,8 +19,7 @@ import { generateKeyPair, buildReceipt, buildAnchor, sha256Prefixed } from "noa-
 import { scanForEquivocation, verifyEquivocationProof } from "../src/equivocation.mjs";
 import { anchorHash } from "../src/anchor-hash.mjs";
 import { verifyStamp } from "../src/verify.mjs";
-import { stampAnchor } from "../src/client.mjs";
-import { startMockTsa } from "./mock-tsa-server.mjs";
+import { createAuthenticatedTsaFixture } from "./openssl-tsa-fixture.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKFLOW = readFileSync(join(HERE, "..", "..", "..", ".github", "workflows", "publish-tsa.yml"), "utf8");
@@ -64,6 +63,16 @@ function withExtendedSig(anchor) {
   return a;
 }
 
+function tsaVerification(fixture) {
+  return {
+    opensslExecutable: fixture.executable,
+    trustRoots: fixture.trustRoots,
+    allowedPolicyOids: [fixture.policyOid],
+    revocation: { mode: "crl-check-all", crls: fixture.crls },
+    clock: { now: new Date().toISOString(), maxFutureSkewMs: 300000 },
+  };
+}
+
 // ── F8 ──────────────────────────────────────────────────────────────────────────────────────────
 
 test("F8 — one forward-compatible anchor does not condemn an honest pool", () => {
@@ -90,25 +99,27 @@ test("F8 — an extended sig is counted as an extension, distinct from bit-rot",
   assert.equal(res.rejected.malformed, 1, "the genuinely unusable entry is still counted separately");
 });
 
-test("F8 — the double-keying L14 closed stays closed: one anchor, one hash, stamp attaches", async () => {
-  const mock = await startMockTsa({ mode: "ok" });
+test("F8 — the double-keying L14 closed stays closed: one anchor, one hash, authenticated stamp attaches", () => {
+  const chain = buildChainOf(["p0", "p1", "p2"]);
+  const plain = anchorOn(W1, chain, 2, "2026-06-23T10:00:00Z");
+  const extended = withExtendedSig(plain);
+  const fixture = createAuthenticatedTsaFixture(plain);
   try {
-    const chain = buildChainOf(["p0", "p1", "p2"]);
-    const plain = anchorOn(W1, chain, 2, "2026-06-23T10:00:00Z");
-    const extended = withExtendedSig(plain);
-
     // THE FIX IS AT THE HASH, NOT THE SCHEMA: an unsigned, unauthenticated extra `sig` member must
     // not change the identity of the anchor, because neither the Ed25519 signature nor the TSA
     // token covers it. Same anchor => same key => the stamp attaches either way.
     assert.equal(anchorHash(extended), anchorHash(plain), "an unsigned extra member must not re-key the anchor");
 
-    const stamp = await stampAnchor(plain, { tsaUrl: mock.url });
-    assert.equal(verifyStamp(extended, stamp).ok, true, "a stamp taken on the plain anchor still covers the extended one");
+    const policy = tsaVerification(fixture);
+    assert.equal(verifyStamp(extended, fixture.valid, policy).ok, true, "a stamp taken on the plain anchor still covers the extended one");
 
-    const res = scanForEquivocation([extended], TRUST_SET, { stamps: { [anchorHash(extended)]: stamp } });
+    const res = scanForEquivocation([extended], TRUST_SET, {
+      stamps: { [anchorHash(extended)]: fixture.valid },
+      tsaVerification: policy,
+    });
     assert.equal(res.admitted, 1);
   } finally {
-    await mock.close();
+    fixture.cleanup();
   }
 });
 
@@ -129,36 +140,28 @@ test("F8 — a smuggled member still cannot change what the anchor SAYS", () => 
 
 // ── F11 ─────────────────────────────────────────────────────────────────────────────────────────
 
-test("F11 — the release is bound to reviewed history, not to a tag NAME", () => {
-  // `TAG="${GITHUB_REF_NAME#tsa-v}"` vs package.json proves only that the tag is spelled right.
-  // Anyone with write access could tag an arbitrary unreviewed commit and publish it with
-  // provenance. The tagged commit must be an ancestor of the reviewed branch.
-  assert.match(WORKFLOW, /merge-base --is-ancestor/, "the tagged commit must be proven to be on main");
-  assert.match(WORKFLOW, /origin\/main/);
-  assert.match(WORKFLOW, /fetch[^\n]*origin main/, "main must be fetched before the ancestry test");
+test("F11 — the legacy workflow cannot turn an unreviewed tag into a release", () => {
+  assert.doesNotMatch(WORKFLOW, /refs\/tags|\bpush:\s*\n|GITHUB_REF|GITHUB_SHA/);
+  assert.doesNotMatch(WORKFLOW, /actions\/checkout|npm publish/);
+  assert.match(WORKFLOW, /future release controller must use a new\s*\n# workflow file/i);
 });
 
-test("F11 — publishing requires a protected environment, not a blank one", () => {
-  assert.match(WORKFLOW, /^\s{4}environment:\s*\S+/m, "the publish job must declare a deployment environment");
-  assert.doesNotMatch(WORKFLOW, /Environment:\s*leave blank/i, "the setup note must stop telling the operator to disable review");
-  assert.match(WORKFLOW, /required reviewer/i, "the setup note must say the environment needs reviewers");
+test("F11 — the quarantined workflow owns no deployment environment or write permission", () => {
+  assert.doesNotMatch(WORKFLOW, /^\s{4}environment:/m);
+  assert.match(WORKFLOW, /^permissions:\s*\{\}\s*$/m);
 });
 
-test("F11 — the force-moved-tag hazard is named, and the released SHA is recorded", () => {
-  assert.match(WORKFLOW, /force-mov/i, "a tag is mutable; that must be written down where the release is defined");
-  assert.match(WORKFLOW, /GITHUB_SHA/, "the exact released commit must be printed into the run log");
+test("F11 — the quarantine contains no candidate checkout or release command", () => {
+  assert.doesNotMatch(WORKFLOW, /actions\/checkout|git\s+(?:fetch|checkout)|npm\s+(?:pack|publish)|gh\s+release/);
+  assert.match(WORKFLOW, /can never build, stage, or publish candidate bytes/i);
 });
 
 // ── F10 ─────────────────────────────────────────────────────────────────────────────────────────
 
 test("F10 — the workflow comment states what is true about workflow_dispatch", () => {
-  // Two overclaims: dispatch "must NEVER be able to publish" (a dispatcher can select a TAG ref,
-  // which passes the job `if`), and "useful for exercising the gates" (on a branch the job-level
-  // `if` skips the entire job, so no gate runs at all).
-  assert.doesNotMatch(WORKFLOW, /must NEVER be able to publish/i);
-  assert.doesNotMatch(WORKFLOW, /useful for exercising the gates/i);
-  assert.match(WORKFLOW, /select a tag/i, "the comment must admit a tag-ref dispatch reaches publish");
-  assert.match(WORKFLOW, /no gate runs|skips the entire job|nothing runs/i, "and that a branch dispatch runs nothing");
+  assert.match(WORKFLOW, /Manual dispatch exists only to make the\s*\n# fail-closed state observable/i);
+  assert.match(WORKFLOW, /can never build, stage, or publish candidate bytes/i);
+  assert.match(WORKFLOW, /^\s*exit 1\s*$/m);
 });
 
 // ── F13 ─────────────────────────────────────────────────────────────────────────────────────────
@@ -193,28 +196,31 @@ test("F13 — the trust-set digest covers quorum and is labelled as an unauthent
 
 // ── F12 ─────────────────────────────────────────────────────────────────────────────────────────
 
-test("F12 — a TSA URL is never laundered into re-derived evidence", async () => {
-  const mock = await startMockTsa({ mode: "ok" });
+test("F12 — a TSA URL is never laundered into re-derived evidence", () => {
+  const a = buildChainOf(["p0", "p1", "x"]);
+  const b = buildChainOf(["p0", "p1", "y"]);
+  const a1 = anchorOn(W1, a, 2, "2026-06-23T10:00:00Z");
+  const a2 = anchorOn(W2, b, 2, "2026-06-23T10:00:05Z");
+  const fixture = createAuthenticatedTsaFixture(a1);
   try {
-    const a = buildChainOf(["p0", "p1", "x"]);
-    const b = buildChainOf(["p0", "p1", "y"]);
-    const a1 = anchorOn(W1, a, 2, "2026-06-23T10:00:00Z");
-    const a2 = anchorOn(W2, b, 2, "2026-06-23T10:00:05Z");
-    const stamps = { [anchorHash(a1)]: await stampAnchor(a1, { tsaUrl: mock.url }), [anchorHash(a2)]: await stampAnchor(a2, { tsaUrl: mock.url }) };
-    const res = scanForEquivocation([a1, a2], TRUST_SET, { stamps });
+    const policy = tsaVerification(fixture);
+    const stamps = { [anchorHash(a1)]: fixture.valid, [anchorHash(a2)]: fixture.stampFor(a2) };
+    const res = scanForEquivocation([a1, a2], TRUST_SET, { stamps, tsaVerification: policy });
 
     const f = JSON.parse(JSON.stringify(res.findings[0]));
     f.branches[0].stamp.tsaUrl = "http://attacker.example/tsr"; // the token bytes are untouched
-    const check = verifyEquivocationProof(f, TRUST_SET);
+    const check = verifyEquivocationProof(f, TRUST_SET, { tsaVerification: policy });
 
     const ev = check.stampEvidence[0];
     assert.equal(ev.verified, true, "the token itself still verifies");
+    assert.equal(ev.authenticated, true, "re-derived stamp evidence uses the authenticated path");
+    assert.equal(ev.code, "OK");
     // A URL is not inside an RFC 3161 token, so it CANNOT be re-derived. It must not sit in a field
     // that reads as re-derived evidence next to `verified:true`.
     assert.equal(ev.tsaUrl, undefined, "no field may present an unauthenticated URL as re-derived");
     assert.equal(ev.tsaUrlClaimed, "http://attacker.example/tsr", "it is carried, but explicitly as a claim");
   } finally {
-    await mock.close();
+    fixture.cleanup();
   }
 });
 

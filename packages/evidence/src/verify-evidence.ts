@@ -11,9 +11,13 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ARTIFACTS, evalSchema } from "noa-approval-artifacts";
-import { intrinsics } from "noa-receipt";
-import { parseDocument } from "./bytes.js";
+import { ARTIFACTS, evalSchema, type KeyEntry } from "noa-approval-artifacts";
+import {
+  intrinsics,
+  verifyHistoricalChain,
+  type HistoricalVerificationResult,
+} from "noa-receipt";
+import { encodeDocument, parseDocument } from "./bytes.js";
 import {
   EVIDENCE_SPEC,
   POSITIVE_OUTCOMES,
@@ -57,7 +61,17 @@ import { type ReceiptRole } from "./receipt-roles.js";
 // PRISTINE DECISIONS (review #6, C1). The registry collection's SHAPE and its COPY are both verdict
 // inputs: a poisoned `Array.isArray` or `Array.prototype.push` would otherwise decide whether a
 // supplied registry counts as supplied at all, and "not supplied" is the permissive branch.
-const { isArray, isProxy, arrayPush } = intrinsics;
+const {
+  isArray,
+  isProxy,
+  arrayPush,
+  newSet,
+  objectGetOwnPropertyNames,
+  objectCreateNull,
+  setAdd,
+  setHas,
+  setToArray,
+} = intrinsics;
 
 export const DEFAULT_MAX_AGE_MS = 24 * 60 * 60 * 1000; // F5 default: 24h
 
@@ -302,6 +316,168 @@ function result(
   return r;
 }
 
+/** Read the signer kid from an inert, already-parsed document without inventing a shape default. */
+function signerKid(value: unknown): string | null {
+  const doc = asObj(value);
+  const sig = asObj(doc?.sig);
+  return typeof sig?.kid === "string" ? sig.kid : null;
+}
+
+/**
+ * Historical receipt verification is opt-in inside the audit path only when it is needed. Active
+ * key bundles retain the frozen step-17 behavior and its existing same-key checkpoint deployments.
+ */
+function hasRetiredReceiptSigner(ctx: Ctx): boolean {
+  const entries = ctx.receiptKeyring?.keys;
+  if (!entries) return false;
+  const chain = ctx.orderedChain ?? [];
+  for (let i = 0; i < chain.length; i++) {
+    const kid = signerKid(chain[i]);
+    if (kid !== null && entries[kid]?.retiredAt != null) return true;
+  }
+  return false;
+}
+
+/**
+ * Reconcile a retired receipt chain through the canonical versioned side API. This keeps the
+ * evidence verifier's exact-head policy: an honest lower checkpoint is recorded as a prefix and
+ * leaves `checkpointReconciled=false`, so it can support neither a full-chain verdict nor a
+ * confident negative. An authenticated contradiction remains a hard step-17 failure.
+ */
+function historicalCheckpointReconcile(
+  ctx: Ctx,
+): { readonly step: StepResult; readonly historical: HistoricalVerificationResult } {
+  const historical = verifyHistoricalChain(encodeDocument(ctx.orderedChain ?? []), {
+    keyring: encodeDocument(ctx.receiptKeyring!),
+    checkpoint: encodeDocument(ctx.bundle.checkpoint),
+    checkpointKeyring: ctx.checkpointKeyring,
+    requireTenantConsistency: true,
+  });
+  const S = "STEP_17_CHECKPOINT_RECONCILE" as const;
+  const code = historical.code;
+
+  if (historical.dimensions.completeness === "HEAD_ANCHORED") {
+    // Completeness and historical attribution are separate. A checkpoint at/after retirement still
+    // proves which head it signed, but step 18 must refuse to attribute the retired receipt signer.
+    ctx.checkpointReconciled = true;
+    return { step: { step: S, ok: true }, historical };
+  }
+  if (historical.dimensions.completeness === "PREFIX_ANCHORED") {
+    ctx.checkpointReconciled = false;
+    arrayPush(ctx.warnings,
+      "historical checkpoint authenticates a lower receipt prefix only (PARTIAL / PREFIX_ANCHORED); the presented head is not tail-anchored",
+    );
+    return { step: { step: S, ok: true }, historical };
+  }
+
+  if (
+    code === "WITNESS_KEY_NOT_TRUSTED"
+    || code === "WITNESS_ROOT_INVALID"
+    || code === "WITNESS_ROOT_NOT_PROVIDED"
+    || code === "WITNESS_KEY_NOT_SEPARATE"
+    || code === "WITNESS_KEY_RETIRED"
+    || code === "NO_WITNESS"
+  ) {
+    ctx.checkpointReconciled = false;
+    arrayPush(ctx.warnings,
+      `historical checkpoint did not establish a separately trusted receipt-history anchor (${code})`,
+    );
+    return { step: { step: S, ok: true }, historical };
+  }
+
+  return {
+    step: {
+      step: S,
+      ok: false,
+      code: "E_CHECKPOINT_RECONCILE",
+      reason: `historical receipt/checkpoint verification failed (${code}; integrity=${historical.dimensions.integrity}; completeness=${historical.dimensions.completeness})`,
+    },
+    historical,
+  };
+}
+
+/**
+ * Apply the narrow audit-only lifecycle projection justified by an authenticated checkpoint inside
+ * every covered receipt signer's explicit `[validFrom, retiredAt)` interval. Only a key used
+ * exclusively on covered receipt bytes is projected current for
+ * this one call to step 18. If the same kid signed any side artifact, manifest, delegation, or the
+ * checkpoint, its retirement remains an unconditional refusal. The original keyring is restored
+ * before control returns, and `purpose=authorize` never reaches this function.
+ */
+function historicalTemporalAuthorization(
+  ctx: Ctx,
+  historical: HistoricalVerificationResult,
+): StepResult {
+  if (
+    historical.dimensions.integrity !== "INTACT"
+    || historical.dimensions.completeness !== "HEAD_ANCHORED"
+    || historical.dimensions.attribution !== "ATTRIBUTABLE_AS_OF"
+  ) {
+    return step18_temporalAuthorization(ctx);
+  }
+
+  const receiptObjects = newSet<unknown>();
+  const receiptKids = newSet<string>();
+  const chain = ctx.orderedChain ?? [];
+  for (let i = 0; i < chain.length; i++) {
+    setAdd(receiptObjects, chain[i]);
+    const kid = signerKid(chain[i]);
+    if (kid !== null) setAdd(receiptKids, kid);
+  }
+
+  // Conservatively treat every signed top-level document outside the receipt chain as a side
+  // artifact. This automatically includes future bundle members without maintaining a second list.
+  const sideArtifactKids = newSet<string>();
+  const bundleFields = objectGetOwnPropertyNames(ctx.bundle);
+  for (let i = 0; i < bundleFields.length; i++) {
+    const value = (ctx.bundle as unknown as Record<string, unknown>)[bundleFields[i] as string];
+    if (setHas(receiptObjects, value)) continue;
+    const kid = signerKid(value);
+    if (kid !== null) setAdd(sideArtifactKids, kid);
+  }
+
+  const original = ctx.resolvedKeyring;
+  if (!original) return step18_temporalAuthorization(ctx);
+  // `original` was built from parsed bytes, but this is still a verdict-bearing projection. Build
+  // it on a null prototype and copy by captured own-name enumeration so neither Object.prototype,
+  // object spread, nor a mutable iterator participates in the lifecycle decision.
+  const projected = objectCreateNull<Record<string, KeyEntry>>();
+  const originalKids = objectGetOwnPropertyNames(original);
+  for (let i = 0; i < originalKids.length; i++) {
+    const kid = originalKids[i] as string;
+    projected[kid] = original[kid] as KeyEntry;
+  }
+  let projectedAny = false;
+  const kids = setToArray(receiptKids);
+  for (let i = 0; i < kids.length; i++) {
+    const kid = kids[i] as string;
+    const entry = original[kid];
+    if (!entry || entry.revokedAt == null || setHas(sideArtifactKids, kid)) continue;
+    const projectedEntry = objectCreateNull<KeyEntry>();
+    projectedEntry.publicKey = entry.publicKey;
+    projectedEntry.type = entry.type;
+    projectedEntry.roles = entry.roles;
+    if (entry.validFrom !== undefined) projectedEntry.validFrom = entry.validFrom;
+    projectedEntry.revokedAt = null;
+    projected[kid] = projectedEntry;
+    projectedAny = true;
+  }
+  if (!projectedAny) return step18_temporalAuthorization(ctx);
+
+  ctx.resolvedKeyring = projected;
+  try {
+    const checked = step18_temporalAuthorization(ctx);
+    if (checked.ok) {
+      arrayPush(ctx.warnings,
+        "retired receipt-only signer was attributed as of a separately trusted checkpoint that strictly predates retirement; this audit result grants no current signing authority",
+      );
+    }
+    return checked;
+  } finally {
+    ctx.resolvedKeyring = original;
+  }
+}
+
 /**
  * Verify an Approval Evidence Bundle. Pure/offline. Returns a tiered verdict + the ordered per-step
  * audit trail; never throws on a malformed bundle (fail-closed to INVALID / UNVERIFIED).
@@ -481,7 +657,7 @@ export function verifyEvidence(bundleInput: Uint8Array | string, opts: VerifyEvi
     rootKeyring,
     checkpointKeyring: optCheckpointKeyring,
     warnings,
-    rolesAsserted: new Set<ReceiptRole>(),
+    rolesAsserted: newSet<ReceiptRole>(),
     purpose,
     authorization: "UNCHECKED",
     // S5 — the enrolment question is BORN unasked. Only the enrolment plane may change this, and it
@@ -497,8 +673,26 @@ export function verifyEvidence(bundleInput: Uint8Array | string, opts: VerifyEvi
 
   // run the pipeline; stop at the FIRST failure (fail-closed, ordered).
   const steps: StepResult[] = [];
+  let historical: HistoricalVerificationResult | undefined;
+
+  const runCheckpointStep = (): StepResult => {
+    if (purpose !== "audit" || !hasRetiredReceiptSigner(ctx)) {
+      return step17_checkpointReconcile(ctx);
+    }
+    const evaluated = historicalCheckpointReconcile(ctx);
+    historical = evaluated.historical;
+    return evaluated.step;
+  };
+
   for (const step of PIPELINE) {
-    const r = step(ctx);
+    // CONTROL G2-EVIDENCE-AUDIT: current authorization continues through the frozen steps. An audit
+    // containing an actually retired receipt signer uses the versioned historical side contract at
+    // step 17, then only its authenticated pre-retirement exact-head result can narrow step 18.
+    const r = step === step17_checkpointReconcile
+      ? runCheckpointStep()
+      : step === step18_temporalAuthorization && historical !== undefined
+        ? historicalTemporalAuthorization(ctx, historical)
+        : step(ctx);
     steps.push(r);
     if (!r.ok) {
       // A settlement rejection is set INSIDE step 10 and carries its own dimension on ctx. It is not a
@@ -551,7 +745,7 @@ export function verifyEvidence(bundleInput: Uint8Array | string, opts: VerifyEvi
       // rejection.
       let failing = r;
       if (settlementFailure && ctx.checkpointReconciled === undefined) {
-        const cp = step17_checkpointReconcile(ctx);
+        const cp = runCheckpointStep();
         // Recorded in the audit trail because it genuinely ran, in the order it ran.
         steps.push(cp);
         // SCOPE, WIDENED WITH THE RULES RATHER THAN AFTER THEM: dominance covers every SOFT S5
@@ -576,7 +770,11 @@ export function verifyEvidence(bundleInput: Uint8Array | string, opts: VerifyEvi
             : "INVALID";
       // Integrity states what was PROVEN: a failure before the checkpoint step leaves it unproven, and
       // a failure AT step 17 — reached in the pipeline or out of band — means it is broken.
-      const integrity: VerdictDimensions["integrity"] = ctx.checkpointReconciled === true && failing.step !== "STEP_17_CHECKPOINT_RECONCILE" ? "INTACT" : "BROKEN";
+      const integrity: VerdictDimensions["integrity"] = historical !== undefined
+        ? historical.dimensions.integrity
+        : ctx.checkpointReconciled === true && failing.step !== "STEP_17_CHECKPOINT_RECONCILE"
+          ? "INTACT"
+          : "BROKEN";
       // A run that stopped OUTSIDE the settlement rule examined no settlement evidence (UNCHECKED, the
       // value that must never read as "an artifact was examined and accepted"); a settlement rejection
       // carries the dimension the rule set (BOUNDS_UNCHECKABLE or CONTRADICTED). That dimension is
@@ -590,7 +788,23 @@ export function verifyEvidence(bundleInput: Uint8Array | string, opts: VerifyEvi
       // rejecting ones — which is where an auditor most wants it, because a rejected artifact is still
       // an artifact somebody signed. Unset means the rule did not run.
       const settlementObserver = ctx.settlementObserver ?? "NOT_EVALUATED";
-      return result(verdict, bundle.outcome, steps, ctx.warnings, { integrity, authorization: ctx.authorization, settlement, settlementObserver }, ctx.enrolment, failing, [...ctx.rolesAsserted], purpose);
+      return result(
+        verdict,
+        bundle.outcome,
+        steps,
+        ctx.warnings,
+        {
+          integrity,
+          authorization: ctx.authorization,
+          settlement,
+          settlementObserver,
+          ...(historical !== undefined ? { historical } : {}),
+        },
+        ctx.enrolment,
+        failing,
+        [...ctx.rolesAsserted],
+        purpose,
+      );
     }
   }
 
@@ -614,7 +828,13 @@ export function verifyEvidence(bundleInput: Uint8Array | string, opts: VerifyEvi
     // `NO_EXECUTION_BINDING` says the true thing about what this verdict rests on, and the verdict
     // word means exactly what it meant before this field existed. This value does NOT depend on
     // `purpose` — an audit run and an authorization run examine the same settlement evidence.
-    { integrity: "INTACT", authorization: ctx.authorization, settlement: "NO_EXECUTION_BINDING", settlementObserver: ctx.settlementObserver ?? "NOT_EVALUATED" },
+    {
+      integrity: "INTACT",
+      authorization: ctx.authorization,
+      settlement: "NO_EXECUTION_BINDING",
+      settlementObserver: ctx.settlementObserver ?? "NOT_EVALUATED",
+      ...(historical !== undefined ? { historical } : {}),
+    },
     // REPORTED, not hardcoded, and the difference is a safety property rather than tidiness. Every
     // ENROLLED path terminates inside step 10 or 11 today, so a completed run genuinely did not ask
     // — but writing `NOT_EVALUATED` here would state "nobody asked" for ANY future rule that let an

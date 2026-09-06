@@ -12,7 +12,12 @@
  * `verifyArtifact`, not re-declared here (Red Line 5: never re-invent a frozen shape).
  */
 
-import { frozenSet, frozenTable, type FrozenSet } from "noa-receipt";
+import {
+  frozenSet,
+  frozenTable,
+  type FrozenSet,
+  type HistoricalVerificationResult,
+} from "noa-receipt";
 
 /**
  * POLICY STATE IS FROZEN BY CONSTRUCTION (review #6, C3).
@@ -318,8 +323,8 @@ export interface StepResult {
  * historical time witness, a lapsed delegated signer cannot produce verifiable historical evidence.
  */
 export interface VerdictDimensions {
-  /** Bytes: signatures, hashes, chain contiguity, checkpoint reconciliation. Permanent. */
-  integrity: "INTACT" | "BROKEN";
+  /** Bytes: signatures, hashes, chain contiguity, checkpoint reconciliation. Permanent when answered. */
+  integrity: "INTACT" | "BROKEN" | "UNANSWERED";
   /**
    * Authority, as a policy window:
    *   VALID_NOW              — the root-signed delegation and the manifest's reject-only window
@@ -358,6 +363,13 @@ export interface VerdictDimensions {
    * reports and decides would make "warnings never become failures" untestable.
    */
   settlementObserver: "NOT_EVALUATED" | "SAME_SIGNING_KEY" | "SAME_ADMINISTRATIVE_PARTY" | "UNKNOWN";
+  /**
+   * Canonical receipt-history dimensions, present only when an audit had to use retained public
+   * material for an actually retired receipt signer. The evidence package embeds the root
+   * `noa.historical-verification/0.1` result instead of defining a second completeness,
+   * attribution, or availability vocabulary.
+   */
+  historical?: HistoricalVerificationResult;
 }
 
 /**
@@ -433,8 +445,10 @@ export type EnrolmentEvaluation =
 /**
  * What the caller is asking the verifier FOR.
  *
- *   "audit"     — DEFAULT; applies audit-oriented envelope policy, but still requires the delegated
- *                 signer to be authorized at verifier-controlled `now`.
+ *   "audit"     — DEFAULT; applies audit-oriented envelope policy. Delegation and side-artifact
+ *                 signers remain subject to verifier-controlled `now`; a retired receipt-only
+ *                 signer can be attributed only through the canonical separately witnessed
+ *                 historical result.
  *   "authorize" — a current authorization decision; reports a closed delegation/manifest window as
  *                 `E_AUTHORIZATION_WINDOW`.
  *
@@ -471,7 +485,7 @@ export interface VerdictPolicy {
  * a reader holding two verdicts for the same bytes can tell which rule set produced each, because
  * every result carries this string.
  */
-export const VERIFIER_POLICY_VERSION = "noa.verify-evidence/2026-08-15" as const;
+export const VERIFIER_POLICY_VERSION = "noa.verify-evidence/2026-09-06" as const;
 
 /** The full `verify-evidence` result. */
 export interface VerifyEvidenceResult {

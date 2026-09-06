@@ -81,6 +81,7 @@ const EMPTY_POLICY = enc.encode(JSON.stringify({ spec: "noa.policy/0.2", id: "p"
 const CALLS: Record<string, (arg: unknown) => unknown> = {
   verifyChain: (a) => noaReceipt.verifyChain(a as never),
   verifyChainText: (a) => noaReceipt.verifyChainText(a as never, {}),
+  verifyHistoricalChain: (a) => noaReceipt.verifyHistoricalChain(a as never, { keyring: EMPTY_OBJECT }),
   verifyCheckpoint: (a) => noaReceipt.verifyCheckpoint(a as never),
   verifyCompleteness: (a) => noaReceipt.verifyCompleteness(a as never, EMPTY_ARRAY, EMPTY_TRUST),
   verifyChainWitnessed: (a) => noaReceipt.verifyChainWitnessed(EMPTY_ARRAY, undefined, { anchors: a as never, trustSet: EMPTY_TRUST }),

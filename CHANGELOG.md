@@ -8,6 +8,12 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Added
 
+- `verifyHistoricalChain` and CLI `--purpose historical` add the versioned
+  `noa.historical-verification/0.1` result. Its independent dimensions report receipt integrity,
+  prefix/head completeness, as-of attribution, and evidence availability. A dedicated checkpoint
+  keyring plus decoded-key-material separation is required for historical time attribution; key
+  separation is not reported as organizational independence. The deterministic survivable-
+  retirement corpus is checked against TypeScript, Python, Go, Rust, and C#.
 - The public action-digest surface now carries the additional nonce and dispatch-correlation inputs
   implemented by `src/action-digest.ts`. These values provide deterministic linkage only; they do
   not authenticate a dispatcher or prove an external effect.
@@ -17,6 +23,14 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Fixed
 
+- A lifecycle retirement added after an honestly signed receipt no longer changes that receipt's
+  historical integrity to `TAMPERED`. The side API verifies with retained public material, attributes
+  only through a separately trusted checkpoint inside the covered signer's explicit
+  `[validFrom, retiredAt)` interval, and preserves the fail-closed retired-key behavior of
+  `verifyChain` and all current-use callers. `validFrom` is optional for compatibility with the
+  original two-field lifecycle entry; absence remains an unknown/unbounded lower end rather than a
+  fabricated time. Empty or inverted explicit intervals fail closed. All five historical verifiers
+  accept RFC 3339's lowercase `t`/`z` spellings and compare fractional seconds at nanosecond precision.
 - The protected-header example in `docs/receipt-spec.md` now shows the complete two-member COSE
   protected map rather than a one-member encoding that did not match the documented envelope.
 - The small-order Ed25519 key comment in `src/keys.ts` now describes the measured key-acceptance
@@ -29,6 +43,11 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Changed
 
+- Historical prefix results use `classification: PARTIAL` with
+  `dimensions.completeness: PREFIX_ANCHORED`. This pair is the migration target for the earlier
+  informal `DEGRADED` label; `VERIFIED` is reserved for an authenticated exact head with intact
+  receipt and checkpoint bytes plus attributable historical time. Authenticated conflicts use CLI
+  exit `7`, while cryptographic historical integrity failures use exit `8`.
 - `receiptFromCose` now refuses a receipt whose native signing key is absent from or retired in the
   supplied keyring. A successful result means both the native receipt and outer envelope checks
   required by the selected path succeeded; it is not an independent-execution or deployment claim.

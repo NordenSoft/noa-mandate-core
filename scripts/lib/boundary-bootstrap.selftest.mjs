@@ -1132,6 +1132,13 @@ test("candidate Git observation is standalone, closed-environment, exact-commit,
   const work = mkdtempSync(join(tmpdir(), "noa-boundary-bootstrap-git-"));
   try {
     const root = buildFixture(work);
+    const branch = "fix/current-branch";
+    git(root, ["checkout", "-q", "-b", branch]);
+    const headRef = `refs/heads/${branch}`;
+    const remoteKey = `branch.${branch}.remote`;
+    const mergeKey = `branch.${branch}.merge`;
+    git(root, ["config", remoteKey, "origin"]);
+    git(root, ["config", mergeKey, headRef]);
     const expectedCommit = git(root, ["rev-parse", "HEAD"]);
     const subject = deriveBoundaryCandidateSubject(root);
     assert.equal(subject.commit, expectedCommit);
@@ -1151,6 +1158,81 @@ test("candidate Git observation is standalone, closed-environment, exact-commit,
       /BOUNDARY_BOOTSTRAP_GIT_ARGUMENT_REJECTED/,
       "archive must bind an immutable object id rather than a moving ref",
     );
+
+    git(root, ["config", "--unset-all", mergeKey]);
+    assert.throws(
+      () => deriveBoundaryCandidateSubject(root),
+      /BOUNDARY_BOOTSTRAP_GIT_CONFIG_INVALID/,
+      "a current-branch remote without its exact merge must be refused",
+    );
+    git(root, ["config", mergeKey, headRef]);
+
+    git(root, ["config", mergeKey, "refs/heads/other"]);
+    assert.throws(
+      () => deriveBoundaryCandidateSubject(root),
+      /BOUNDARY_BOOTSTRAP_GIT_CONFIG_INVALID/,
+      "a current-branch merge must bind the exact symbolic HEAD ref",
+    );
+    git(root, ["config", mergeKey, headRef]);
+
+    git(root, ["config", mergeKey, `${headRef}\nforged-value`]);
+    assert.throws(
+      () => deriveBoundaryCandidateSubject(root),
+      /BOUNDARY_BOOTSTRAP_GIT_CONFIG_INVALID/,
+      "a control character in a current-branch upstream value must be refused",
+    );
+    git(root, ["config", mergeKey, headRef]);
+
+    git(root, ["config", `branch.${branch}.pushRemote`, "origin"]);
+    assert.throws(
+      () => deriveBoundaryCandidateSubject(root),
+      /BOUNDARY_BOOTSTRAP_GIT_CONFIG_INVALID/,
+      "a current-branch pushRemote setting is outside the closed upstream pair",
+    );
+    git(root, ["config", "--unset-all", `branch.${branch}.pushRemote`]);
+
+    git(root, ["config", `branch.${branch}.rebase`, "true"]);
+    assert.throws(
+      () => deriveBoundaryCandidateSubject(root),
+      /BOUNDARY_BOOTSTRAP_GIT_CONFIG_INVALID/,
+      "a current-branch rebase setting is outside the closed upstream pair",
+    );
+    git(root, ["config", "--unset-all", `branch.${branch}.rebase`]);
+
+    git(root, ["config", "branch.fix/Current-branch.remote", "origin"]);
+    assert.throws(
+      () => deriveBoundaryCandidateSubject(root),
+      /BOUNDARY_BOOTSTRAP_GIT_CONFIG_INVALID/,
+      "a case variant of the current branch upstream key must be refused",
+    );
+    git(root, ["config", "--unset-all", "branch.fix/Current-branch.remote"]);
+
+    git(root, ["config", "branch.other.remote", "origin"]);
+    git(root, ["config", "branch.other.merge", "refs/heads/other"]);
+    assert.throws(
+      () => deriveBoundaryCandidateSubject(root),
+      /BOUNDARY_BOOTSTRAP_GIT_CONFIG_INVALID/,
+      "a foreign branch upstream pair must be refused",
+    );
+    git(root, ["config", "--unset-all", "branch.other.remote"]);
+    git(root, ["config", "--unset-all", "branch.other.merge"]);
+
+    git(root, ["config", "--add", remoteKey, "origin"]);
+    assert.throws(
+      () => deriveBoundaryCandidateSubject(root),
+      /BOUNDARY_BOOTSTRAP_GIT_CONFIG_INVALID/,
+      "duplicate current-branch upstream entries must be refused",
+    );
+    git(root, ["config", "--unset-all", remoteKey]);
+    git(root, ["config", remoteKey, "origin"]);
+
+    git(root, ["checkout", "-q", "--detach"]);
+    assert.throws(
+      () => deriveBoundaryCandidateSubject(root),
+      /BOUNDARY_BOOTSTRAP_GIT_CONFIG_INVALID/,
+      "a detached HEAD cannot admit branch-scoped local configuration",
+    );
+    git(root, ["checkout", "-q", branch]);
 
     git(root, ["config", "filter.hostile.clean", "/tmp/never-execute"]);
     assert.throws(

@@ -1,0 +1,9 @@
+{
+  "spec": "noa.signing-key-lifecycle/0.1",
+  "keys": {
+    "g2-receipt-retired": {
+      "publicKey": "MCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+      "retiredAt": "2026-01-02T00:00:00.000000002Z"
+    }
+  }
+}

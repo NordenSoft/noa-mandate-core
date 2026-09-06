@@ -176,6 +176,7 @@ function assertReadOnlyGitArguments(args) {
       JSON.stringify(["config", "--local", "--no-includes", "--get", "remote.origin.url"]),
       JSON.stringify(["config", "--no-includes", "--get", "core.hooksPath"]),
     ].includes(exact))
+    || exact === JSON.stringify(["symbolic-ref", "--quiet", "HEAD"])
     || (command === "rev-parse" && rest.length === 1 && [
       "HEAD", "--absolute-git-dir", "--git-common-dir",
       "--show-toplevel",
@@ -948,6 +949,28 @@ function assertStandaloneGitLayout(root) {
 }
 
 function readValidatedLocalGitConfig(root) {
+  let headRef;
+  try {
+    headRef = readOnlyGitOutput(root, ["symbolic-ref", "--quiet", "HEAD"]);
+  } catch {
+    fail(
+      "BOUNDARY_BOOTSTRAP_GIT_CONFIG_INVALID",
+      "local Git configuration",
+      "HEAD must be attached to one bounded canonical local branch",
+    );
+  }
+  const branchMatch = /^refs\/heads\/([A-Za-z0-9][A-Za-z0-9._\/-]{0,145})$/.exec(headRef);
+  const branchName = branchMatch?.[1];
+  if (branchName === undefined || branchName.endsWith(".") || branchName.endsWith(".lock")
+      || branchName.includes("..") || branchName.includes("//") || branchName.includes("/.")) {
+    fail(
+      "BOUNDARY_BOOTSTRAP_GIT_CONFIG_INVALID",
+      "local Git configuration",
+      "HEAD must be attached to one bounded canonical local branch",
+    );
+  }
+  const currentBranchRemoteKey = `branch.${branchName}.remote`;
+  const currentBranchMergeKey = `branch.${branchName}.merge`;
   const bytes = readOnlyGitOutput(
     root,
     ["config", "--local", "--no-includes", "--null", "--list"],
@@ -968,7 +991,8 @@ function readValidatedLocalGitConfig(root) {
     const separator = record.indexOf("\n");
     const key = record.slice(0, separator);
     const value = record.slice(separator + 1);
-    if (entries.has(key) || !/^[a-z0-9.-]{1,160}$/.test(key)
+    const isCurrentBranchUpstreamKey = key === currentBranchRemoteKey || key === currentBranchMergeKey;
+    if (entries.has(key) || (!/^[a-z0-9.-]{1,160}$/.test(key) && !isCurrentBranchUpstreamKey)
         || value.length > 1024 || /[\u0000\r\n\u0085\u2028\u2029]/u.test(value)) {
       fail("BOUNDARY_BOOTSTRAP_GIT_CONFIG_INVALID", "local Git configuration", "configuration contains duplicate, malformed, or unbounded entries");
     }
@@ -995,10 +1019,8 @@ function readValidatedLocalGitConfig(root) {
   ]);
   for (const [key, value] of entries) {
     const simple = simpleValues.get(key);
-    const branch = /^branch\.([A-Za-z0-9_.\/-]{1,160})\.(remote|merge)$/.exec(key);
-    const branchValid = branch !== null && (branch[2] === "remote"
-      ? value === "origin"
-      : value === `refs/heads/${branch[1]}`);
+    const branchValid = (key === currentBranchRemoteKey && value === "origin")
+      || (key === currentBranchMergeKey && value === headRef);
     if (!(simple?.test(value) || branchValid)) {
       fail(
         "BOUNDARY_BOOTSTRAP_GIT_CONFIG_INVALID",
@@ -1006,6 +1028,15 @@ function readValidatedLocalGitConfig(root) {
         `unsupported or unsafe local key ${JSON.stringify(key)}`,
       );
     }
+  }
+  const hasCurrentBranchRemote = entries.has(currentBranchRemoteKey);
+  const hasCurrentBranchMerge = entries.has(currentBranchMergeKey);
+  if (hasCurrentBranchRemote !== hasCurrentBranchMerge) {
+    fail(
+      "BOUNDARY_BOOTSTRAP_GIT_CONFIG_INVALID",
+      "local Git configuration",
+      "current branch upstream remote and merge must be configured together",
+    );
   }
   for (const required of [
     "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates",

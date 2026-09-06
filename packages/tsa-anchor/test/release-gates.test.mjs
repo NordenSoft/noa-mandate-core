@@ -20,8 +20,8 @@ const WORKFLOW = readFileSync(join(HERE, "..", "..", "..", ".github", "workflows
 
 test("H11 — prepublishOnly runs the local-dependency tarball gate, not only the tests", () => {
   // An authenticated `npm publish` from a developer's tree would otherwise upload a tarball still
-  // declaring `noa-receipt: file:../..`, which no consumer can install. The workflow rewrites the
-  // specifier; nothing outside the workflow did, and a hand-run publish does not use the workflow.
+  // declaring `noa-receipt: file:../..`, which no consumer can install. A future release controller
+  // may rewrite the specifier, but nothing in this tree currently has release authority.
   const pre = PKG.scripts.prepublishOnly;
   assert.match(pre, /npm test/, "the suite must still gate a publish");
   assert.match(pre, /check:tarball/, "prepublishOnly must also refuse a local-path dependency");
@@ -44,43 +44,26 @@ test("H11 — the kernel dependency is either the dev-tree path or a registry ra
   assert.ok(isDevPath || isRegistryRange, `unexpected kernel specifier ${JSON.stringify(spec)}`);
 });
 
-test("H13 — the publish job cannot run on anything but a tsa-v* tag", () => {
-  // `workflow_dispatch` on an arbitrary branch reached `npm publish` because the version/tag
-  // comparison was wrapped in `case "$GITHUB_REF" in refs/tags/*)`, which simply matched nothing.
-  assert.match(
-    WORKFLOW,
-    /jobs:\s*\n\s*publish:\s*\n(?:\s*#.*\n)*\s*if:\s*startsWith\(github\.ref,\s*'refs\/tags\/tsa-v'\)/,
-    "the publish job must be gated on the tag condition itself",
-  );
-  // The tag/version gate is now unconditional, because the job already guarantees a tag.
-  assert.doesNotMatch(WORKFLOW, /case "\$GITHUB_REF" in/, "a vacuously-satisfied case gate must not come back");
-  assert.match(WORKFLOW, /TAG="\$\{GITHUB_REF_NAME#tsa-v\}"/);
+test("H13 — the quarantined legacy workflow has no tag publication path", () => {
+  assert.match(WORKFLOW, /name:\s*publish-tsa \(RELEASE_FROZEN\)/);
+  assert.match(WORKFLOW, /on:\s*\n\s*workflow_dispatch:\s*\{\}/);
+  assert.doesNotMatch(WORKFLOW, /refs\/tags|\bpush:\s*\n|workflow_call:/, "the frozen workflow must not accept a release trigger");
+  assert.match(WORKFLOW, /future release controller must use a new\s*\n# workflow file/i);
 });
 
-test("H12 — the runner meets npm's trusted-publishing floor", () => {
-  // OIDC trusted publishing needs Node >= 22.14; the workflow pinned Node 20, so every gate would
-  // have passed and the exchange would have failed at the last step.
-  const versions = [...WORKFLOW.matchAll(/node-version:\s*(\d+)/g)].map((m) => Number(m[1]));
-  assert.ok(versions.length > 0, "the workflow must pin a Node version");
-  for (const v of versions) assert.ok(v >= 22, `node-version ${v} is below npm's trusted-publishing floor of 22.14`);
+test("H12 — the quarantine starts no Node or npm publishing machinery", () => {
+  assert.doesNotMatch(WORKFLOW, /actions\/setup-node|node-version:|npm\s+(?:ci|test|pack|publish)/);
+  assert.doesNotMatch(WORKFLOW, /actions\/checkout/);
 });
 
-test("H12 — the first release is documented as a bootstrap publish, not as OIDC", () => {
-  // npm requires a package to EXIST before a trusted publisher can be configured, so v0.1.0 cannot
-  // come out of this workflow. Documenting the impossible order would burn a release to discover it.
-  assert.match(WORKFLOW, /does not exist on the registry/i);
-  assert.match(WORKFLOW, /npm publish --access public/, "the one-time bootstrap command must be written down");
-  assert.match(WORKFLOW, /git checkout -- package\.json/, "...including restoring the file: dependency afterwards");
+test("H12 — the quarantine grants no OIDC, package, or repository write authority", () => {
+  assert.match(WORKFLOW, /^permissions:\s*\{\}\s*$/m);
+  assert.doesNotMatch(WORKFLOW, /id-token:\s*write|packages:\s*write|contents:\s*write/);
 });
 
-test("the publish workflow still runs every gate it claims to", () => {
-  for (const gate of [
-    "lint:release-parity",
-    "lint-published-surface.mjs",
-    "lint-publish-tarball-deps.mjs --dir packages/tsa-anchor --expect-local",
-    "lint-publish-tarball-deps.mjs --dir packages/tsa-anchor",
-    "npm publish --provenance --access public",
-  ]) {
-    assert.ok(WORKFLOW.includes(gate), `the workflow no longer runs: ${gate}`);
-  }
+test("the quarantined workflow can only report and refuse", () => {
+  assert.match(WORKFLOW, /jobs:\s*\n\s*release-frozen:/);
+  assert.match(WORKFLOW, /RELEASE_FROZEN: publish-tsa\.yml is quarantined and is not a release authority/);
+  assert.match(WORKFLOW, /^\s*exit 1\s*$/m);
+  assert.doesNotMatch(WORKFLOW, /npm publish|gh release|docker (?:push|build)|uses:\s*actions\/checkout/);
 });

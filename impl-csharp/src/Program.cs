@@ -8,12 +8,13 @@ namespace NoaReceipt;
 /// Usage: noa-verify &lt;receipts.json&gt; [keyring.json] [--identity m.json] [--checkpoint cp.json]
 ///        dotnet run --project impl-csharp -- &lt;receipts.json&gt; [keyring.json] [...]
 ///
-/// Exit: 0 VALID · 1 UNVERIFIED (no keyring) · 2 TAMPERED · 3 MALFORMED · 4 USAGE · 5 UNTRUSTED
+/// Exit: current 0 VALID · 1 UNVERIFIED · 2 TAMPERED · 3 MALFORMED · 4 USAGE · 5 UNTRUSTED;
+/// historical 0 VERIFIED · 1 PARTIAL/UNVERIFIED · 7 CONFLICT · 8 INTEGRITY_FAILURE.
 /// </summary>
 public static class Program
 {
     private const string Usage =
-        "usage: noa-verify <receipts.json> [keyring.json] [--identity <m.json>] [--checkpoint <cp.json>]";
+        "usage: noa-verify <receipts.json> [keyring.json] [--purpose current|historical] [--identity <m.json>] [--checkpoint <cp.json>] [--checkpoint-keyring <k.json>]";
 
     private static int ExitCode(VerifyStatus s) => s switch
     {
@@ -27,14 +28,21 @@ public static class Program
 
     public static int Main(string[] args)
     {
-        string? receiptsPath = null, keyringPath = null, identityPath = null, checkpointPath = null;
+        string? receiptsPath = null, keyringPath = null, identityPath = null, checkpointPath = null, checkpointKeyringPath = null;
+        string purpose = "current";
 
         for (int i = 0; i < args.Length; i++)
         {
             string a = args[i];
             // A trailing --identity/--checkpoint with NO following path must NOT silently drop the
             // control (fail-open); emit usage + exit 4, exactly like the Python/TS CLI.
-            if (a == "--identity")
+            if (a == "--purpose")
+            {
+                if (i + 1 >= args.Length || (args[i + 1] != "current" && args[i + 1] != "historical"))
+                { Console.Error.WriteLine(Usage); return 4; }
+                purpose = args[++i];
+            }
+            else if (a == "--identity")
             {
                 if (i + 1 >= args.Length) { Console.Error.WriteLine(Usage); return 4; }
                 identityPath = args[++i];
@@ -43,6 +51,11 @@ public static class Program
             {
                 if (i + 1 >= args.Length) { Console.Error.WriteLine(Usage); return 4; }
                 checkpointPath = args[++i];
+            }
+            else if (a == "--checkpoint-keyring")
+            {
+                if (i + 1 >= args.Length) { Console.Error.WriteLine(Usage); return 4; }
+                checkpointKeyringPath = args[++i];
             }
             else if (a.StartsWith("--", StringComparison.Ordinal))
             {
@@ -55,17 +68,22 @@ public static class Program
         }
 
         if (receiptsPath is null) { Console.Error.WriteLine(Usage); return 4; }
+        if (purpose == "historical" && keyringPath is null) { Console.Error.WriteLine(Usage); return 4; }
+        if (purpose == "current" && checkpointKeyringPath is not null) { Console.Error.WriteLine(Usage); return 4; }
+        if (checkpointKeyringPath is not null && checkpointPath is null) { Console.Error.WriteLine(Usage); return 4; }
 
-        JVal receipts, keyring = null!, identity = null!, checkpoint = null!;
+        JVal receipts, keyring = null!, identity = null!, checkpoint = null!, checkpointKeyring = null!;
         bool haveKeyring = keyringPath is not null;
         bool haveIdentity = identityPath is not null;
         bool haveCheckpoint = checkpointPath is not null;
+        bool haveCheckpointKeyring = checkpointKeyringPath is not null;
         try
         {
             receipts = StrictJson.Parse(File.ReadAllText(receiptsPath));
             if (haveKeyring) keyring = StrictJson.Parse(File.ReadAllText(keyringPath!));
             if (haveIdentity) identity = StrictJson.Parse(File.ReadAllText(identityPath!));
             if (haveCheckpoint) checkpoint = StrictJson.Parse(File.ReadAllText(checkpointPath!));
+            if (haveCheckpointKeyring) checkpointKeyring = StrictJson.Parse(File.ReadAllText(checkpointKeyringPath!));
         }
         catch (Exception e)
         {
@@ -89,6 +107,26 @@ public static class Program
         {
             PrintCompact("MALFORMED", "keyring must be an object (kid -> base64 SPKI)");
             return 3;
+        }
+        if (haveCheckpointKeyring && checkpointKeyring is not JObj)
+        {
+            PrintCompact("MALFORMED", "checkpoint keyring must be an object");
+            return 3;
+        }
+
+        if (purpose == "historical")
+        {
+            HistoricalResult historical = HistoricalVerifier.Verify(
+                receipts,
+                keyring,
+                haveCheckpoint ? checkpoint : null,
+                haveCheckpointKeyring ? checkpointKeyring : null,
+                haveIdentity ? identity : null);
+            Console.WriteLine(JsonSerializer.Serialize(historical, new JsonSerializerOptions { WriteIndented = true }));
+            if (historical.Classification == "VERIFIED") return 0;
+            if (historical.Classification is "PARTIAL" or "UNVERIFIED") return 1;
+            if (historical.Classification == "CONFLICT") return 7;
+            return historical.Code is "RECEIPT_INTEGRITY_FAILURE" or "WITNESS_INTEGRITY_FAILURE" ? 8 : 3;
         }
 
         VerifyResult result = Verifier.VerifyChain(

@@ -16,6 +16,8 @@
  *   6  WITNESS_INCOMPLETE (chain VALID, but the §4 witness-acceptance over the supplied anchor snapshot
  *                          did NOT reach QUORUM_CONFIRMED — TRUNCATED / FORK / NOT_ESTABLISHED / STALE /
  *                          INVALID_INPUT; only emitted in the opt-in --anchors/--trust-set mode)
+ *   7  HISTORICAL_CONFLICT (authenticated checkpoint contradicts or is ahead of the presented history)
+ *   8  HISTORICAL_INTEGRITY_FAILURE (supplied receipt/checkpoint cryptography is broken)
  *
  * CI rule: treat ANY non-zero exit as failure. Do not special-case "==2".
  *
@@ -31,8 +33,17 @@
  */
 
 import { readSync, openSync, fstatSync, closeSync, constants as fsConstants } from "node:fs";
-import { verifyChain, type VerifyOptions, type VerifyStatus } from "./verify.js";
+import {
+  verifyChain,
+  verifyHistoricalChain,
+  type HistoricalVerificationClassification,
+  type HistoricalVerificationCode,
+  type HistoricalVerifyOptions,
+  type VerifyOptions,
+  type VerifyStatus,
+} from "./verify.js";
 import { verifyChainWitnessed, type WitnessedOptions } from "./federation/verify-witnessed.js";
+import { objectCreateNull } from "./intrinsics.js";
 
 const MAX_FILE_BYTES = 64 * 1024 * 1024; // 64 MiB hard cap
 
@@ -44,12 +55,34 @@ const EXIT = {
   USAGE: 4,
   UNTRUSTED: 5,
   WITNESS_INCOMPLETE: 6,
+  HISTORICAL_CONFLICT: 7,
+  HISTORICAL_INTEGRITY_FAILURE: 8,
 } as const;
+
+function historicalResultToExit(result: {
+  readonly classification: HistoricalVerificationClassification;
+  readonly code: HistoricalVerificationCode;
+}): number {
+  switch (result.classification) {
+    case "VERIFIED":
+      return EXIT.VALID;
+    case "PARTIAL":
+    case "UNVERIFIED":
+      return EXIT.UNVERIFIED;
+    case "CONFLICT":
+      return EXIT.HISTORICAL_CONFLICT;
+    default:
+      return result.code === "RECEIPT_INTEGRITY_FAILURE" || result.code === "WITNESS_INTEGRITY_FAILURE"
+        ? EXIT.HISTORICAL_INTEGRITY_FAILURE
+        : EXIT.MALFORMED;
+  }
+}
 
 function usage(msg?: string): never {
   if (msg) process.stderr.write(`error: ${msg}\n`);
   process.stderr.write(
-    "usage: noa verify <receipts.json> [--keyring <keyring.json>] [--checkpoint <checkpoint.json>] " +
+    "usage: noa verify <receipts.json> [--purpose current|historical] [--keyring <keyring.json>] " +
+      "[--checkpoint <checkpoint.json>] [--checkpoint-keyring <keyring.json>] " +
       "[--identity <manifest.json>] [--anchors <anchors.json> --trust-set <trust.json> [--max-anchor-age-ms <n>]]\n" +
       "       noa --serve [--frame-timeout-ms <n>]   (PROTOCOL REHEARSAL, ADR-0002 Stage 0.5 — NOT a security\n" +
       "                                               boundary, NOT the isolated kernel; docs/kernel-wire-protocol.md)\n",
@@ -131,14 +164,20 @@ function main(argv: string[]): number {
   let receiptsPath: string | undefined;
   let keyringPath: string | undefined;
   let checkpointPath: string | undefined;
+  let checkpointKeyringPath: string | undefined;
   let identityPath: string | undefined;
   let anchorsPath: string | undefined;
   let trustSetPath: string | undefined;
   let maxAnchorAgeMs: number | undefined;
+  let purpose: "current" | "historical" = "current";
 
   for (let i = 1; i < args.length; i++) {
     const a = args[i]!;
-    if (a === "--keyring") {
+    if (a === "--purpose") {
+      const v = args[++i];
+      if (v !== "current" && v !== "historical") usage("--purpose must be current or historical");
+      purpose = v;
+    } else if (a === "--keyring") {
       const v = args[++i];
       if (v === undefined || v.startsWith("--")) usage("--keyring requires a path");
       keyringPath = v;
@@ -146,6 +185,10 @@ function main(argv: string[]): number {
       const v = args[++i];
       if (v === undefined || v.startsWith("--")) usage("--checkpoint requires a path");
       checkpointPath = v;
+    } else if (a === "--checkpoint-keyring") {
+      const v = args[++i];
+      if (v === undefined || v.startsWith("--")) usage("--checkpoint-keyring requires a path");
+      checkpointKeyringPath = v;
     } else if (a === "--identity") {
       const v = args[++i];
       if (v === undefined || v.startsWith("--")) usage("--identity requires a path");
@@ -179,21 +222,66 @@ function main(argv: string[]): number {
   if (maxAnchorAgeMs !== undefined && !witnessMode) {
     usage("--max-anchor-age-ms requires --anchors and --trust-set");
   }
+  if (purpose === "historical" && witnessMode) {
+    usage("--purpose historical cannot be combined with federation --anchors/--trust-set");
+  }
+  if (purpose === "current" && checkpointKeyringPath !== undefined) {
+    usage("--checkpoint-keyring requires --purpose historical");
+  }
+  if (checkpointKeyringPath !== undefined && checkpointPath === undefined) {
+    usage("--checkpoint-keyring requires --checkpoint");
+  }
+  if (purpose === "historical" && keyringPath === undefined) {
+    usage("--purpose historical requires --keyring");
+  }
 
   let receipts: string;
   const opts: VerifyOptions = {};
   let anchors: string | undefined;
   let trustSet: string | undefined;
+  let checkpointKeyring: string | undefined;
+  let receiptKeyring: string | undefined;
+  let checkpointDocument: string | undefined;
+  let identityDocument: string | undefined;
   try {
     receipts = readDocumentText(receiptsPath);
-    if (keyringPath) opts.keyring = readDocumentText(keyringPath);
-    if (checkpointPath) opts.checkpoint = readDocumentText(checkpointPath);
-    if (identityPath) opts.identityManifest = readDocumentText(identityPath);
+    if (keyringPath) {
+      receiptKeyring = readDocumentText(keyringPath);
+      if (purpose === "current") opts.keyring = receiptKeyring;
+    }
+    if (checkpointPath) {
+      checkpointDocument = readDocumentText(checkpointPath);
+      if (purpose === "current") opts.checkpoint = checkpointDocument;
+    }
+    if (checkpointKeyringPath) checkpointKeyring = readDocumentText(checkpointKeyringPath);
+    if (identityPath) {
+      identityDocument = readDocumentText(identityPath);
+      if (purpose === "current") opts.identityManifest = identityDocument;
+    }
     if (anchorsPath) anchors = readDocumentText(anchorsPath);
     if (trustSetPath) trustSet = readDocumentText(trustSetPath);
   } catch (e) {
     process.stderr.write(`error: ${(e as Error).message}\n`);
     return EXIT.MALFORMED;
+  }
+
+  if (purpose === "historical") {
+    // Use only the local documents actually read from explicit paths. `opts` is the long-standing
+    // current-mode object; reading an absent property from it here would let Object.prototype inject
+    // a checkpoint or identity before the historical API's own inert-options boundary.
+    const historicalOpts = objectCreateNull<{
+      keyring: string;
+      checkpoint?: string;
+      checkpointKeyring?: string;
+      identityManifest?: string;
+    }>();
+    historicalOpts.keyring = receiptKeyring as string;
+    if (checkpointDocument !== undefined) historicalOpts.checkpoint = checkpointDocument;
+    if (checkpointKeyring !== undefined) historicalOpts.checkpointKeyring = checkpointKeyring;
+    if (identityDocument !== undefined) historicalOpts.identityManifest = identityDocument;
+    const result = verifyHistoricalChain(receipts, historicalOpts as HistoricalVerifyOptions);
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    return historicalResultToExit(result);
   }
 
   if (witnessMode) {

@@ -1,0 +1,119 @@
+[
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "g2-receipt-0",
+    "ts": "2026-01-01T00:00:00.000Z",
+    "scope": {
+      "tenant": "g2-test",
+      "chain": "g2-survivable-retirement"
+    },
+    "agent": {
+      "id": "g2-historical-agent",
+      "model": null,
+      "principal": "SERVICE"
+    },
+    "action": {
+      "id": "inventory.read",
+      "canonical": "inventory.read",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:c22f2c182ae5abc82cea24a39f638820f6906714011f93805f00a9fc45225122",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "g2-test",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 0,
+      "prevHash": null,
+      "hash": "sha256:f36712f339b324e68774417b4eed41970d95720a7d665b7798af4ea2539eec39"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "g2-receipt-retired",
+      "value": "GzJaRspvr2jRV70YCBJcqedwHtZkk0MpkOdDD8u18uqt1MW42iDPiwt4uob3C1uA8Yl0NGaF3qAsKOuT3gKpDQ=="
+    }
+  },
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "g2-receipt-1",
+    "ts": "2026-01-01T00:00:00.250Z",
+    "scope": {
+      "tenant": "g2-test",
+      "chain": "g2-survivable-retirement"
+    },
+    "agent": {
+      "id": "g2-historical-agent",
+      "model": null,
+      "principal": "SERVICE"
+    },
+    "action": {
+      "id": "inventory.read",
+      "canonical": "inventory.read",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:41f0c27c00e8018f7715b5f50f67b5b54c229c1b843a014152785d9005f58fde",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "g2-test",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 1,
+      "prevHash": "sha256:f36712f339b324e68774417b4eed41970d95720a7d665b7798af4ea2539eec39",
+      "hash": "sha256:919c44ad3ecd48de7047eac0bf0aeaedc6e03e8669a8902ef3db7633e9b8ed97"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "g2-receipt-retired",
+      "value": "oGUG2mLjXqysZMEtCrXYCHyZ+R/XcsANG6XucCIRWqZKUXgq6riC9h6t8vAe7GSPp0RJLLJpeWu4wd/8+LqAAg=="
+    }
+  },
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "g2-receipt-2",
+    "ts": "2026-01-01T00:00:00.500Z",
+    "scope": {
+      "tenant": "g2-test",
+      "chain": "g2-survivable-retirement"
+    },
+    "agent": {
+      "id": "g2-historical-agent",
+      "model": null,
+      "principal": "SERVICE"
+    },
+    "action": {
+      "id": "inventory.read",
+      "canonical": "inventory.read",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:7fd97817c436e077f1a8c85323fa16339238d362f324d4e5e72f0c18d1474a25",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "g2-test",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 2,
+      "prevHash": "sha256:919c44ad3ecd48de7047eac0bf0aeaedc6e03e8669a8902ef3db7633e9b8ed97",
+      "hash": "sha256:b789cdfec5b4257fae7c62f9f0382860d10b92a95d05964ef095ce0da426b57b"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "g2-receipt-retired",
+      "value": "WiWO92rkPtW0XvJMZRJ9/iQW9IUoxo1Amswakhq7ecuAnv9a4CwKjp6FX3dOHyfa5m3sRUvcekGGvOMcQPRhDw=="
+    }
+  }
+]

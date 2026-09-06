@@ -1881,6 +1881,15 @@ const KNOCKOUTS = [
     suite: ["packages/evidence", "npm", ["test"]],
   },
   {
+    id: "p0g2-evidence-receipt-lifecycle-validfrom-carried",
+    control: "G2 — buildReceiptKeyring preserves an explicitly signed manifest validFrom in the historical SigningKeyLifecycle while leaving legacy absence absent; deleting the carriage would let a pre-activation checkpoint earn attribution. [proof: RES-PAR-G2-LIFECYCLE]",
+    file: "packages/evidence/src/trust.ts",
+    find: "    if (validFrom !== undefined) entry.validFrom = validFrom ?? null;",
+    replace: "    if (false) entry.validFrom = validFrom ?? null;",
+    kind: "tests",
+    suite: ["packages/evidence", "npm", ["test"]],
+  },
+  {
     id: "p05-gate-keyring-validfrom-carried",
     control: "P0-5 — createAlphaTrust carries the generated GATE activation into the live keyring; deleting it makes the registered resolver proof itself fail. [proof: RES-PAR-GATE-KEYRING]",
     file: "packages/gate/src/trust.ts",

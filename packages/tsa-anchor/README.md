@@ -1,11 +1,12 @@
 # noa-tsa-anchor
 
 Opt-in **independent anchoring** for `noa-receipt` witness anchors
-(`buildAnchor`/`anchorForChainHead`, `src/federation/anchor.ts` in the parent package). Two halves,
-both offline and both additive:
+(`buildAnchor`/`anchorForChainHead`, `src/federation/anchor.ts` in the parent package). Two additive
+halves whose trust decisions run offline:
 
 1. **RFC 3161 timestamps** — ask an independent Time-Stamping Authority for its attestation that a
-   signed anchor existed by a given time, and check that attestation structurally offline.
+   signed anchor existed by a given time, and authenticate that attestation offline against an
+   explicit caller trust policy.
 2. **Witness-quorum monitor** — read a pool of *published* witness anchors and report signed
    contradictions: one identity, two histories. Emits a proof object a third party re-checks itself.
 
@@ -46,13 +47,15 @@ own hash.
 
 ## What noa-tsa proves — and does not
 
-**TSA proves the anchor existed at time T — it does not prove receipts' own ts fields.**
+**An authenticated TSA token proves the anchor existed at time T — it does not prove receipts' own
+ts fields.**
 
 Precisely:
-- A TSA stamp is evidence that a specific signed anchor (frontier + witness signature) existed no
-  later than the time the TSA granted the request. It does **not** prove the anchor did not exist
-  even earlier, and it does **not** prove anything about the underlying receipt chain's own `ts`
-  fields, which remain signer-asserted (see the parent `THREAT-MODEL.md`).
+- A TSA stamp that passes authenticated verification is evidence that a specific signed anchor
+  (frontier + witness signature) existed no later than the time the TSA granted the request. It does
+  **not** prove the anchor did not exist even earlier, and it does **not** prove anything about the
+  underlying receipt chain's own `ts` fields, which remain signer-asserted (see the parent
+  `THREAT-MODEL.md`).
 - A chain with no witness anchor has no TSA coverage at all — this package only ever timestamps
   anchors that already went through the opt-in witness-federation path
   (`noa verify --anchors/--trust-set` in the parent package).
@@ -61,17 +64,37 @@ Precisely:
   token for the same digest cannot be accepted. `verifyStamp`, running offline against the stored
   bytes, has no original request to compare against and therefore does **not** re-check nonce
   freshness; that check is established once, by the client, at stamping time.
-- `noa-tsa verify` (and `verify.mjs`'s `verifyStamp`) is a **structural parse-and-compare**: it
-  recomputes the anchor hash, DER-parses the stored `.tsr`, and checks the token's own
-  `messageImprint` matches. It does **not** validate the CMS `SignerInfo` signature or the TSA's
-  own certificate chain — doing that trustworthily needs a pinned TSA CA root, the same class of
-  out-of-band trust input as the receipt keyring. For full cryptographic verification of a `.tsr`,
-  run:
-  ```bash
-  openssl ts -verify -digest <hex-digest-from-the-stamp-record> -in <path-to-tsr-bytes> -CAfile <tsa-ca.pem>
-  ```
-  where `<tsa-ca.pem>` is the issuing TSA's CA certificate, obtained out-of-band from the TSA
-  operator (the same pinning discipline as the receipt keyring).
+- A successful `stampAnchor`/`noa-tsa stamp` call means the response was structurally bound to the
+  request. It is **not** an authenticated TSA trust verdict. The stored record becomes evidence only
+  when `verifyStamp` returns `{ok:true, authenticated:true}` for the same anchor.
+- `verifyStamp` has one authenticated success path. It requires an absolute OpenSSL 3 executable,
+  caller-pinned CA roots, at least one allowed TSTInfo policy OID, complete CRLs under the explicit
+  `crl-check-all` policy, and a trusted verification instant with a bounded future skew. It then
+  verifies the SHA-256 `messageImprint`, exactly one CMS `SignerInfo`, the CMS signature, the
+  authenticated TSTInfo bytes, the embedded signer certificate and chain, timestamp-signing EKU,
+  certificate validity and CRL status at authenticated `genTime`, and the algorithm/security-level
+  constraints. Missing trust, policy, revocation evidence, clock policy, or OpenSSL fails closed
+  with a stable code.
+- The signer certificate must be embedded in the CMS token. `untrustedCertificates` may contain
+  chain intermediates only; it cannot supply an omitted signer certificate. Trust roots are always
+  caller-supplied and are never inferred from the operating system. The compatible
+  `certReq:false`/`--no-cert-req` request option remains available, but its result can authenticate
+  only if that TSA embeds the signer certificate anyway.
+- The message imprint is fixed to SHA-256. CMS signer digests are restricted to SHA-256/384/512,
+  signature algorithms to the explicit RSA PKCS#1 v1.5/ECDSA/EdDSA OID allowlist in `verify.mjs`,
+  and OpenSSL authentication level 2. RSASSA-PSS is refused until its hash, MGF, salt-length, and
+  trailer parameters have a separately enforced profile. Revocation support is deliberately
+  CRL-only and requires status for the whole chain; the verifier does not fetch OCSP or CRLs from
+  the network.
+- `clock.now` is a caller-supplied UTC RFC 3339 instant. `clock.maxFutureSkewMs` is required and is
+  capped at 300000 ms; a signed `genTime` beyond that bound is rejected. Certificate validity and
+  CRL checks use the authenticated `genTime`, not the ambient wall clock. Because OpenSSL's
+  verification instant has one-second resolution, tokens with fractional `genTime` are rejected
+  instead of being rounded across a certificate or CRL boundary.
+- `inspectStamp` is the separate structural diagnostic API. It always returns
+  `authenticated:false`, has no `ok` field, and cannot upgrade a parse result into a trust verdict.
+  A manually run OpenSSL command is likewise diagnostic only and cannot change the API or CLI
+  result.
 
 ## Witness quorum: finding an equivocating fork
 
@@ -128,7 +151,7 @@ result reports `transferable` separately from `ok` (see the honest limits below)
   that any forwarder can recompute: it catches drift and accident, not an active attacker.
 - **A TSA URL is a claim, not evidence.** It is not inside an RFC 3161 token, so it cannot be
   re-derived; it is carried as `tsaUrlClaimed` and never sits beside `verified:true` as if attested.
-  Only `verified` and `genTime` are re-derived from the token bytes.
+  Only an authenticated `verified` result and its `genTime` are re-derived from the token bytes.
 
 Every result object carries these limits in its own `undetected` array, including a `CLEAN` one —
 which is exactly when a reader is most likely to over-read the answer.
@@ -164,14 +187,36 @@ floor is **refused**, not silently clamped.
 - `stampAnchor(anchor, { tsaUrl, certReq?, includeNonce?, nonceValue?, timeoutMs? }) -> Promise<StampRecord>`
   — requests a timestamp; fail-closed (`TsaError`) on any transport failure, non-grant, or a
   response whose messageImprint does not match the submitted anchor hash.
-- `verifyStamp(anchor, stampRecord) -> { ok, reason, genTime?, hashAlgOid? }` — never throws.
+- `verifyStamp(anchor, stampRecord, verification) -> { ok, authenticated, code, reason, ... }` —
+  never throws. `verification` is:
+  ```js
+  {
+    opensslExecutable: "/absolute/path/to/openssl", // OpenSSL 3.x
+    trustRoots: rootsPem,                            // PEM string or Buffer
+    allowedPolicyOids: ["1.2.3.4.5"],
+    revocation: { mode: "crl-check-all", crls: crlsPem },
+    clock: { now: "2026-06-23T10:30:00Z", maxFutureSkewMs: 300000 },
+    untrustedCertificates: intermediatesPem,         // optional; never the signer
+    timeoutMs: 5000                                  // optional, 100..30000
+  }
+  ```
+- `inspectStamp(anchor, stampRecord) -> { structurallyValid, authenticated:false, code, ... }` —
+  unauthenticated diagnostics only; there is intentionally no `ok` field.
 - `scanForEquivocation(anchors, trustSet, opts?) -> ScanResult` — the monitor. `opts` accepts
   `history` (from `historyFromReceipts`), `stamps` (a `.tsr` sidecar map, so each branch of a finding
-  carries an independent TSA time), and the DoS bounds `maxAnchors` / `maxHistory` / `maxFindings` /
-  `maxBranches`. The primary field is **`clean`**, true only when the scan ran to completion AND
-  found nothing — malformed input leaves it `false`, so a caller reading nothing else still fails
-  closed. Never throws.
-- `verifyEquivocationProof(finding, trustSet) -> { ok, transferable, reason, ... }` — never throws.
+  carries an independent TSA time), `tsaVerification` (the same mandatory verification object), and
+  the DoS bounds `maxAnchors` / `maxHistory` / `maxFindings` / `maxBranches`. Without
+  `tsaVerification`, attached stamps remain unverified. The primary field is **`clean`**, true only
+  when the scan ran to completion AND found nothing — malformed input leaves it `false`, so a caller
+  reading nothing else still fails closed. Attached-stamp verification admits at most 16 unique
+  canonical anchors, reuses one exact anchor/TSR verdict wherever that evidence repeats, and shares
+  a fixed 80-process/30000-ms aggregate budget. Never throws.
+- `verifyEquivocationProof(finding, trustSet, {tsaVerification}?) -> { ok, transferable, reason, ... }`
+  — never throws. It independently re-verifies attached token bytes; a carried `verified` claim is
+  never trusted. It refuses more than 16 carried branches before OpenSSL, deduplicates identical
+  anchor/TSR jobs, and uses the same fixed aggregate budget. Resource exhaustion leaves every
+  affected stamp unattested and returns `resourceLimited:true` / `VERIFICATION_RESOURCE_LIMIT`; it
+  does not erase a separately valid signed-contradiction verdict.
 - `checkpointCorroboration(checkpoint, anchors, trustSet, opts?) -> CorroborationResult` — how many
   **distinct** pinned witnesses independently anchored the head a checkpoint endorses. Optional
   `freshness: { now, maxAgeMs, skewMs? }`; without it, `freshnessEnforced:false` says so and an old
@@ -187,18 +232,65 @@ floor is **refused**, not silently clamped.
 
 ```bash
 noa-tsa stamp       --anchors anchors.json --tsa-url http://freetsa.org/tsr [--out anchors.tsr.json] [--no-cert-req] [--no-nonce]
-noa-tsa verify      --anchors anchors.json --tsr anchors.tsr.json
-noa-tsa fork-scan   --anchors pool.json --trust-set trust-set.json [--chain receipts.json] [--tsr anchors.tsr.json]
+noa-tsa verify      --anchors anchors.json --tsr anchors.tsr.json \
+  --openssl /absolute/path/to/openssl --tsa-trust-roots tsa-roots.pem \
+  --tsa-policy 1.2.3.4.5 --tsa-crls tsa-chain.crl.pem \
+  --tsa-now 2026-06-23T10:30:00Z --tsa-max-future-skew-ms 300000 \
+  [--tsa-command-timeout-ms 30000]
+noa-tsa fork-scan   --anchors pool.json --trust-set trust-set.json [--chain receipts.json] \
+                    [--tsr anchors.tsr.json <TSA verification flags> [--tsa-command-timeout-ms 30000]]
 noa-tsa corroborate --checkpoint checkpoint.json --anchors pool.json --trust-set trust-set.json \
-                    [--now 2026-06-23T10:30:00Z --max-age-ms 86400000] [--tsr anchors.tsr.json]
+                    [--now 2026-06-23T10:30:00Z --max-age-ms 86400000] \
+                    [--tsr anchors.tsr.json <TSA verification flags> [--tsa-command-timeout-ms 30000]]
 ```
 
+`<TSA verification flags>` means the six required flags shown on `verify`; optional
+`--tsa-untrusted intermediate-chain.pem` supplies only intermediate certificates. Supplying
+`--tsr` to either monitor command without all six required values is a usage error. The CLI never
+falls back to structural inspection and never exits 0 for an unauthenticated stamp.
+
+`verify`, plus `fork-scan` and `corroborate` whenever `--tsr` is present, hash the complete anchor
+input before starting OpenSSL and admit at most **16 unique anchor contents** per command. Entries
+with the same canonical `anchorHash` identity retain their original output positions and order, but
+identical anchor/TSR evidence shares one cryptographic verdict; repeated branches cannot multiply
+OpenSSL work. Seventeen or more unique anchors are refused in full before any OpenSSL process starts, with
+`VERIFICATION_RESOURCE_LIMIT` and exit 7. The ceiling has no override: callers verifying a larger
+collection with `verify` must submit explicit batches of at most 16 and require every batch to exit
+0. Do not split a fork scan merely to fit this TSA bound, because a contradiction may straddle the
+batches. Scan the complete pool without `--tsr`, then authenticate the bounded anchors carried by
+each resulting finding with explicit `verify` batches.
+
+Each admitted unique anchor receives exactly five OpenSSL process credits, for a command maximum
+of 80. All credits also share one monotonic aggregate deadline: 30000 ms by default, optionally set
+with `--tsa-command-timeout-ms` to an integer from 100 through 30000. This flag bounds the whole
+OpenSSL phase and does not alter the trusted RFC 3161 `--tsa-now` value. Deadline or process-credit
+exhaustion stops every remaining unique anchor without starting more processes and returns
+`VERIFICATION_RESOURCE_LIMIT` with exit 7; work is never silently truncated into success.
+`--tsa-command-timeout-ms` is accepted on a monitor command only together with `--tsr`.
+
+The library's multi-stamp paths enforce the same boundary without making the CLI capability a
+public option: `scanForEquivocation` and `checkpointCorroboration` mint a private fixed budget when
+called directly, while `verifyEquivocationProof` also refuses proofs carrying more than 16 branches.
+The capability token and its state are not exported from the package API, and an ordinary lookalike
+object fails closed rather than extending work or manufacturing a verified result.
+
+All TSA verification values are trusted verifier configuration: the OpenSSL executable itself,
+CA roots, allowed policy OID, CRLs, and clock value must come from the verifier's controlled
+configuration, not from the token, sidecar, or TSA response. For a historical `genTime`, the CRL
+bundle must contain archived issuer CRLs whose validity intervals cover that instant and status for
+every non-trust-anchor certificate in the chain. This package performs no network retrieval or
+historical-CRL discovery; missing, stale, or not-yet-valid CRL evidence fails closed.
+
 Exit codes: **`0` means CLEAN and nothing else** · `1` MISMATCH (verify: an anchor is unstamped or
-its stamp does not match; corroborate: quorum not met; fork-scan: `NO_EVIDENCE` or
-`INCOMPLETE_POOL` — the scan ran but earned no clean result) · `2` TRANSPORT (stamp: the TSA request
+its stamp does not match; corroborate: quorum not met) · `2` TRANSPORT (stamp: the TSA request
 failed) · `3` MALFORMED (bad JSON/DER input, an unusable trust-set, or a `--chain` that does not
 verify) · `4` USAGE, including an empty `--anchors` array — "did nothing" is not "succeeded" ·
-`5` EQUIVOCATION (a signed contradiction was found — deliberately distinct from `0`).
+`5` EQUIVOCATION (a signed contradiction was found) · `6` NO_CLEAN_RESULT (`fork-scan` admitted no
+evidence or could not read the complete pool) · `7` RESOURCE_LIMIT.
+
+**Exit 7** is `RESOURCE_LIMIT`: authenticated verification exceeded its unique-anchor, aggregate
+deadline, or OpenSSL-process bound. It is distinct from both a cryptographic mismatch and malformed
+input so automation cannot mistake incomplete verification for a substantive negative or success.
 
 `--chain` is **verified, not trusted**: the presented receipts are run through the kernel's own
 offline `verifyChain` and the (chain, seq, hash) derivation must be total. A chain that does not
@@ -215,22 +307,35 @@ unable to tell them apart.
 `--now` and `--max-age-ms` must be supplied together: half a freshness policy is an operator error,
 and treating it as "no freshness" would silently re-open the replay gap the flag exists to close.
 
-**Public TSA reachability is UNVERIFIED by this package's own test suite** (all tests run against
-an in-process mock TSA — zero network dependency). Before relying on a public endpoint such as
+**Public TSA reachability is UNVERIFIED by this package's own test suite**. Transport tests use an
+in-process mock, while authenticated tests generate a local CA, timestamp signer, CRLs, and signed
+tokens with OpenSSL 3. No test contacts an external TSA. Before relying on a public endpoint such as
 `http://freetsa.org/tsr` in a real workflow, confirm it is reachable from your environment:
 ```bash
 curl -sS -X POST -H 'content-type: application/timestamp-query' --data-binary @/dev/null -o /dev/null -w '%{http_code}\n' http://freetsa.org/tsr
 ```
-If it is unreachable, run your own TSA (`openssl ts` supports acting as one) or use this package's
-mock TSA (`test/mock-tsa-server.mjs`) for local development.
+If it is unreachable, run your own TSA (`openssl ts` supports acting as one). The package's mock
+TSA (`test/mock-tsa-server.mjs`) is for request/transport development only; its intentionally
+unsigned tokens are rejected by authenticated verification.
 
-## Zero runtime dependencies beyond noa-receipt
+## Cryptographic backend and dependencies
 
 This package ships its own minimal RFC 3161 DER (ASN.1) encoder/decoder (`src/der.mjs`) rather
-than a general-purpose ASN.1 library or a shell-out to the `openssl` CLI for request construction
-— see the parent repo's `src/cose/cbor.ts` for the same minimal-wire-format-encoder discipline
-applied to CBOR. Full CMS/X.509 signature verification is intentionally NOT reimplemented; use the
-documented `openssl ts -verify` command above.
+than a general-purpose ASN.1 library, and it has no npm runtime dependency beyond `noa-receipt`.
+Full CMS/X.509/PKIX/CRL verification is not reimplemented. `verifyStamp` synchronously binds its
+verdict to the maintained OpenSSL 3 command-line verifier, preserving the package's existing
+synchronous API while avoiding invented cryptography.
+
+The binding uses `shell:false`, fixed argument vectors, an absolute caller-selected executable, a
+private fixed provider configuration, bounded timeout and output, and a mode-0700 temporary
+workspace whose files are mode 0600 and are removed before return. OpenSSL absence, a non-3.x
+version, a process failure, excess output, timeout, or cleanup failure all fail closed. OpenSSL exit
+status is the security decision; parsed error text only selects a more useful stable failure code.
+The CLI additionally mints an internal opaque resource capability, unavailable through the public
+package API or ordinary verification options, and passes it through every OpenSSL invocation in one
+TSA-enabled command. This binds all unique-anchor work to the same monotonic deadline and process
+credits rather than resetting a per-process timeout for every anchor. Its private state is held by
+a weak registry, so discarded command capabilities do not accumulate in a long-lived verifier.
 
 ## Development
 
@@ -239,22 +344,23 @@ THIS repository's kernel rather than a registry copy of it. Run `npm run build` 
 before `npm install` here — `import "noa-receipt"` resolves through the root's `main: dist/src/index.js`,
 which exists only after that build.
 
+`node scripts/knockout-cms-verification.mjs` builds fresh private package copies and independently
+removes CMS authentication, content-hash deduplication, the unique-anchor preflight, and aggregate
+deadline propagation. Each corresponding attack test must turn red. It never edits the working
+source.
+
 ## Releasing
 
-Publication is a tag-triggered workflow, `.github/workflows/publish-tsa.yml`, not a hand-run
-`npm publish`. Pushing a `tsa-v<version>` tag runs, in order: the tag/manifest version match, the
-kernel-release-parity gate, this package's own suite, the published-surface lint, the rewrite of
-`noa-receipt: file:../..` to the published registry range, and the tarball gate that reads the
-manifest back OUT of the bytes npm would upload. Only then does it publish, over OIDC trusted
-publishing with provenance and no token.
+Publication is currently **frozen**. `.github/workflows/publish-tsa.yml` is a permanently
+quarantined legacy workflow: manual dispatch only reports `RELEASE_FROZEN` and exits unsuccessfully.
+It cannot build, stage, or publish candidate bytes. No tag, branch, package script, or local test in
+this repository is release authority.
 
-Two things that must be true before that tag is pushed, and are gated rather than remembered:
-
-- `noa-receipt` at the root's current version must be **on the registry**. This package's shipped
-  dependency is a registry range; a range that resolves to nothing is an uninstallable package.
-- The kernel in this tree must match the kernel behind that version string
-  (`npm run lint:release-parity`). "Changed but not bumped" still resolves, which is exactly why it
-  needs its own gate.
+A future release controller must use a new workflow and independently establish its own reviewed
+commit binding, protected environment, least-privilege provider permissions, immutable staged
+tarball, dependency availability and kernel parity, package tests, published-surface checks, and
+provenance policy. Until such a controller exists and passes its separate release gate, local
+package and tarball results are candidate evidence only and do not mean this package was published.
 
 ## What this package does not claim
 

@@ -1,0 +1,12 @@
+{
+  "spec": "noa.checkpoint/0.1",
+  "chain": "g2-survivable-retirement",
+  "highestSeq": 2,
+  "headHash": "sha256:b789cdfec5b4257fae7c62f9f0382860d10b92a95d05964ef095ce0da426b57b",
+  "ts": "2026-01-01t00:00:01.000z",
+  "sig": {
+    "alg": "ed25519",
+    "kid": "g2-checkpoint-current",
+    "value": "4eleRTjaHRpPOoWTnVUKUM8UDyYtzGrQJXDv8LrL5mQcaGAssuXe+bxJoHhUUTLPxspcM/xzaW0DXSy+3uwcDg=="
+  }
+}

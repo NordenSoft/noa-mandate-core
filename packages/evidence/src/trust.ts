@@ -215,7 +215,7 @@ export function buildReceiptKeyring(manifest: ManifestDoc): SigningKeyLifecycle 
   // definition — and the returned keyring is a fresh graph of primitives that shares nothing with
   // the caller's object. An empty keyring stays the fail-closed outcome for anything this loop
   // cannot read.
-  const out: Record<string, { publicKey: string; retiredAt: string | null }> = {};
+  const out: Record<string, { publicKey: string; validFrom?: string | null; retiredAt: string | null }> = {};
   const keys = manifest === null || typeof manifest !== "object" ? undefined : manifest.keys;
   if (!Array.isArray(keys)) {
     return { spec: SIGNING_KEY_LIFECYCLE_SPEC, keys: out };
@@ -227,8 +227,17 @@ export function buildReceiptKeyring(manifest: ManifestDoc): SigningKeyLifecycle 
     const publicKey = k.publicKey;
     if (typeof publicKey !== "string") continue;
     const kid = k.kid;
+    const validFrom = k.validFrom;
     const revokedAt = k.revokedAt;
-    out[kid] = { publicKey, retiredAt: revokedAt ?? null };
+    const entry: { publicKey: string; validFrom?: string | null; retiredAt: string | null } = {
+      publicKey,
+      retiredAt: revokedAt ?? null,
+    };
+    // Historical attribution may enforce a lower bound only when the signed source manifest
+    // declared one. Old/direct-call manifests without validFrom keep the legacy unbounded lower
+    // end; synthesizing a default here would fabricate activation history.
+    if (validFrom !== undefined) entry.validFrom = validFrom ?? null;
+    out[kid] = entry;
   }
   return { spec: SIGNING_KEY_LIFECYCLE_SPEC, keys: out };
 }

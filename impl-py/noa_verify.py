@@ -559,24 +559,30 @@ def checkpoint_hash_input(cp):
 
 _CHECKPOINT_KEYS = frozenset(["spec", "chain", "highestSeq", "headHash", "ts", "sig"])
 
-def _verify_checkpoint(cp, keyring):
+def _checkpoint_shape_ok(cp):
     # STRICT structural validation, parity with src/verify.ts verifyCheckpoint: a checkpoint is a
     # SIGNED trust statement → additionalProperties:false + typed/format fields. Mismatch ⇒ "bad" (TAMPERED).
-    if not isinstance(cp, dict): return "bad"
-    if any(k not in _CHECKPOINT_KEYS for k in cp.keys()): return "bad"
-    if cp.get("spec") != "noa.checkpoint/0.1": return "bad"
-    if not isinstance(cp.get("chain"), str) or not cp.get("chain"): return "bad"
+    if not isinstance(cp, dict): return False
+    if any(k not in _CHECKPOINT_KEYS for k in cp.keys()): return False
+    if set(cp.keys()) != _CHECKPOINT_KEYS: return False
+    if cp.get("spec") != "noa.checkpoint/0.1": return False
+    if not isinstance(cp.get("chain"), str) or not cp.get("chain"): return False
     hs = cp.get("highestSeq")
-    if not isinstance(hs, int) or isinstance(hs, bool) or hs < 0 or hs > _SAFE_INT_MAX: return "bad"
-    if not isinstance(cp.get("headHash"), str) or not _HASH_RE.fullmatch(cp.get("headHash")): return "bad"
-    if not isinstance(cp.get("ts"), str) or not _is_rfc3339_instant(cp.get("ts")): return "bad"
+    if not isinstance(hs, int) or isinstance(hs, bool) or hs < 0 or hs > _SAFE_INT_MAX: return False
+    if not isinstance(cp.get("headHash"), str) or not _HASH_RE.fullmatch(cp.get("headHash")): return False
+    if not isinstance(cp.get("ts"), str) or not _is_rfc3339_instant(cp.get("ts")): return False
     sig = cp.get("sig")
     # sig sub-object is ALSO strict (top-level strictness alone isn't enough): exactly {alg,kid,value}, alg="ed25519" — closes a
     # smuggled-field channel inside the SIGNED surface + an unvalidated alg, parity with src/verify.ts.
-    if not isinstance(sig, dict): return "bad"
-    if any(k not in ("alg", "kid", "value") for k in sig.keys()): return "bad"
-    if sig.get("alg") != "ed25519": return "bad"
-    if not isinstance(sig.get("kid"), str) or not sig.get("kid") or not isinstance(sig.get("value"), str) or not sig.get("value"): return "bad"
+    if not isinstance(sig, dict): return False
+    if set(sig.keys()) != {"alg", "kid", "value"}: return False
+    if sig.get("alg") != "ed25519": return False
+    if not isinstance(sig.get("kid"), str) or not sig.get("kid") or not isinstance(sig.get("value"), str) or not sig.get("value"): return False
+    return True
+
+def _verify_checkpoint(cp, keyring):
+    if not _checkpoint_shape_ok(cp): return "bad"
+    sig = cp["sig"]
     pub = (keyring or {}).get(sig["kid"])
     if not pub: return "unverified"
     try:
@@ -719,31 +725,250 @@ def verify_chain(receipts, keyring=None, identity_manifest=None, checkpoint=None
         detail += " | " + " | ".join(warnings)
     return ("VALID" if have_keyring else "UNVERIFIED"), detail
 
+# ── Versioned survivable historical verification ────────────────────────────
+_HISTORICAL_SPEC = "noa.historical-verification/0.1"
+_LIFECYCLE_SPEC = "noa.signing-key-lifecycle/0.1"
+
+def _historical_dimensions(integrity, completeness, attribution, retirement, witness, availability):
+    return {
+        "integrity": integrity,
+        "completeness": completeness,
+        "attribution": attribution,
+        "organizationalIndependence": "UNVERIFIED",
+        "evidence": {
+            "retirement": retirement,
+            "witness": witness,
+            "availability": availability,
+        },
+    }
+
+def _historical_result(classification, code, dimensions, chain, count, attributed_through_seq=None, as_of=None):
+    return {
+        "spec": _HISTORICAL_SPEC,
+        "policy": {"verifierVersion": _HISTORICAL_SPEC, "purpose": "historical-audit"},
+        "classification": classification,
+        "code": code,
+        "dimensions": dimensions,
+        "chain": chain,
+        "count": count,
+        "attributedThroughSeq": attributed_through_seq,
+        "asOf": as_of,
+    }
+
+def _instant(value):
+    """Return an exact RFC 3339 instant in nanoseconds, or None for a leap second/invalid value."""
+    if not _is_rfc3339_instant(value):
+        return None
+    second = int(value[17:19])
+    # The TypeScript reference uses Date.parse for the existing leap-second refusal. Keep that
+    # behavior while avoiding datetime.fromisoformat's truncation beyond microseconds.
+    if second > 59:
+        return None
+
+    year, month, day = int(value[0:4]), int(value[5:7]), int(value[8:10])
+    adjusted_year = year - (1 if month <= 2 else 0)
+    era = adjusted_year // 400
+    year_of_era = adjusted_year - era * 400
+    month_position = month + (-3 if month > 2 else 9)
+    day_of_year = (153 * month_position + 2) // 5 + day - 1
+    day_of_era = year_of_era * 365 + year_of_era // 4 - year_of_era // 100 + day_of_year
+    days_since_epoch = era * 146097 + day_of_era - 719468
+
+    zone_index = 19
+    fractional_nanoseconds = 0
+    if value[19] == ".":
+        zone_index = 20
+        while value[zone_index].isdigit():
+            zone_index += 1
+        fractional = value[20:zone_index]
+        fractional_nanoseconds = int(fractional + "0" * (9 - len(fractional)))
+
+    offset_seconds = 0
+    if value[zone_index] not in ("Z", "z"):
+        offset_seconds = (int(value[zone_index + 1:zone_index + 3]) * 60 + int(value[zone_index + 4:zone_index + 6])) * 60
+        if value[zone_index] == "-":
+            offset_seconds = -offset_seconds
+
+    local_seconds = (
+        days_since_epoch * 86400
+        + int(value[11:13]) * 3600
+        + int(value[14:16]) * 60
+        + second
+    )
+    return (local_seconds - offset_seconds) * 1_000_000_000 + fractional_nanoseconds
+
+def _parse_historical_keyring(document):
+    if not isinstance(document, dict):
+        return None
+    looks_lifecycle = document.get("spec") == _LIFECYCLE_SPEC or ("keys" in document and not isinstance(document.get("keys"), str))
+    if not looks_lifecycle:
+        if any(not isinstance(k, str) or not isinstance(v, str) or not v for k, v in document.items()):
+            return None
+        return {"keyring": dict(document), "retired": {}, "validFrom": {}, "retiredAt": {}, "lifecycle": False}
+    if set(document.keys()) != {"spec", "keys"} or document.get("spec") != _LIFECYCLE_SPEC:
+        return None
+    entries = document.get("keys")
+    if not isinstance(entries, dict) or not entries:
+        return None
+    keyring = {}
+    retired = {}
+    valid_from = {}
+    retired_at = {}
+    for kid, entry in entries.items():
+        fields = set(entry.keys()) if isinstance(entry, dict) else set()
+        if (not isinstance(kid, str) or not isinstance(entry, dict)
+                or fields not in ({"publicKey", "retiredAt"}, {"publicKey", "validFrom", "retiredAt"})):
+            return None
+        public_key = entry.get("publicKey")
+        activation = entry.get("validFrom") if "validFrom" in entry else None
+        retirement = entry.get("retiredAt")
+        if not isinstance(public_key, str) or not public_key:
+            return None
+        if activation is not None:
+            if not isinstance(activation, str) or not _is_rfc3339_instant(activation) or _instant(activation) is None:
+                return None
+        if retirement is not None:
+            if not isinstance(retirement, str) or not _is_rfc3339_instant(retirement) or _instant(retirement) is None:
+                return None
+            retired[kid] = True
+        if activation is not None and retirement is not None and _instant(activation) >= _instant(retirement):
+            return None
+        keyring[kid] = public_key
+        valid_from[kid] = activation
+        retired_at[kid] = retirement
+    return {"keyring": keyring, "retired": retired, "validFrom": valid_from, "retiredAt": retired_at, "lifecycle": True}
+
+def verify_historical_chain(receipts, receipt_root, checkpoint=None, checkpoint_root=None, identity_manifest=None):
+    """`noa.historical-verification/0.1`; never grants current authority to a retired key."""
+    witness = "NOT_PROVIDED" if checkpoint is None else "PROVIDED"
+    availability = "NOT_PROVIDED" if checkpoint is None else "AVAILABLE"
+    chain_id = receipts[0].get("scope", {}).get("chain") if isinstance(receipts, list) and receipts and isinstance(receipts[0], dict) else None
+    count = len(receipts) if isinstance(receipts, list) else 0
+    receipt_trust = _parse_historical_keyring(receipt_root)
+    if receipt_trust is None:
+        return _historical_result("INVALID", "RECEIPT_ROOT_INVALID", _historical_dimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", "NOT_PROVIDED", witness, availability), None, 0)
+    retirement = "PROVIDED" if receipt_trust["lifecycle"] else "NOT_PROVIDED"
+
+    # Retained public material is passed only to the existing integrity verifier with no checkpoint.
+    # Current-use callers still pass the lifecycle document to their authorization surface and refuse
+    # retired keys; this explicit historical API is the sole static projection.
+    status, _ = verify_chain(receipts, receipt_trust["keyring"], identity_manifest, None)
+    if status != "VALID":
+        if status == "TAMPERED":
+            return _historical_result("INVALID", "RECEIPT_INTEGRITY_FAILURE", _historical_dimensions("BROKEN", "UNANSWERED", "UNATTRIBUTABLE", retirement, witness, availability), chain_id, count)
+        if status == "UNTRUSTED":
+            return _historical_result("INVALID", "RECEIPT_IDENTITY_UNTRUSTED", _historical_dimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", retirement, witness, availability), chain_id, count)
+        return _historical_result("INVALID", "RECEIPT_MALFORMED", _historical_dimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", retirement, witness, availability), chain_id, count)
+
+    by_seq = {r["chain"]["seq"]: r for r in receipts}
+    head = by_seq[len(receipts) - 1]
+    if checkpoint is None:
+        return _historical_result("UNVERIFIED", "NO_WITNESS", _historical_dimensions("INTACT", "UNANSWERED", "UNATTRIBUTABLE", retirement, "NOT_PROVIDED", "NOT_PROVIDED"), chain_id, count)
+    if checkpoint_root is None:
+        return _historical_result("UNVERIFIED", "WITNESS_ROOT_NOT_PROVIDED", _historical_dimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", retirement, "PROVIDED", "AVAILABLE"), chain_id, count)
+
+    witness_trust = _parse_historical_keyring(checkpoint_root)
+    if witness_trust is None:
+        return _historical_result("UNVERIFIED", "WITNESS_ROOT_INVALID", _historical_dimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", retirement, "PROVIDED", "AVAILABLE"), chain_id, count)
+    if not _checkpoint_shape_ok(checkpoint):
+        return _historical_result("INVALID", "WITNESS_MALFORMED", _historical_dimensions("BROKEN", "UNANSWERED", "UNATTRIBUTABLE", retirement, "PROVIDED", "AVAILABLE"), chain_id, count)
+    cpv = _verify_checkpoint(checkpoint, witness_trust["keyring"])
+    if cpv == "unverified":
+        return _historical_result("UNVERIFIED", "WITNESS_KEY_NOT_TRUSTED", _historical_dimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", retirement, "PROVIDED", "AVAILABLE"), chain_id, count)
+    if cpv != "ok":
+        return _historical_result("INVALID", "WITNESS_INTEGRITY_FAILURE", _historical_dimensions("BROKEN", "UNANSWERED", "UNATTRIBUTABLE", retirement, "PROVIDED", "AVAILABLE"), chain_id, count)
+
+    witness_kid = checkpoint["sig"]["kid"]
+    witness_public = witness_trust["keyring"].get(witness_kid)
+    try:
+        # The decoded canonical Ed25519 material, not the label or raw base64 spelling, is the identity.
+        witness_material = spki_to_raw(witness_public)
+        same_key = any(
+            witness_kid == r["sig"]["kid"]
+            or witness_material == spki_to_raw(receipt_trust["keyring"][r["sig"]["kid"]])
+            for r in receipts
+        )
+    except Exception:
+        return _historical_result("UNVERIFIED", "WITNESS_ROOT_INVALID", _historical_dimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", retirement, "PROVIDED", "AVAILABLE"), chain_id, count)
+    if same_key:
+        return _historical_result("UNVERIFIED", "WITNESS_KEY_NOT_SEPARATE", _historical_dimensions("INTACT", "UNANSWERED", "UNATTRIBUTABLE", retirement, "PROVIDED", "AVAILABLE"), chain_id, count)
+    if witness_trust["retired"].get(witness_kid):
+        return _historical_result("UNVERIFIED", "WITNESS_KEY_RETIRED", _historical_dimensions("INTACT", "UNANSWERED", "UNATTRIBUTABLE", retirement, "PROVIDED", "AVAILABLE"), chain_id, count)
+
+    if checkpoint["chain"] != chain_id:
+        return _historical_result("CONFLICT", "CHECKPOINT_CONFLICT", _historical_dimensions("INTACT", "CONFLICT", "UNATTRIBUTABLE", retirement, "PROVIDED", "AVAILABLE"), chain_id, count)
+    cp_seq = checkpoint["highestSeq"]
+    if cp_seq > head["chain"]["seq"]:
+        # Missing relative to an authenticated frontier does not prove who omitted bytes or why.
+        return _historical_result("CONFLICT", "CHECKPOINT_AHEAD", _historical_dimensions("INTACT", "CONFLICT", "UNATTRIBUTABLE", retirement, "PROVIDED", "MISSING_RELATIVE_TO_CHECKPOINT"), chain_id, count)
+    checkpointed = by_seq.get(cp_seq)
+    if checkpointed is None or checkpointed["chain"]["hash"] != checkpoint["headHash"]:
+        return _historical_result("CONFLICT", "CHECKPOINT_CONFLICT", _historical_dimensions("INTACT", "CONFLICT", "UNATTRIBUTABLE", retirement, "PROVIDED", "AVAILABLE"), chain_id, count)
+
+    completeness = "HEAD_ANCHORED" if cp_seq == head["chain"]["seq"] else "PREFIX_ANCHORED"
+    checkpoint_time = _instant(checkpoint["ts"])
+    checkpoint_before_activation = False
+    checkpoint_after_retirement = checkpoint_time is None
+    for seq in range(cp_seq + 1):
+        kid = by_seq[seq]["sig"]["kid"]
+        valid_from = receipt_trust["validFrom"].get(kid)
+        if valid_from is not None and (checkpoint_time is None or checkpoint_time < _instant(valid_from)):
+            checkpoint_before_activation = True
+        retired_at = receipt_trust["retiredAt"].get(kid)
+        if retired_at is not None and (checkpoint_time is None or checkpoint_time >= _instant(retired_at)):
+            checkpoint_after_retirement = True
+    if checkpoint_before_activation:
+        return _historical_result("UNVERIFIED", "CHECKPOINT_BEFORE_ACTIVATION", _historical_dimensions("INTACT", completeness, "UNATTRIBUTABLE", retirement, "PROVIDED", "AVAILABLE"), chain_id, count)
+    if checkpoint_after_retirement:
+        return _historical_result("UNVERIFIED", "CHECKPOINT_AFTER_RETIREMENT", _historical_dimensions("INTACT", completeness, "UNATTRIBUTABLE", retirement, "PROVIDED", "AVAILABLE"), chain_id, count)
+    return _historical_result(
+        "VERIFIED" if completeness == "HEAD_ANCHORED" else "PARTIAL",
+        completeness,
+        _historical_dimensions("INTACT", completeness, "ATTRIBUTABLE_AS_OF", retirement, "PROVIDED", "AVAILABLE"),
+        chain_id,
+        count,
+        cp_seq,
+        checkpoint["ts"],
+    )
+
 _EXIT = {"VALID": 0, "UNVERIFIED": 1, "TAMPERED": 2, "MALFORMED": 3, "UNTRUSTED": 5}
 
 def _main(argv):
     args = argv[1:]
-    receipts_path = keyring_path = identity_path = checkpoint_path = None
+    receipts_path = keyring_path = identity_path = checkpoint_path = checkpoint_keyring_path = None
+    purpose = "current"
     i = 0
-    usage = "usage: noa_verify.py <receipts.json> [keyring.json] [--identity <m.json>] [--checkpoint <cp.json>]\n"
+    usage = "usage: noa_verify.py <receipts.json> [keyring.json] [--purpose current|historical] [--identity <m.json>] [--checkpoint <cp.json>] [--checkpoint-keyring <k.json>]\n"
     while i < len(args):
         a = args[i]
         # A TRAILING --identity/--checkpoint with NO following path: silently setting the path
         # to None would DROP the security control (the manifest / tail-truncation check) and the verifier would
         # return VALID (exit 0) — a fail-OPEN where the TS CLI returns usage (exit 4). Emit usage + exit 4 to
         # match the TS CLI: a malformed invocation never silently weakens enforcement.
-        if a == "--identity":
+        if a == "--purpose":
+            if i + 1 >= len(args) or args[i + 1] not in ("current", "historical"): sys.stderr.write(usage); return 4
+            i += 1; purpose = args[i]
+        elif a == "--identity":
             if i + 1 >= len(args): sys.stderr.write(usage); return 4
             i += 1; identity_path = args[i]
         elif a == "--checkpoint":
             if i + 1 >= len(args): sys.stderr.write(usage); return 4
             i += 1; checkpoint_path = args[i]
+        elif a == "--checkpoint-keyring":
+            if i + 1 >= len(args): sys.stderr.write(usage); return 4
+            i += 1; checkpoint_keyring_path = args[i]
         elif a.startswith("--"): sys.stderr.write(f"unknown flag: {a}\n"); return 4
         elif receipts_path is None: receipts_path = a
         elif keyring_path is None: keyring_path = a
         else: sys.stderr.write(f"unexpected arg: {a}\n"); return 4
         i += 1
     if receipts_path is None:
+        sys.stderr.write(usage); return 4
+    if purpose == "historical" and keyring_path is None:
+        sys.stderr.write(usage); return 4
+    if purpose == "current" and checkpoint_keyring_path is not None:
+        sys.stderr.write(usage); return 4
+    if checkpoint_keyring_path is not None and checkpoint_path is None:
         sys.stderr.write(usage); return 4
     try:
         # ALL input files (incl. the auxiliary trust files) go through the strict parser — parity with the
@@ -754,6 +979,7 @@ def _main(argv):
         keyring = strict_load_text(open(keyring_path).read()) if keyring_path else None
         identity = strict_load_text(open(identity_path).read()) if identity_path else None
         checkpoint = strict_load_text(open(checkpoint_path).read()) if checkpoint_path else None
+        checkpoint_keyring = strict_load_text(open(checkpoint_keyring_path).read()) if checkpoint_keyring_path else None
     except Exception as e:
         print(json.dumps({"status": "MALFORMED", "detail": str(e)})); return _EXIT["MALFORMED"]
     # A trust/aux file that was GIVEN but loaded to a non-object (null/list/number/...) is an operator error,
@@ -768,6 +994,15 @@ def _main(argv):
         print(json.dumps({"status": "MALFORMED", "detail": "checkpoint must be an object"})); return _EXIT["MALFORMED"]
     if keyring_path is not None and not isinstance(keyring, dict):
         print(json.dumps({"status": "MALFORMED", "detail": "keyring must be an object (kid -> base64 SPKI)"})); return _EXIT["MALFORMED"]
+    if checkpoint_keyring_path is not None and not isinstance(checkpoint_keyring, dict):
+        print(json.dumps({"status": "MALFORMED", "detail": "checkpoint keyring must be an object"})); return _EXIT["MALFORMED"]
+    if purpose == "historical":
+        result = verify_historical_chain(receipts, keyring, checkpoint, checkpoint_keyring, identity)
+        print(json.dumps(result, indent=2))
+        if result["classification"] == "VERIFIED": return 0
+        if result["classification"] in ("PARTIAL", "UNVERIFIED"): return 1
+        if result["classification"] == "CONFLICT": return 7
+        return 8 if result["code"] in ("RECEIPT_INTEGRITY_FAILURE", "WITNESS_INTEGRITY_FAILURE") else 3
     status, detail = verify_chain(receipts, keyring, identity, checkpoint)
     print(json.dumps({"status": status, "detail": detail}, indent=2))
     return _EXIT[status]

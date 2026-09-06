@@ -498,6 +498,7 @@ const PROVENANCE_XATTR = "com.apple.provenance";
 const PROVENANCE_CLASSIFICATION = "NON_SEMANTIC_OS_MANAGED_PATH_LOCAL";
 const HASH_40 = /^[0-9a-f]{40}$/;
 const HASH_64 = /^[0-9a-f]{64}$/;
+const HASH_40_OR_64 = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const SHARED_INDEX_BASENAME = /^sharedindex\.(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const REF_NAME = /^refs\/[\x21-\x7e]+$/;
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -6739,12 +6740,15 @@ function validGitStatusConfig(value) {
 
 function evaluateSourceGitConfig(entries, label, options = {}) {
   const worktree = options.worktree ?? false;
+  const headRef = options.headRef ?? null;
   const values = new Map();
+  const keySpellings = new Map();
   for (const entry of entries) {
     const key = entry.key.toLowerCase();
     const list = values.get(key) ?? [];
     list.push(entry.value);
     values.set(key, list);
+    keySpellings.set(key, entry.key);
   }
   for (const [key, list] of values) {
     if (list.length !== 1) {
@@ -6759,6 +6763,18 @@ function evaluateSourceGitConfig(entries, label, options = {}) {
     if (list === undefined) return undefined;
     return list[0];
   };
+  const branchName = !worktree && typeof headRef === "string" && headRef.startsWith("refs/heads/")
+    ? headRef.slice("refs/heads/".length)
+    : null;
+  const upstreamKeys = branchName === null || branchName.length === 0
+    ? null
+    : Object.freeze({
+        merge: `branch.${branchName}.merge`,
+        remote: `branch.${branchName}.remote`,
+      });
+  const admittedUpstreamKeys = upstreamKeys === null
+    ? new Set()
+    : new Set([upstreamKeys.merge.toLowerCase(), upstreamKeys.remote.toLowerCase()]);
   for (const key of values.keys()) {
     if (key.startsWith("include.") || key.startsWith("includeif.")) {
       fail(
@@ -6770,6 +6786,7 @@ function evaluateSourceGitConfig(entries, label, options = {}) {
     if (
       !GIT_STATUS_CONFIG_KEY_SET.has(key) &&
       !GIT_LOCAL_CONFIG_NON_STATUS_KEYS.has(key) &&
+      !admittedUpstreamKeys.has(key) &&
       !key.startsWith("extensions.") &&
       !["core.attributesfile", "core.excludesfile"].includes(key)
     ) {
@@ -6778,6 +6795,45 @@ function evaluateSourceGitConfig(entries, label, options = {}) {
         `${label} config key ${key} is outside the closed isolated-capture policy`,
         { key },
       );
+    }
+  }
+  if (upstreamKeys !== null) {
+    const mergeKey = upstreamKeys.merge.toLowerCase();
+    const remoteKey = upstreamKeys.remote.toLowerCase();
+    const hasMerge = values.has(mergeKey);
+    const hasRemote = values.has(remoteKey);
+    if (hasMerge !== hasRemote) {
+      fail(
+        KNOCKOUT_WORKSPACE_ERROR_CODES.SOURCE_GIT_LAYOUT_UNSUPPORTED,
+        `${label} config must set the current branch upstream remote and merge together`,
+        { headRef },
+      );
+    }
+    if (hasMerge) {
+      if (
+        keySpellings.get(mergeKey) !== upstreamKeys.merge ||
+        keySpellings.get(remoteKey) !== upstreamKeys.remote
+      ) {
+        fail(
+          KNOCKOUT_WORKSPACE_ERROR_CODES.SOURCE_GIT_LAYOUT_UNSUPPORTED,
+          `${label} config current branch upstream keys are not canonical`,
+          { headRef },
+        );
+      }
+      if (single(remoteKey) !== "origin") {
+        fail(
+          KNOCKOUT_WORKSPACE_ERROR_CODES.SOURCE_GIT_LAYOUT_UNSUPPORTED,
+          `${label} config current branch upstream remote must be origin`,
+          { headRef },
+        );
+      }
+      if (single(mergeKey) !== headRef) {
+        fail(
+          KNOCKOUT_WORKSPACE_ERROR_CODES.SOURCE_GIT_LAYOUT_UNSUPPORTED,
+          `${label} config current branch upstream merge must match HEAD`,
+          { headRef },
+        );
+      }
     }
   }
   for (const key of ["core.excludesfile", "core.attributesfile"]) {
@@ -6875,6 +6931,7 @@ function rejectUnsupportedLocalGitSemantics(
   operationBudget,
   limits,
   byteBudget,
+  options = {},
 ) {
   const configFile = readBoundGitFile(commonBound, "config", "Git config", {
     byteBudget,
@@ -6893,6 +6950,7 @@ function rejectUnsupportedLocalGitSemantics(
   const policy = evaluateSourceGitConfig(
     listBoundGitConfig(configFile.bytes, "Git config", gitExecutable, operationBudget, byteBudget),
     "repository",
+    { headRef: options.headRef ?? null },
   );
   let statusConfig = gitStatusConfig(policy.statusOverrides);
   const worktreeConfigFile = readBoundGitFile(
@@ -8186,7 +8244,11 @@ export function observeSourceGit(sourceRoot, options = {}) {
       );
     }
 
-    // 6. Repository-local semantics and the object format, from bound configuration bytes.
+    // 6. Bind HEAD before admitting its exact current-branch upstream pair from configuration.
+    const headFile = controlFile(gitBound, "HEAD", "Git HEAD");
+    const configHeadRef = parseHeadReference(headFile.bytes, HASH_40_OR_64).headRef;
+
+    // Repository-local semantics and the object format, from bound configuration bytes.
     const localSemantics = rejectUnsupportedLocalGitSemantics(
       commonBound,
       gitBound,
@@ -8194,6 +8256,7 @@ export function observeSourceGit(sourceRoot, options = {}) {
       operationBudget,
       limits,
       byteBudget,
+      { headRef: configHeadRef },
     );
     if (
       expectedTopology !== null &&
@@ -8260,8 +8323,7 @@ export function observeSourceGit(sourceRoot, options = {}) {
       return bytes;
     });
 
-    // 7. HEAD and its ref from bound reads; Git's answer must agree.
-    const headFile = controlFile(gitBound, "HEAD", "Git HEAD");
+    // 7. HEAD and its ref from the bound read; Git's answer must agree.
     const parsedHead = parseHeadReference(headFile.bytes, objectPattern);
     const headRef = parsedHead.headRef;
     let head = parsedHead.oid;

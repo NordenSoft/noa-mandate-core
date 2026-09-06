@@ -261,6 +261,15 @@ jobs:
         run: bash impl-rust/conformance.sh
       - name: C# verifier == Python reference
         run: bash impl-csharp/conformance.sh
+      - name: Survivable retirement — 19 cases x all five verifiers
+        # The steps above already produced the TS, Go, Rust release and C# release artifacts. Reuse
+        # those exact executables: this adds the 95-result historical contract without compiling a
+        # second copy of every port. Regeneration plus the scoped diff binds the checked-in byte
+        # fixtures to the explicit generator oracle.
+        run: |
+          npm run check:survivable-retirement -- --no-build
+          npm run check:survivable-retirement:knockout -- --no-build
+          git diff --exit-code -- conformance/survivable-retirement
       - name: Conformance matrix generator selftest (guards against a silent empty-runner PASS)
         # Hermetic — no subprocess, no toolchain. Proves scripts/conformance-matrix.mjs's own
         # empty-runner guard is RED on a synthetic 0-line/exit-0 fixture and GREEN on a real one

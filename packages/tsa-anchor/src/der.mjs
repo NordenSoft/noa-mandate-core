@@ -11,6 +11,35 @@
  * fail-closed (DerError) rather than silently coerced — none of those appear in a well-formed RFC
  * 3161 TimeStampReq/TimeStampResp/TSTInfo/CMS SignedData produced by a real TSA.
  */
+import { intrinsics } from "noa-receipt";
+
+const {
+  arrayJoin,
+  arrayLength,
+  arrayPush,
+  bigIntToNumber,
+  bufSubarray,
+  bufToString,
+  bufferFrom,
+  byteLength,
+  getOwnPropertyDescriptor,
+  hasOwn,
+  isSafeInteger,
+  objectSetPrototypeOf,
+  strCharCodeAt,
+  strSlice,
+  toBigInt,
+  INERT_ARRAY_PROTOTYPE,
+} = intrinsics;
+
+const MAX_SAFE_INTEGER = 9007199254740991;
+const DEFAULT_MAX_DEPTH = 32;
+
+function mutableInertArray() {
+  const out = [];
+  objectSetPrototypeOf(out, INERT_ARRAY_PROTOTYPE);
+  return out;
+}
 
 export class DerError extends Error {
   constructor(m) {
@@ -143,7 +172,8 @@ export function encGeneralizedTime(date) {
 // ── decoder: generic recursive DER TLV walker (cursor-threaded, mirrors src/cose/cbor.ts's `Cur`) ──
 function decodeAt(c, depth, maxDepth) {
   if (depth > maxDepth) throw new DerError("max depth exceeded");
-  if (c.i >= c.buf.length) throw new DerError("truncated tag");
+  const bufferLength = byteLength(c.buf);
+  if (c.i >= bufferLength) throw new DerError("truncated tag");
   const tagByte = c.buf[c.i];
   c.i += 1;
   const tagClass = tagByte >> 6; // 0 universal, 1 application, 2 context, 3 private
@@ -151,7 +181,7 @@ function decodeAt(c, depth, maxDepth) {
   const tagNumber = tagByte & 0x1f;
   if (tagNumber === 0x1f) throw new DerError("high-tag-number form (tag number > 30) not supported");
 
-  if (c.i >= c.buf.length) throw new DerError("truncated length");
+  if (c.i >= bufferLength) throw new DerError("truncated length");
   const b0 = c.buf[c.i];
   let length;
   if ((b0 & 0x80) === 0) {
@@ -161,7 +191,7 @@ function decodeAt(c, depth, maxDepth) {
     const numOctets = b0 & 0x7f;
     if (numOctets === 0) throw new DerError("indefinite length not supported (DER requires definite length)");
     if (numOctets > 4) throw new DerError("length too large (>4 length-octets unsupported)");
-    if (c.i + 1 + numOctets > c.buf.length) throw new DerError("truncated length octets");
+    if (c.i + 1 + numOctets > bufferLength) throw new DerError("truncated length octets");
     if (numOctets > 1 && c.buf[c.i + 1] === 0x00) throw new DerError("non-minimal (non-canonical) length encoding");
     length = 0;
     for (let k = 0; k < numOctets; k++) length = length * 256 + c.buf[c.i + 1 + k];
@@ -170,27 +200,34 @@ function decodeAt(c, depth, maxDepth) {
     if (length < 0x80) throw new DerError("non-minimal length: long form used for a value < 128 (DER requires short form)");
     c.i += 1 + numOctets;
   }
-  if (c.i + length > c.buf.length) throw new DerError("value overruns buffer");
+  if (c.i + length > bufferLength) throw new DerError("value overruns buffer");
   const start = c.i;
   const end = c.i + length;
 
   let children = null;
   if (constructed) {
-    children = [];
-    while (c.i < end) children.push(decodeAt(c, depth + 1, maxDepth));
+    children = mutableInertArray();
+    while (c.i < end) arrayPush(children, decodeAt(c, depth + 1, maxDepth));
     if (c.i !== end) throw new DerError("constructed value length mismatch");
   } else {
     c.i = end;
   }
-  return { tagClass, constructed, tagNumber, content: Buffer.from(c.buf.subarray(start, end)), children };
+  return { tagClass, constructed, tagNumber, content: bufferFrom(bufSubarray(c.buf, start, end)), children };
 }
 
 /** Decode ONE top-level DER TLV starting at offset 0; throws DerError if trailing bytes remain. */
 export function derDecode(buf, opts = {}) {
-  const maxDepth = opts.maxDepth ?? 32;
+  let maxDepth = DEFAULT_MAX_DEPTH;
+  if (opts !== null && typeof opts === "object" && hasOwn(opts, "maxDepth")) {
+    const descriptor = getOwnPropertyDescriptor(opts, "maxDepth");
+    if (descriptor === undefined || !hasOwn(descriptor, "value") || !isSafeInteger(descriptor.value) || descriptor.value < 1 || descriptor.value > 128) {
+      throw new DerError("maxDepth must be an own integer data property from 1 through 128");
+    }
+    maxDepth = descriptor.value;
+  }
   const c = { buf, i: 0 };
   const node = decodeAt(c, 0, maxDepth);
-  if (c.i !== buf.length) throw new DerError("trailing bytes after the top-level TLV");
+  if (c.i !== byteLength(buf)) throw new DerError("trailing bytes after the top-level TLV");
   return node;
 }
 
@@ -199,8 +236,9 @@ export function readIntegerBig(node) {
   if (!node || node.tagClass !== 0 || node.constructed || node.tagNumber !== 0x02) throw new DerError("not an INTEGER");
   // DER (X.690 §8.3): INTEGER content is >= 1 octet, and the first two octets must not be all-zero
   // (redundant leading 0x00 on a positive value) — both are non-minimal encodings, rejected fail-closed.
-  if (node.content.length === 0) throw new DerError("zero-length INTEGER (DER requires at least one content octet)");
-  if (node.content.length > 1 && node.content[0] === 0x00 && (node.content[1] & 0x80) === 0) {
+  const n = byteLength(node.content);
+  if (n === 0) throw new DerError("zero-length INTEGER (DER requires at least one content octet)");
+  if (n > 1 && node.content[0] === 0x00 && (node.content[1] & 0x80) === 0) {
     throw new DerError("non-minimal INTEGER: redundant leading 0x00 octet");
   }
   if ((node.content[0] & 0x80) !== 0) {
@@ -208,54 +246,65 @@ export function readIntegerBig(node) {
   }
   let v = 0n;
   const bytes = node.content; // index walk, not `for…of` — see the encOid note above
-  for (let i = 0; i < bytes.length; i++) v = (v << 8n) | BigInt(bytes[i]);
+  for (let i = 0; i < n; i++) v = (v << 8n) | toBigInt(bytes[i]);
   return v;
 }
 
 export function readInteger(node) {
   const v = readIntegerBig(node);
-  if (v > BigInt(Number.MAX_SAFE_INTEGER)) throw new DerError("INTEGER too large for a safe JS number — use readIntegerBig");
-  return Number(v);
+  if (v > 9007199254740991n) throw new DerError("INTEGER too large for a safe JS number — use readIntegerBig");
+  return bigIntToNumber(v);
 }
 
 export function readOid(node) {
   if (!node || node.tagClass !== 0 || node.constructed || node.tagNumber !== 0x06) throw new DerError("not an OID");
   const bytes = node.content;
-  if (bytes.length === 0) throw new DerError("empty OID");
+  const bytesLength = byteLength(bytes);
+  if (bytesLength === 0) throw new DerError("empty OID");
   // Decode EVERY sub-identifier (including the first) as a base-128 group, then split the first
   // group back into arc0/arc1 — the mirror of encOid: `40*arc0 + arc1` is a single value that can
   // span multiple octets, so the old `bytes[0] / 40` single-byte split silently mis-decoded any
   // first sub-identifier >= 128 (e.g. 2.999.x). See X.690 §8.19.
-  const groups = [];
+  const groups = mutableInertArray();
   let acc = 0;
   let pending = false;
-  for (let k = 0; k < bytes.length; k++) {
+  for (let k = 0; k < bytesLength; k++) {
     const b = bytes[k];
     // X.690 §8.19.2: the first octet of any sub-identifier must not be 0x80 — that is a redundant
     // leading-zero continuation byte, so a group that opens with it is non-minimal (BER, not DER)
     // and is rejected fail-closed to match this module's other strict-DER checks (minimal length,
     // minimal INTEGER). `pending === false` marks the start of a fresh base-128 group.
     if (!pending && b === 0x80) throw new DerError("non-minimal OID sub-identifier: leading 0x80 octet");
-    acc = acc * 128 + (b & 0x7f);
+    const low = b & 0x7f;
+    // Prevent distinct oversized arcs from aliasing after IEEE-754 precision loss. RFC OIDs needed
+    // here fit in a safe integer; a larger subidentifier is rejected before the lossy arithmetic.
+    if (acc > (MAX_SAFE_INTEGER - low) / 128) throw new DerError("OID sub-identifier exceeds safe integer range");
+    acc = acc * 128 + low;
     pending = true;
     if ((b & 0x80) === 0) {
-      groups.push(acc);
+      arrayPush(groups, acc);
       acc = 0;
       pending = false;
     }
   }
   if (pending) throw new DerError("truncated OID arc");
+  if (arrayLength(groups) === 0) throw new DerError("empty OID");
   const first = groups[0];
   // X.690: arc0 ∈ {0,1} caps the combined value at 40*arc0+39 < 80; anything >= 80 is arc0=2 (arc1 unbounded).
   const arc0 = first < 40 ? 0 : first < 80 ? 1 : 2;
   const arc1 = first - arc0 * 40;
-  return [arc0, arc1, ...groups.slice(1)].join(".");
+  const arcs = mutableInertArray();
+  arrayPush(arcs, arc0);
+  arrayPush(arcs, arc1);
+  const groupCount = arrayLength(groups);
+  for (let i = 1; i < groupCount; i++) arrayPush(arcs, groups[i]);
+  return arrayJoin(arcs, ".");
 }
 
 /** DER GeneralizedTime (tag 0x18, primitive) -> ISO-8601 UTC string. */
 export function readGeneralizedTime(node) {
   if (!node || node.tagClass !== 0 || node.constructed || node.tagNumber !== 0x18) throw new DerError("not a GeneralizedTime");
-  const s = node.content.toString("ascii");
+  const s = bufToString(node.content, "ascii");
   // HAND-SCANNED, NOT A REGEX. `RegExp.prototype.test/exec` performs a dynamic Get of `exec`
   // on the receiver, so even a captured matcher dispatches through a writable prototype slot
   // (C-02(f), reproduced by the kernel's c02_regexp_witness). The shape accepted is exactly
@@ -265,22 +314,22 @@ export function readGeneralizedTime(node) {
   };
   if (s.length < 15) bad();
   for (let i = 0; i < 14; i++) {
-    const c = s.charCodeAt(i);
+    const c = strCharCodeAt(s, i);
     if (c < 0x30 || c > 0x39) bad();
   }
   let i = 14;
   let frac = "";
-  if (s.slice(i, i + 1) === ".") {
+  if (strSlice(s, i, i + 1) === ".") {
     const start = i;
     i++;
     while (i < s.length) {
-      const c = s.charCodeAt(i);
+      const c = strCharCodeAt(s, i);
       if (c < 0x30 || c > 0x39) break;
       i++;
     }
     if (i === start + 1) bad(); // a bare "." with no digits after it
-    frac = s.slice(start, i);
+    frac = strSlice(s, start, i);
   }
-  if (i !== s.length - 1 || s.slice(i) !== "Z") bad();
-  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T${s.slice(8, 10)}:${s.slice(10, 12)}:${s.slice(12, 14)}${frac}Z`;
+  if (i !== s.length - 1 || strSlice(s, i) !== "Z") bad();
+  return `${strSlice(s, 0, 4)}-${strSlice(s, 4, 6)}-${strSlice(s, 6, 8)}T${strSlice(s, 8, 10)}:${strSlice(s, 10, 12)}:${strSlice(s, 12, 14)}${frac}Z`;
 }

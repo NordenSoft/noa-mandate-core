@@ -105,60 +105,76 @@ fn authorized(identity: &Json, agent_id: &str, kid: &str) -> bool {
     }
 }
 
-/// Strict checkpoint validation + authentication. Returns "ok" / "unverified" / "bad".
-/// (Any non-valid keyring entry collapses to "unverified" — with a keyring that becomes TAMPERED and
-/// without one it can never reach "ok", so the final verdict is identical either way.)
-fn verify_checkpoint(cp: &Json, keyring: Option<&Json>) -> &'static str {
+pub(crate) fn checkpoint_shape_ok(cp: &Json) -> bool {
     let obj = match cp {
         Json::Object(o) => o,
-        _ => return "bad",
+        _ => return false,
     };
+    if obj.len() != 6 {
+        return false;
+    }
     for (k, _) in obj {
         if !["spec", "chain", "highestSeq", "headHash", "ts", "sig"].contains(&k.as_str()) {
-            return "bad";
+            return false;
         }
     }
     if cp.get("spec").and_then(|v| v.as_str()) != Some("noa.checkpoint/0.1") {
-        return "bad";
+        return false;
     }
     match cp.get("chain") {
         Some(Json::Str(s)) if !s.is_empty() => {}
-        _ => return "bad",
+        _ => return false,
     }
     match cp.get("highestSeq").and_then(|v| v.as_int()) {
         Some(i) if (0..=SAFE_INT_MAX).contains(&i) => {}
-        _ => return "bad",
+        _ => return false,
     }
     match cp.get("headHash") {
         Some(Json::Str(s)) if is_hash(s) => {}
-        _ => return "bad",
+        _ => return false,
     }
     match cp.get("ts") {
         Some(Json::Str(s)) if is_rfc3339_instant(s) => {}
-        _ => return "bad",
+        _ => return false,
     }
     let sig = match cp.get("sig") {
         Some(sig @ Json::Object(so)) => {
+            if so.len() != 3 {
+                return false;
+            }
             for (k, _) in so {
                 if !["alg", "kid", "value"].contains(&k.as_str()) {
-                    return "bad";
+                    return false;
                 }
             }
             sig
         }
-        _ => return "bad",
+        _ => return false,
     };
     if sig.get("alg").and_then(|v| v.as_str()) != Some("ed25519") {
-        return "bad";
+        return false;
     }
     let kid = match sig.get("kid") {
         Some(Json::Str(s)) if !s.is_empty() => s.as_str(),
-        _ => return "bad",
+        _ => return false,
     };
     let value = match sig.get("value") {
         Some(Json::Str(s)) if !s.is_empty() => s.as_str(),
-        _ => return "bad",
+        _ => return false,
     };
+    !kid.is_empty() && !value.is_empty()
+}
+
+/// Strict checkpoint validation + authentication. Returns "ok" / "unverified" / "bad".
+/// (Any non-valid keyring entry collapses to "unverified" — with a keyring that becomes TAMPERED and
+/// without one it can never reach "ok", so the final verdict is identical either way.)
+pub(crate) fn verify_checkpoint(cp: &Json, keyring: Option<&Json>) -> &'static str {
+    if !checkpoint_shape_ok(cp) {
+        return "bad";
+    }
+    let sig = cp.get("sig").unwrap();
+    let kid = sig.get("kid").and_then(|v| v.as_str()).unwrap();
+    let value = sig.get("value").and_then(|v| v.as_str()).unwrap();
     let pub_b64 = match keyring.and_then(|k| k.get(kid)) {
         Some(Json::Str(p)) if !p.is_empty() => p.as_str(),
         _ => return "unverified",

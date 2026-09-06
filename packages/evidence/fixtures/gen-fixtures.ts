@@ -47,6 +47,10 @@ const KEYS: Record<string, { publicKey: string; privateKey: string }> = {
   "tenant-authority-EVIL": { publicKey: "MCowBQYDK2VwAyEA0IAN4oqVjRce8Fi9FNvG3qTdTMuvazzB65DCi6LN634=", privateKey: "MC4CAQAwBQYDK2VwBCIEIFEr6Bx1XIsyQpCm6qAyvF22tkAQsxsD9ajkUqgDG4cc" },
   "manifest-signer-3": { publicKey: "MCowBQYDK2VwAyEA27oD5NxHqlbHBJILS5x8DuhvFh5JJ92RO4FOSkRkrnQ=", privateKey: "MC4CAQAwBQYDK2VwBCIEIBl0OjAazTcsi9gORoSf8/8HPc4ss+Jq7bBA6N2+kbtl" },
   "gate-prod-1": { publicKey: "MCowBQYDK2VwAyEAyYa5MD7chN+UZmKPN+3OCYhm6sldhUU3qKurMigSdjw=", privateKey: "MC4CAQAwBQYDK2VwBCIEIJnbx8diTrCphCyQUzgzVeop23E7nR4z5qlvAWktnDLj" },
+  // G2 — receipt-only historical signer + independently supplied checkpoint signer. Neither is a
+  // production credential; both are fixed, public conformance material.
+  "receipt-history-1": { publicKey: "MCowBQYDK2VwAyEAEMUoELo/mW7a6P3KVcPkJjf1CDBsSht/TnD1m1lotf4=", privateKey: "MC4CAQAwBQYDK2VwBCIEIO6gQ7ZTuKQlhmV7XzmhzzpoGEgA+S25qkz6lY89wDdt" },
+  "witness-history-1": { publicKey: "MCowBQYDK2VwAyEA+7a5xaIBozJs91O4hfsEWMYFbBE/Xk2/Frb+8Z4CzI0=", privateKey: "MC4CAQAwBQYDK2VwBCIEIJRNha19uVpa8W8GIOA8Q7AA5MyrclE3MA4hEOjH0/p5" },
   "approver-1-device-2": { publicKey: "MCowBQYDK2VwAyEANrq8SiwpHxclTXg0+xBZHhycN9Md4xQxm4Csh0DMwb8=", privateKey: "MC4CAQAwBQYDK2VwBCIEIDoHJAvpZbzucGimAun8IjTMoX17SixbPYiUFCbhhrJL" },
   "approver-crit-5": { publicKey: "MCowBQYDK2VwAyEAtN4H1lCn75RSP7yjvFOXA8mX3RNhjmPvMcGqRBjIlhY=", privateKey: "MC4CAQAwBQYDK2VwBCIEIJ9XRUuytMv70Jo+YacYjwgE0lOdGs9SEf0ksJEn1c9z" },
   // S5 — an observer key that is NOT the execution signer, so a bundle can get past the R-16
@@ -130,9 +134,14 @@ function manifestKeys(
   // other fixture's manifest bytes are byte-identical to before. Carries the kid to list, so C.1's
   // second half can list the EXECUTION SIGNER'S OWN key material under a second kid.
   independentObserver: string | null = null,
+  // G2: appended only in the two historical worlds, leaving every existing fixture byte-stable.
+  historicalReceiptKey: { kid: string; validFrom: string; revokedAt: string | null } | null = null,
 ): J[] {
   return [
     { kid: "gate-prod-1", type: "GATE", roles: ["hold-signer", "execution-signer", ...gateExtraRoles], publicKey: KEYS["gate-prod-1"]!.publicKey, validFrom: gateValidFrom, revokedAt: null },
+    ...(historicalReceiptKey !== null
+      ? [{ kid: historicalReceiptKey.kid, type: "GATE", roles: ["execution-signer"], publicKey: KEYS[historicalReceiptKey.kid]!.publicKey, validFrom: historicalReceiptKey.validFrom, revokedAt: historicalReceiptKey.revokedAt } as J]
+      : []),
     ...(independentObserver !== null
       ? [{ kid: independentObserver, type: "GATE", roles: ["settlement-observer"], publicKey: KEYS[independentObserver]!.publicKey, validFrom: gateValidFrom, revokedAt: null } as J]
       : []),
@@ -199,6 +208,12 @@ interface BuildOpts {
   grantApprovalReceiptHash?: string; // override the grant's binding to the approval
   checkpointTs?: string;
   checkpointKeyring?: J;
+  /** G2: a receipt-only key, distinct from the active gate that signs every side artifact. */
+  receiptKid?: string;
+  /** G2: lifecycle evidence for `receiptKid`; signer timestamps never decide it. */
+  receiptRevokedAt?: string | null;
+  /** G2 fixture override for the receipt-only key's required manifest activation timestamp. */
+  receiptValidFrom?: string;
   tenantRoot?: J;
   allowedParamsHash?: string; // to break step-6 action binding (approve a different action)
   // S5 — thread ONE params hash through the whole world (deferred/allowed/executed receipt + grant),
@@ -257,6 +272,7 @@ interface BuildOpts {
 function buildWorld(outcome: EvidenceOutcome, opts: BuildOpts = {}): World {
   const riskClass = opts.riskClass ?? "HIGH";
   const approverKid = opts.approverKid ?? "approver-1-device-2";
+  const receiptKid = opts.receiptKid ?? "gate-prod-1";
   const worldPH = opts.paramsHash ?? PARAMS_HASH;
   const manifest = makeManifest(
     manifestKeys(
@@ -267,13 +283,16 @@ function buildWorld(outcome: EvidenceOutcome, opts: BuildOpts = {}): World {
       opts.critValidFrom ?? DELEG_FROM,
       opts.gateSettlementObserver ? ["settlement-observer"] : [],
       opts.settlementObserverKid !== undefined && opts.settlementObserverKid !== "gate-prod-1" ? opts.settlementObserverKid : null,
+      receiptKid !== "gate-prod-1"
+        ? { kid: receiptKid, validFrom: opts.receiptValidFrom ?? DELEG_FROM, revokedAt: opts.receiptRevokedAt ?? null }
+        : null,
     ),
     opts.manifestIssuedAt ?? MAN_ISSUED,
   );
   const MAN_HASH = refHash(manifest);
 
   const rv = opts.roleVerdicts ?? {};
-  const deferred = buildReceipt(deferredInput(riskClass, rv.deferredReceipt ?? "DEFERRED", worldPH), null, rSign("gate-prod-1"));
+  const deferred = buildReceipt(deferredInput(riskClass, rv.deferredReceipt ?? "DEFERRED", worldPH), null, rSign(receiptKid));
   const DEF_HASH = deferred.chain.hash;
 
   const envelopeCore: J = {
@@ -350,7 +369,7 @@ function buildWorld(outcome: EvidenceOutcome, opts: BuildOpts = {}): World {
     const isFail = outcome === "EXECUTION_FAILED";
     const terminal = buildReceipt(
       { id: isFail ? "rcpt_failed" : "rcpt_exec", ts: T_EXECUTED, scope: { tenant: TENANT, chain: CHAIN }, agent: { id: "agent-a", model: null, principal: "SERVICE" }, action: action(riskClass, worldPH), governance: { mode: "on", verdict: (isFail ? rv.failedReceipt : rv.executedReceipt) ?? (isFail ? "FAILED" : "EXECUTED"), sandboxed: false } },
-      allowed, rSign("gate-prod-1"),
+      allowed, rSign(receiptKid),
     );
     const decision = opts.omitDecision ? null : makeDecision("APPROVE", approverKid);
     const g = grant(opts.grantExpiresAt ?? T_GRANT_EXP, opts.grantApprovalReceiptHash ?? allowed.chain.hash);
@@ -529,6 +548,66 @@ for (const oc of OUTCOMES) {
   // positive outcome, checkpoint signer NOT in the supplied checkpoint keyring → internally consistent, no trusted anchor.
   const wSeg = buildWorld("EXECUTED", { checkpointKeyring: CHECKPOINT_KEYRING_WRONG });
   emit("verdict", "segment-only-no-anchor", fixtureFrom(wSeg, { description: "EXECUTED with an unauthenticated checkpoint (signer not in --checkpoint-keyring) → VALID_SEGMENT_ONLY (tail-truncation caveat)", expectVerdict: "VALID_SEGMENT_ONLY" }));
+}
+
+// G2 — SURVIVABLE RETIREMENT ON THE EVIDENCE AUDIT PATH. These two audit worlds carry byte-identical
+// receipt chains and checkpoints. E has current lifecycle state; E+ adds the truthful fact that the
+// receipt-only key retired AFTER the independent checkpoint and BEFORE verifier `now`. Adding that
+// valid lifecycle evidence must not turn intact history into a tampering verdict. The third fixture
+// sends the exact E+ bytes through `authorize`, where current use remains fail-closed.
+{
+  const historyBase = {
+    receiptKid: "receipt-history-1",
+    checkpointKid: "witness-history-1",
+    checkpointTs: "2026-07-14T11:59:00.000Z",
+  } as const;
+  const e = buildWorld("EXECUTED", { ...historyBase, receiptRevokedAt: null });
+  emit("control", "g2-history-e-current", fixtureFrom(e, {
+    description: "G2 E control: intact receipt history with a distinct externally trusted checkpoint signer and no retirement evidence",
+    expectVerdict: "VALID_FULL_CHAIN",
+    purpose: "audit",
+  }));
+
+  const ePlus = buildWorld("EXECUTED", {
+    ...historyBase,
+    receiptRevokedAt: "2026-07-14T11:59:30.000Z",
+  });
+  emit("control", "g2-history-eplus-retired-audit", fixtureFrom(ePlus, {
+    description: "G2 E+: the receipt-only key retired after the independently authenticated 11:59 checkpoint and before verifier now; audit remains intact, head-anchored, and attributable-as-of",
+    expectVerdict: "VALID_FULL_CHAIN",
+    purpose: "audit",
+  }));
+  emit("reject", "g2-history-eplus-retired-authorize", fixtureFrom(ePlus, {
+    description: "G2 authorization control: the same retired-key history cannot authorize current use",
+    expectVerdict: "INVALID",
+    expectStep: "STEP_17_CHECKPOINT_RECONCILE",
+    expectCode: "E_CHECKPOINT_RECONCILE",
+    purpose: "authorize",
+  }));
+
+  const beforeActivation = buildWorld("EXECUTED", {
+    ...historyBase,
+    receiptValidFrom: "2026-07-14T11:59:00.000000001Z",
+    receiptRevokedAt: "2026-07-14T11:59:30.000Z",
+  });
+  emit("reject", "g2-history-checkpoint-before-activation", fixtureFrom(beforeActivation, {
+    description: "G2 audit lower bound: the independently authenticated checkpoint is one nanosecond before the retired receipt signer's explicit activation; history is intact but unattributable",
+    expectVerdict: "INVALID",
+    expectStep: "STEP_18_TEMPORAL_AUTHORIZATION",
+    expectCode: "E_TEMPORAL_AUTH",
+    purpose: "audit",
+  }));
+
+  const atActivation = buildWorld("EXECUTED", {
+    ...historyBase,
+    receiptValidFrom: "2026-07-14t11:59:00.000z",
+    receiptRevokedAt: "2026-07-14t11:59:30.000z",
+  });
+  emit("control", "g2-history-checkpoint-at-activation-lowercase", fixtureFrom(atActivation, {
+    description: "G2 audit inclusive lower boundary: lowercase RFC 3339 t/z lifecycle timestamps are valid and a checkpoint exactly at validFrom remains attributable",
+    expectVerdict: "VALID_FULL_CHAIN",
+    purpose: "audit",
+  }));
 }
 
 // ═══ 3. targeted rejections — one per step (defect trips EXACTLY that step) ══════════════════════

@@ -1,0 +1,589 @@
+{
+  "spec": "noa.historical-verification-corpus/0.1",
+  "cases": [
+    {
+      "id": "e-static-no-witness",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-static.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "UNVERIFIED",
+        "code": "NO_WITNESS",
+        "dimensions": {
+          "integrity": "INTACT",
+          "completeness": "UNANSWERED",
+          "attribution": "UNATTRIBUTABLE",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "NOT_PROVIDED",
+            "witness": "NOT_PROVIDED",
+            "availability": "NOT_PROVIDED"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": null,
+        "asOf": null
+      }
+    },
+    {
+      "id": "e-plus-retirement-no-witness",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-retired.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "UNVERIFIED",
+        "code": "NO_WITNESS",
+        "dimensions": {
+          "integrity": "INTACT",
+          "completeness": "UNANSWERED",
+          "attribution": "UNATTRIBUTABLE",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "NOT_PROVIDED",
+            "availability": "NOT_PROVIDED"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": null,
+        "asOf": null
+      }
+    },
+    {
+      "id": "e-plus-witness-exact-head",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-static.json",
+      "checkpoint": "checkpoints/exact-before-retirement.json",
+      "checkpointKeyring": "checkpoint-keyring.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "VERIFIED",
+        "code": "HEAD_ANCHORED",
+        "dimensions": {
+          "integrity": "INTACT",
+          "completeness": "HEAD_ANCHORED",
+          "attribution": "ATTRIBUTABLE_AS_OF",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "NOT_PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": 2,
+        "asOf": "2026-01-01T00:00:01.000Z"
+      }
+    },
+    {
+      "id": "e-plus-retirement-and-witness",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-window.json",
+      "checkpoint": "checkpoints/exact-nanos-before-retirement.json",
+      "checkpointKeyring": "checkpoint-keyring.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "VERIFIED",
+        "code": "HEAD_ANCHORED",
+        "dimensions": {
+          "integrity": "INTACT",
+          "completeness": "HEAD_ANCHORED",
+          "attribution": "ATTRIBUTABLE_AS_OF",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": 2,
+        "asOf": "2026-01-02T00:00:00.000000001Z"
+      }
+    },
+    {
+      "id": "checkpoint-after-explicit-activation",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-window.json",
+      "checkpoint": "checkpoints/exact-before-retirement.json",
+      "checkpointKeyring": "checkpoint-keyring.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "VERIFIED",
+        "code": "HEAD_ANCHORED",
+        "dimensions": {
+          "integrity": "INTACT",
+          "completeness": "HEAD_ANCHORED",
+          "attribution": "ATTRIBUTABLE_AS_OF",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": 2,
+        "asOf": "2026-01-01T00:00:01.000Z"
+      }
+    },
+    {
+      "id": "checkpoint-at-explicit-activation",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-at-activation.json",
+      "checkpoint": "checkpoints/exact-before-retirement.json",
+      "checkpointKeyring": "checkpoint-keyring.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "VERIFIED",
+        "code": "HEAD_ANCHORED",
+        "dimensions": {
+          "integrity": "INTACT",
+          "completeness": "HEAD_ANCHORED",
+          "attribution": "ATTRIBUTABLE_AS_OF",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": 2,
+        "asOf": "2026-01-01T00:00:01.000Z"
+      }
+    },
+    {
+      "id": "checkpoint-one-nanosecond-before-activation",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-before-activation.json",
+      "checkpoint": "checkpoints/exact-before-retirement.json",
+      "checkpointKeyring": "checkpoint-keyring.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "UNVERIFIED",
+        "code": "CHECKPOINT_BEFORE_ACTIVATION",
+        "dimensions": {
+          "integrity": "INTACT",
+          "completeness": "HEAD_ANCHORED",
+          "attribution": "UNATTRIBUTABLE",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": null,
+        "asOf": null
+      }
+    },
+    {
+      "id": "lowercase-rfc3339-activation-boundary",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-lowercase-window.json",
+      "checkpoint": "checkpoints/lowercase-at-activation.json",
+      "checkpointKeyring": "checkpoint-keyring.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "VERIFIED",
+        "code": "HEAD_ANCHORED",
+        "dimensions": {
+          "integrity": "INTACT",
+          "completeness": "HEAD_ANCHORED",
+          "attribution": "ATTRIBUTABLE_AS_OF",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": 2,
+        "asOf": "2026-01-01t00:00:01.000z"
+      }
+    },
+    {
+      "id": "invalid-lifecycle-interval",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-invalid-interval.json",
+      "checkpoint": "checkpoints/exact-before-retirement.json",
+      "checkpointKeyring": "checkpoint-keyring.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "INVALID",
+        "code": "RECEIPT_ROOT_INVALID",
+        "dimensions": {
+          "integrity": "UNANSWERED",
+          "completeness": "UNANSWERED",
+          "attribution": "UNATTRIBUTABLE",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "NOT_PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": null,
+        "count": 0,
+        "attributedThroughSeq": null,
+        "asOf": null
+      }
+    },
+    {
+      "id": "honest-stale-prefix",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-retired.json",
+      "checkpoint": "checkpoints/prefix-before-retirement.json",
+      "checkpointKeyring": "checkpoint-keyring.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "PARTIAL",
+        "code": "PREFIX_ANCHORED",
+        "dimensions": {
+          "integrity": "INTACT",
+          "completeness": "PREFIX_ANCHORED",
+          "attribution": "ATTRIBUTABLE_AS_OF",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": 0,
+        "asOf": "2026-01-01T00:00:01.000Z"
+      }
+    },
+    {
+      "id": "checkpoint-not-trust-root",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-retired.json",
+      "checkpoint": "checkpoints/exact-before-retirement.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "UNVERIFIED",
+        "code": "WITNESS_ROOT_NOT_PROVIDED",
+        "dimensions": {
+          "integrity": "UNANSWERED",
+          "completeness": "UNANSWERED",
+          "attribution": "UNATTRIBUTABLE",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": null,
+        "asOf": null
+      }
+    },
+    {
+      "id": "authenticated-checkpoint-ahead",
+      "receipts": "chain-prefix.json",
+      "keyring": "receipt-keyring-retired.json",
+      "checkpoint": "checkpoints/ahead-before-retirement.json",
+      "checkpointKeyring": "checkpoint-keyring.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "CONFLICT",
+        "code": "CHECKPOINT_AHEAD",
+        "dimensions": {
+          "integrity": "INTACT",
+          "completeness": "CONFLICT",
+          "attribution": "UNATTRIBUTABLE",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "MISSING_RELATIVE_TO_CHECKPOINT"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 2,
+        "attributedThroughSeq": null,
+        "asOf": null
+      }
+    },
+    {
+      "id": "forged-witness",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-retired.json",
+      "checkpoint": "checkpoints/forged-signature.json",
+      "checkpointKeyring": "checkpoint-keyring.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "INVALID",
+        "code": "WITNESS_INTEGRITY_FAILURE",
+        "dimensions": {
+          "integrity": "BROKEN",
+          "completeness": "UNANSWERED",
+          "attribution": "UNATTRIBUTABLE",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": null,
+        "asOf": null
+      }
+    },
+    {
+      "id": "wrong-witness-root",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-retired.json",
+      "checkpoint": "checkpoints/exact-before-retirement.json",
+      "checkpointKeyring": "checkpoint-keyring-wrong.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "UNVERIFIED",
+        "code": "WITNESS_KEY_NOT_TRUSTED",
+        "dimensions": {
+          "integrity": "UNANSWERED",
+          "completeness": "UNANSWERED",
+          "attribution": "UNATTRIBUTABLE",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": null,
+        "asOf": null
+      }
+    },
+    {
+      "id": "same-key-witness-alias",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-retired.json",
+      "checkpoint": "checkpoints/same-key-alias.json",
+      "checkpointKeyring": "checkpoint-keyring-same-material.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "UNVERIFIED",
+        "code": "WITNESS_KEY_NOT_SEPARATE",
+        "dimensions": {
+          "integrity": "INTACT",
+          "completeness": "UNANSWERED",
+          "attribution": "UNATTRIBUTABLE",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": null,
+        "asOf": null
+      }
+    },
+    {
+      "id": "checkpoint-at-retirement",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-retired.json",
+      "checkpoint": "checkpoints/at-retirement.json",
+      "checkpointKeyring": "checkpoint-keyring.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "UNVERIFIED",
+        "code": "CHECKPOINT_AFTER_RETIREMENT",
+        "dimensions": {
+          "integrity": "INTACT",
+          "completeness": "HEAD_ANCHORED",
+          "attribution": "UNATTRIBUTABLE",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": null,
+        "asOf": null
+      }
+    },
+    {
+      "id": "checkpoint-after-retirement",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-retired.json",
+      "checkpoint": "checkpoints/after-retirement.json",
+      "checkpointKeyring": "checkpoint-keyring.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "UNVERIFIED",
+        "code": "CHECKPOINT_AFTER_RETIREMENT",
+        "dimensions": {
+          "integrity": "INTACT",
+          "completeness": "HEAD_ANCHORED",
+          "attribution": "UNATTRIBUTABLE",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": null,
+        "asOf": null
+      }
+    },
+    {
+      "id": "authenticated-same-seq-contradiction",
+      "receipts": "chain.json",
+      "keyring": "receipt-keyring-retired.json",
+      "checkpoint": "checkpoints/conflict.json",
+      "checkpointKeyring": "checkpoint-keyring.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "CONFLICT",
+        "code": "CHECKPOINT_CONFLICT",
+        "dimensions": {
+          "integrity": "INTACT",
+          "completeness": "CONFLICT",
+          "attribution": "UNATTRIBUTABLE",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": null,
+        "asOf": null
+      }
+    },
+    {
+      "id": "damaged-receipt",
+      "receipts": "chain-damaged.json",
+      "keyring": "receipt-keyring-retired.json",
+      "checkpoint": "checkpoints/exact-before-retirement.json",
+      "checkpointKeyring": "checkpoint-keyring.json",
+      "expected": {
+        "spec": "noa.historical-verification/0.1",
+        "policy": {
+          "verifierVersion": "noa.historical-verification/0.1",
+          "purpose": "historical-audit"
+        },
+        "classification": "INVALID",
+        "code": "RECEIPT_INTEGRITY_FAILURE",
+        "dimensions": {
+          "integrity": "BROKEN",
+          "completeness": "UNANSWERED",
+          "attribution": "UNATTRIBUTABLE",
+          "organizationalIndependence": "UNVERIFIED",
+          "evidence": {
+            "retirement": "PROVIDED",
+            "witness": "PROVIDED",
+            "availability": "AVAILABLE"
+          }
+        },
+        "chain": "g2-survivable-retirement",
+        "count": 3,
+        "attributedThroughSeq": null,
+        "asOf": null
+      }
+    }
+  ]
+}

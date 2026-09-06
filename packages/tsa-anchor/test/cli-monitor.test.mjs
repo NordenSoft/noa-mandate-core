@@ -193,6 +193,26 @@ test("CLI fork-scan / corroborate: missing required flags exit 4", async () => {
   assert.equal((await run(["corroborate"])).status, 4);
 });
 
+test("CLI monitor commands: --tsr requires the complete authenticated TSA configuration", async () => {
+  const chain = buildChainOf(["p0", "p1", "p2"]);
+  const p = writeAll({
+    checkpoint: buildCheckpoint(chain[2], "2026-06-23T10:00:00Z", AUTHOR_SIGNER),
+    anchors: [anchorFor(W1, chain, 2, "2026-06-23T10:00:00Z")],
+    trustset: TRUST_SET,
+    tsr: {},
+  });
+  const fork = await run(["fork-scan", "--anchors", p.anchors, "--trust-set", p.trustset, "--tsr", p.tsr]);
+  assert.equal(fork.status, 4, fork.stdout + fork.stderr);
+  assert.match(fork.stderr, /authenticated stamp verification requires --openssl/);
+
+  const corroborate = await run([
+    "corroborate", "--checkpoint", p.checkpoint, "--anchors", p.anchors,
+    "--trust-set", p.trustset, "--tsr", p.tsr,
+  ]);
+  assert.equal(corroborate.status, 4, corroborate.stdout + corroborate.stderr);
+  assert.match(corroborate.stderr, /authenticated stamp verification requires --openssl/);
+});
+
 // ── round-2 regressions at the CLI boundary ─────────────────────────────────────────────────────
 // The exit code is what a pipeline branches on, so "the scan could not run" reaching exit 0 is the
 // same defect as the library reporting CLEAN — one layer further out, and harder to notice.

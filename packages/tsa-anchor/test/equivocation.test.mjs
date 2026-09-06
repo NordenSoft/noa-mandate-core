@@ -25,6 +25,9 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   generateKeyPair,
   buildReceipt,
@@ -41,8 +44,8 @@ import {
   checkpointCorroboration,
 } from "../src/equivocation.mjs";
 import { anchorHash } from "../src/anchor-hash.mjs";
-import { stampAnchor } from "../src/client.mjs";
-import { startMockTsa } from "./mock-tsa-server.mjs";
+import { createVerificationResourceBudget } from "../src/verify.mjs";
+import { createAuthenticatedTsaFixture, createCountingOpenSsl } from "./openssl-tsa-fixture.mjs";
 
 // ── ground truth: real keys, real receipts, real signatures ────────────────────────────────────
 const CHAIN = "tenant-acme/orders";
@@ -85,6 +88,16 @@ function buildChainOf(params) {
 function witnessAnchor(kp, receipts, seq, ts) {
   const head = receipts[seq];
   return buildAnchor({ chain: CHAIN, highestSeq: seq, headHash: head.chain.hash, ts }, wSigner(kp));
+}
+
+function tsaVerification(fixture) {
+  return {
+    opensslExecutable: fixture.executable,
+    trustRoots: fixture.trustRoots,
+    allowedPolicyOids: [fixture.policyOid],
+    revocation: { mode: "crl-check-all", crls: fixture.crls },
+    clock: { now: new Date().toISOString(), maxFutureSkewMs: 300000 },
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -370,49 +383,140 @@ test("CHECKPOINT — one witness is not a quorum, and staleness is enforced when
 // 5. RFC 3161 — an independent party dates the fork.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-test("STAMPS — both branches of a fork carry an independent TSA time attestation", async () => {
-  const mock = await startMockTsa({ mode: "ok" });
+test("STAMPS — both branches of a fork carry an authenticated independent TSA time attestation", () => {
+  const branchA = buildChainOf(["p0", "p1", "p2-ALPHA"]);
+  const branchB = buildChainOf(["p0", "p1", "p2-BETA"]);
+  const a1 = witnessAnchor(W1, branchA, 2, "2026-06-23T10:00:00Z");
+  const a2 = witnessAnchor(W2, branchB, 2, "2026-06-23T10:00:05Z");
+  const fixture = createAuthenticatedTsaFixture(a1);
   try {
-    const branchA = buildChainOf(["p0", "p1", "p2-ALPHA"]);
-    const branchB = buildChainOf(["p0", "p1", "p2-BETA"]);
-    const a1 = witnessAnchor(W1, branchA, 2, "2026-06-23T10:00:00Z");
-    const a2 = witnessAnchor(W2, branchB, 2, "2026-06-23T10:00:05Z");
+    const tsaUrlClaim = "https://tsa.example.test/tsr";
+    const stamps = {
+      [anchorHash(a1)]: { ...fixture.valid, tsaUrl: tsaUrlClaim },
+      [anchorHash(a2)]: { ...fixture.stampFor(a2), tsaUrl: tsaUrlClaim },
+    };
 
-    const stamps = {};
-    stamps[anchorHash(a1)] = await stampAnchor(a1, { tsaUrl: mock.url });
-    stamps[anchorHash(a2)] = await stampAnchor(a2, { tsaUrl: mock.url });
-
-    const res = scanForEquivocation([a1, a2], TRUST_SET, { stamps });
+    const res = scanForEquivocation([a1, a2], TRUST_SET, { stamps, tsaVerification: tsaVerification(fixture) });
     assert.equal(res.verdict, "EQUIVOCATION", res.reason);
     assert.equal(res.stampsChecked, true);
     const f = res.findings[0];
     for (const branch of f.branches) {
       assert.equal(branch.stamp.verified, true, branch.stamp.reason);
+      assert.equal(branch.stamp.authenticated, true, branch.stamp.reason);
       assert.match(branch.stamp.genTime, /^\d{4}-\d{2}-\d{2}T/);
-      assert.equal(branch.stamp.tsaUrl, mock.url);
+      assert.equal(branch.stamp.tsaUrl, tsaUrlClaim);
     }
   } finally {
-    await mock.close();
+    fixture.cleanup();
   }
 });
 
-test("STAMPS — a stamp bound to a DIFFERENT anchor is reported unverified, never silently trusted", async () => {
-  const mock = await startMockTsa({ mode: "ok" });
+test("STAMPS — a stamp bound to a DIFFERENT anchor is reported unverified, never silently trusted", () => {
+  const branchA = buildChainOf(["p0", "p1", "p2-ALPHA"]);
+  const branchB = buildChainOf(["p0", "p1", "p2-BETA"]);
+  const a1 = witnessAnchor(W1, branchA, 2, "2026-06-23T10:00:00Z");
+  const a2 = witnessAnchor(W2, branchB, 2, "2026-06-23T10:00:05Z");
+  const fixture = createAuthenticatedTsaFixture(a1);
   try {
-    const branchA = buildChainOf(["p0", "p1", "p2-ALPHA"]);
-    const branchB = buildChainOf(["p0", "p1", "p2-BETA"]);
-    const a1 = witnessAnchor(W1, branchA, 2, "2026-06-23T10:00:00Z");
-    const a2 = witnessAnchor(W2, branchB, 2, "2026-06-23T10:00:05Z");
-    const stampForA1 = await stampAnchor(a1, { tsaUrl: mock.url });
-
     // The sidecar claims a1's token covers a2.
-    const stamps = { [anchorHash(a2)]: stampForA1 };
-    const res = scanForEquivocation([a1, a2], TRUST_SET, { stamps });
+    const stamps = { [anchorHash(a2)]: fixture.valid };
+    const res = scanForEquivocation([a1, a2], TRUST_SET, { stamps, tsaVerification: tsaVerification(fixture) });
     const branch = res.findings[0].branches.find((b) => b.headHash === branchB[2].chain.hash);
     assert.equal(branch.stamp.verified, false);
-    assert.match(branch.stamp.reason, /does not match|MALFORMED/i);
+    assert.equal(branch.stamp.code, "MESSAGE_IMPRINT_MISMATCH");
   } finally {
-    await mock.close();
+    fixture.cleanup();
+  }
+});
+
+test("STAMP RESOURCES — transferable proof verification is bounded, deduplicated, and fail-closed", () => {
+  const branchA = buildChainOf(["p0", "p1", "p2-ALPHA"]);
+  const branchB = buildChainOf(["p0", "p1", "p2-BETA"]);
+  const a1 = witnessAnchor(W1, branchA, 2, "2026-06-23T10:00:00Z");
+  const a2 = witnessAnchor(W2, branchB, 2, "2026-06-23T10:00:05Z");
+  const fixture = createAuthenticatedTsaFixture(a1);
+  const dirs = [];
+  try {
+    const finding = scanForEquivocation([a1, a2], TRUST_SET).findings[0];
+    const stampByHash = {
+      [anchorHash(a1)]: fixture.valid,
+      [anchorHash(a2)]: fixture.stampFor(a2),
+    };
+    const baseBranches = finding.branches.map((branch) => ({
+      ...branch,
+      stamp: { verified: true, ...stampByHash[branch.anchorHash] },
+    }));
+    const repeatedProof = {
+      ...finding,
+      branches: [baseBranches[0], baseBranches[1], ...Array.from({ length: 14 }, () => baseBranches[0])],
+    };
+
+    const dedupDir = mkdtempSync(join(tmpdir(), "noa-tsa-proof-dedup-"));
+    dirs.push(dedupDir);
+    const dedupWrapper = createCountingOpenSsl(dedupDir, fixture.executable);
+    const dedup = verifyEquivocationProof(repeatedProof, TRUST_SET, {
+      tsaVerification: { ...tsaVerification(fixture), opensslExecutable: dedupWrapper.executable },
+    });
+    assert.equal(dedup.ok, true, dedup.reason);
+    assert.equal(
+      dedup.resourceLimited,
+      false,
+      "exact duplicate proof jobs must reuse one authenticated verdict without resource exhaustion",
+    );
+    assert.equal(dedupWrapper.count(), 2 * 5, "sixteen evidence positions over two exact anchor/TSR jobs must spawn ten processes");
+    assert.equal(dedup.stampEvidence.length, 16);
+    assert.ok(dedup.stampEvidence.every((entry) => entry.code === "OK"));
+
+    const overLimitDir = mkdtempSync(join(tmpdir(), "noa-tsa-proof-limit-"));
+    dirs.push(overLimitDir);
+    const overLimitWrapper = createCountingOpenSsl(overLimitDir, fixture.executable);
+    const overLimit = verifyEquivocationProof(
+      { ...repeatedProof, branches: [...repeatedProof.branches, baseBranches[0]] },
+      TRUST_SET,
+      { tsaVerification: { ...tsaVerification(fixture), opensslExecutable: overLimitWrapper.executable } },
+    );
+    assert.equal(overLimit.ok, false, "seventeen proof branches must be refused before OpenSSL");
+    assert.equal(overLimit.resourceLimited, true);
+    assert.equal(overLimit.code, "VERIFICATION_RESOURCE_LIMIT");
+    assert.equal(overLimitWrapper.count(), 0, "seventeen carried branches must be refused before OpenSSL");
+
+    const deadlineDir = mkdtempSync(join(tmpdir(), "noa-tsa-proof-deadline-"));
+    dirs.push(deadlineDir);
+    const deadlineWrapper = createCountingOpenSsl(deadlineDir, fixture.executable, { stall: true });
+    const deadlineBudget = createVerificationResourceBudget(1000, 2 * 5);
+    const deadline = verifyEquivocationProof(
+      { ...finding, branches: baseBranches },
+      TRUST_SET,
+      {
+        tsaVerification: { ...tsaVerification(fixture), opensslExecutable: deadlineWrapper.executable },
+        tsaResourceBudget: deadlineBudget,
+      },
+    );
+    assert.equal(deadline.ok, true, "resource exhaustion does not erase the separately valid signed contradiction");
+    assert.equal(deadline.resourceLimited, true);
+    assert.equal(deadline.code, "VERIFICATION_RESOURCE_LIMIT");
+    assert.equal(deadlineWrapper.count(), 1, "deadline exhaustion must prevent the later unique stamp job from spawning");
+    assert.ok(deadline.stampEvidence.every((entry) => entry.code === "VERIFICATION_RESOURCE_LIMIT"));
+
+    const forgedDir = mkdtempSync(join(tmpdir(), "noa-tsa-proof-forged-budget-"));
+    dirs.push(forgedDir);
+    const forgedWrapper = createCountingOpenSsl(forgedDir, fixture.executable);
+    const forged = verifyEquivocationProof(
+      { ...finding, branches: baseBranches },
+      TRUST_SET,
+      {
+        tsaVerification: { ...tsaVerification(fixture), opensslExecutable: forgedWrapper.executable },
+        tsaResourceBudget: {},
+      },
+    );
+    assert.equal(forged.ok, true);
+    assert.equal(forged.resourceLimited, true);
+    assert.equal(forged.code, "VERIFICATION_RESOURCE_LIMIT");
+    assert.equal(forgedWrapper.count(), 0, "an ordinary lookalike object cannot forge the private resource capability");
+    assert.ok(forged.stampEvidence.every((entry) => entry.verified === false));
+  } finally {
+    fixture.cleanup();
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
   }
 });
 

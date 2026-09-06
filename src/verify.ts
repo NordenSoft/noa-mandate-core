@@ -7,10 +7,10 @@ import { signingMessage, RECEIPT_SIG_DOMAIN, CHECKPOINT_SIG_DOMAIN } from "./sig
 import { nonNfcPaths, isNFC } from "./nfc.js";
 import { parseDocument } from "./bytes.js";
 import { inertOptions, type OptionSchema } from "./opts.js";
-import { arrayPush, arrayIncludes, arrayEvery, arrayLength, arrayJoin, publishArray, dateParse, mapHas, mapGet, mapSet, newMap, newSet, objectKeys, objectGetOwnPropertyNames, isSafeInteger, arraySlice, setAdd, setSize, isArray, isNaNValue, jsonStringify } from "./intrinsics.js";
+import { arrayPush, arrayIncludes, arrayEvery, arrayLength, arrayJoin, publishArray, bufferFrom, dateParse, mapHas, mapGet, mapSet, newMap, newSet, objectCreateNull, objectKeys, objectGetOwnPropertyNames, isSafeInteger, arraySlice, setAdd, setSize, isArray, isNaNValue, jsonStringify } from "./intrinsics.js";
 import { isSha256Hash, isRfc3339Instant } from "./scan.js";
 import { frozenTable } from "./inert.js";
-import { parseVerificationKeyring, type ParsedVerificationKeyring } from "./verification-keyring.js";
+import { lifecycleInstantNanos, parseVerificationKeyring, type ParsedVerificationKeyring } from "./verification-keyring.js";
 
 export type VerifyStatus =
   | "VALID" // structure + hash-chain + signatures all verified against the supplied keyring
@@ -40,9 +40,10 @@ export type VerifyStatus =
 export interface VerifyOptions {
   /**
    * Trust root as JSON bytes. A static consumer supplies `{ kid: base64-SPKI }`. A rotatable signer
-   * supplies the atomic `noa.signing-key-lifecycle/0.1` document containing public keys plus each
-   * key's `retiredAt` (`null` for a current key). The lifecycle form refuses every non-null
-   * retirement outright; signer-chosen receipt/checkpoint timestamps are never retirement evidence.
+   * supplies the atomic `noa.signing-key-lifecycle/0.1` document containing public keys, optional
+   * explicit `validFrom`, and `retiredAt` (`null` for a current key). The lifecycle form refuses
+   * every non-null retirement outright; signer-chosen receipt/checkpoint timestamps are never
+   * lifecycle evidence. `validFrom` is evaluated only by the explicit historical side API.
    */
   keyring?: Uint8Array | string;
   /** Signed checkpoint as JSON bytes, asserting the expected head — enables tail-truncation detection. */
@@ -146,6 +147,118 @@ export interface VerifyResult {
   warnings: string[];
 }
 
+/**
+ * Versioned result contract for survivable historical verification.
+ *
+ * This is deliberately a side API. `verifyChain` remains the current-use authorization surface and
+ * continues to refuse every lifecycle-retired key outright. Historical verification first proves
+ * the receipt bytes with retained public material, then evaluates separately supplied witness
+ * evidence. A caller must read the dimensions; `classification` is only their summary and never
+ * rewrites an intact chain into the legacy word `TAMPERED` because later policy evidence arrived.
+ */
+export const HISTORICAL_VERIFICATION_SPEC = "noa.historical-verification/0.1" as const;
+
+export type HistoricalVerificationClassification =
+  | "VERIFIED"
+  | "PARTIAL"
+  | "UNVERIFIED"
+  | "CONFLICT"
+  | "INVALID";
+
+export type HistoricalVerificationCode =
+  | "HEAD_ANCHORED"
+  | "PREFIX_ANCHORED"
+  | "NO_WITNESS"
+  | "WITNESS_ROOT_NOT_PROVIDED"
+  | "WITNESS_ROOT_INVALID"
+  | "WITNESS_KEY_NOT_TRUSTED"
+  | "WITNESS_KEY_NOT_SEPARATE"
+  | "WITNESS_KEY_RETIRED"
+  | "CHECKPOINT_BEFORE_ACTIVATION"
+  | "CHECKPOINT_AFTER_RETIREMENT"
+  | "CHECKPOINT_AHEAD"
+  | "CHECKPOINT_CONFLICT"
+  | "RECEIPT_ROOT_NOT_PROVIDED"
+  | "RECEIPT_ROOT_INVALID"
+  | "RECEIPT_MALFORMED"
+  | "RECEIPT_INTEGRITY_FAILURE"
+  | "RECEIPT_IDENTITY_UNTRUSTED"
+  | "WITNESS_MALFORMED"
+  | "WITNESS_INTEGRITY_FAILURE";
+
+export type HistoricalIntegrity = "INTACT" | "BROKEN" | "UNANSWERED";
+export type HistoricalCompleteness = "UNANSWERED" | "PREFIX_ANCHORED" | "HEAD_ANCHORED" | "CONFLICT";
+export type HistoricalAttribution = "ATTRIBUTABLE_AS_OF" | "UNATTRIBUTABLE";
+export type HistoricalEvidenceAvailability =
+  | "NOT_PROVIDED"
+  | "AVAILABLE"
+  | "MISSING_RELATIVE_TO_CHECKPOINT"
+  | "PROVEN_SUPPRESSED";
+
+export interface HistoricalVerificationDimensions {
+  /** Integrity of all evidence that was both supplied and checkable under its dedicated trust root. */
+  readonly integrity: HistoricalIntegrity;
+  /** What the authenticated checkpoint proves about the presented contiguous chain. */
+  readonly completeness: HistoricalCompleteness;
+  /** Whether an independent-key checkpoint time can bound the covered receipt signatures. */
+  readonly attribution: HistoricalAttribution;
+  /**
+   * Key separation is mechanically enforced. Separate keys do not prove separate organizations,
+   * operators, infrastructure, or decision paths, so this dimension remains an explicit non-claim.
+   */
+  readonly organizationalIndependence: "UNVERIFIED";
+  readonly evidence: {
+    /** A lifecycle document was supplied; it is policy evidence, never signature-time evidence. */
+    readonly retirement: "NOT_PROVIDED" | "PROVIDED";
+    /** A signed checkpoint was supplied independently of the receipt chain. */
+    readonly witness: "NOT_PROVIDED" | "PROVIDED";
+    /**
+     * An authenticated later frontier yields `MISSING_RELATIVE_TO_CHECKPOINT`; it does not identify
+     * who omitted the bytes or why. `PROVEN_SUPPRESSED` is reserved for separate authenticated
+     * presenter-possession/omission evidence. This v0.1 API accepts no such evidence and therefore
+     * never emits that value; keeping it distinct prevents future code from relabelling absence.
+     */
+    readonly availability: HistoricalEvidenceAvailability;
+  };
+}
+
+export interface HistoricalVerifyOptions {
+  /**
+   * Receipt trust root. Lifecycle-retired entries retain their public material for integrity only;
+   * explicit `validFrom` and `retiredAt` delimit historical attribution as `[validFrom, retiredAt)`.
+   */
+  keyring: Uint8Array | string;
+  /** Optional `noa.checkpoint/0.1` historical time witness. */
+  checkpoint?: Uint8Array | string;
+  /**
+   * Dedicated checkpoint trust root. There is deliberately no fallback to `keyring`; a checkpoint
+   * cannot become historical evidence merely because the receipt signer trusts itself.
+   */
+  checkpointKeyring?: Uint8Array | string;
+  /** Optional receipt identity binding, with the same meaning as `VerifyOptions.identityManifest`. */
+  identityManifest?: Uint8Array | string;
+  maxReceipts?: number;
+  requireTenantConsistency?: boolean;
+  requireNFC?: boolean;
+}
+
+export interface HistoricalVerificationResult {
+  readonly spec: typeof HISTORICAL_VERIFICATION_SPEC;
+  readonly policy: {
+    readonly verifierVersion: typeof HISTORICAL_VERIFICATION_SPEC;
+    readonly purpose: "historical-audit";
+  };
+  readonly classification: HistoricalVerificationClassification;
+  readonly code: HistoricalVerificationCode;
+  readonly dimensions: HistoricalVerificationDimensions;
+  readonly chain: string | null;
+  readonly count: number;
+  /** Positive attribution applies only through this sequence, never implicitly to a later suffix. */
+  readonly attributedThroughSeq: number | null;
+  /** Authenticated checkpoint time supporting `ATTRIBUTABLE_AS_OF`; null on every non-positive path. */
+  readonly asOf: string | null;
+}
+
 export const DEFAULT_MAX_RECEIPTS = 1_000_000;
 
 function fail(
@@ -220,6 +333,9 @@ interface InertVerifyOptions {
   readonly requireNFC?: boolean;
 }
 
+/** Mutable only while constructing a captured null-prototype internal record. */
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+
 /**
  * `maxReceipts` is ceilinged at `DEFAULT_MAX_RECEIPTS` rather than left open. An option whose value
  * is unbounded is a DoS knob, and raising the ceiling above the default is not a capability any
@@ -230,6 +346,26 @@ interface InertVerifyOptions {
 const VERIFY_OPTION_SCHEMA: OptionSchema = Object.freeze(Object.assign(Object.create(null), {
   keyring: { kind: "document" },
   checkpoint: { kind: "document" },
+  identityManifest: { kind: "document" },
+  maxReceipts: { kind: "count", max: DEFAULT_MAX_RECEIPTS },
+  requireTenantConsistency: { kind: "boolean" },
+  requireNFC: { kind: "boolean" },
+})) as OptionSchema;
+
+interface InertHistoricalVerifyOptions {
+  readonly keyring?: string;
+  readonly checkpoint?: string;
+  readonly checkpointKeyring?: string;
+  readonly identityManifest?: string;
+  readonly maxReceipts?: number;
+  readonly requireTenantConsistency?: boolean;
+  readonly requireNFC?: boolean;
+}
+
+const HISTORICAL_VERIFY_OPTION_SCHEMA: OptionSchema = Object.freeze(Object.assign(Object.create(null), {
+  keyring: { kind: "document" },
+  checkpoint: { kind: "document" },
+  checkpointKeyring: { kind: "document" },
   identityManifest: { kind: "document" },
   maxReceipts: { kind: "count", max: DEFAULT_MAX_RECEIPTS },
   requireTenantConsistency: { kind: "boolean" },
@@ -716,6 +852,407 @@ export function verifyChainText(text: string, opts: VerifyOptions = {}): VerifyR
   // `verifyChainText` was documented as "the immune path" while forwarding into an object API that
   // was not immune at all.
   return verifyChain(text, opts);
+}
+
+function historicalDimensions(
+  integrity: HistoricalIntegrity,
+  completeness: HistoricalCompleteness,
+  attribution: HistoricalAttribution,
+  retirement: "NOT_PROVIDED" | "PROVIDED",
+  witness: "NOT_PROVIDED" | "PROVIDED",
+  availability: HistoricalEvidenceAvailability,
+): HistoricalVerificationDimensions {
+  return {
+    integrity,
+    completeness,
+    attribution,
+    organizationalIndependence: "UNVERIFIED",
+    evidence: { retirement, witness, availability },
+  };
+}
+
+function historicalResult(
+  classification: HistoricalVerificationClassification,
+  code: HistoricalVerificationCode,
+  dimensions: HistoricalVerificationDimensions,
+  chain: string | null,
+  count: number,
+  attributedThroughSeq: number | null = null,
+  asOf: string | null = null,
+): HistoricalVerificationResult {
+  return {
+    spec: HISTORICAL_VERIFICATION_SPEC,
+    policy: { verifierVersion: HISTORICAL_VERIFICATION_SPEC, purpose: "historical-audit" },
+    classification,
+    code,
+    dimensions,
+    chain,
+    count,
+    attributedThroughSeq,
+    asOf,
+  };
+}
+
+/**
+ * Verify historical receipt evidence without re-authorizing a retired key.
+ *
+ * The existing federation path cannot be substituted for this checkpoint contract: federation
+ * anchors use a distinct signing domain, require a k>=2/q>1 trust set, and deliberately ignore a
+ * frontier behind the presented head. This API instead reuses the existing receipt verifier and
+ * checkpoint verifier, while preserving `verifyChainWitnessed` and its anchor/trust-set semantics
+ * unchanged. Receipt integrity is checked by projecting retained lifecycle public material into the
+ * legacy static keyring form and invoking the same module-private parsed-chain core used by
+ * `verifyChain`, without a checkpoint or second byte parse. Checkpoint signature authentication then
+ * uses only `checkpointKeyring`; receipt trust is never a fallback.
+ */
+export function verifyHistoricalChain(
+  receipts: Uint8Array | string,
+  opts: HistoricalVerifyOptions,
+): HistoricalVerificationResult {
+  const admitted = inertOptions<InertHistoricalVerifyOptions>(
+    HISTORICAL_VERIFY_OPTION_SCHEMA,
+    opts,
+    "options",
+  );
+  if (!admitted.ok) {
+    return historicalResult(
+      "INVALID",
+      "RECEIPT_MALFORMED",
+      historicalDimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", "NOT_PROVIDED", "NOT_PROVIDED", "NOT_PROVIDED"),
+      null,
+      0,
+    );
+  }
+  const o = admitted.value;
+  if (o.keyring === undefined) {
+    return historicalResult(
+      "UNVERIFIED",
+      "RECEIPT_ROOT_NOT_PROVIDED",
+      historicalDimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", "NOT_PROVIDED", o.checkpoint === undefined ? "NOT_PROVIDED" : "PROVIDED", o.checkpoint === undefined ? "NOT_PROVIDED" : "AVAILABLE"),
+      null,
+      0,
+    );
+  }
+
+  const receiptTrustParsed = parseVerificationKeyring(o.keyring, "keyring");
+  if (!receiptTrustParsed.ok) {
+    return historicalResult(
+      "INVALID",
+      "RECEIPT_ROOT_INVALID",
+      historicalDimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", "NOT_PROVIDED", o.checkpoint === undefined ? "NOT_PROVIDED" : "PROVIDED", o.checkpoint === undefined ? "NOT_PROVIDED" : "AVAILABLE"),
+      null,
+      0,
+    );
+  }
+  const receiptTrust = receiptTrustParsed.value;
+  const retirementEvidence = receiptTrust.lifecycle ? "PROVIDED" : "NOT_PROVIDED";
+
+  // CONTROL G2-RETIREMENT-INTEGRITY: retained public material is projected into the already-shipped
+  // static verifier. This proves bytes/signatures and deliberately carries no authority to a
+  // current-use surface; `verifyChain(receipts, { keyring: lifecycle })` still refuses the key.
+  const retainedKeyring = jsonStringify(receiptTrust.keyring);
+  if (typeof retainedKeyring !== "string") {
+    return historicalResult(
+      "INVALID",
+      "RECEIPT_ROOT_INVALID",
+      historicalDimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, o.checkpoint === undefined ? "NOT_PROVIDED" : "PROVIDED", o.checkpoint === undefined ? "NOT_PROVIDED" : "AVAILABLE"),
+      null,
+      0,
+    );
+  }
+  // This internal reader expects inert options. An ordinary object would inherit absent fields from
+  // a poisoned Object.prototype (for example maxReceipts=0 or a hostile identityManifest), making
+  // the historical result depend on ambient mutable state after its public options were admitted.
+  const integrityOptions = objectCreateNull<Mutable<InertVerifyOptions>>();
+  integrityOptions.keyring = retainedKeyring;
+  if (o.identityManifest !== undefined) integrityOptions.identityManifest = o.identityManifest;
+  if (o.maxReceipts !== undefined) integrityOptions.maxReceipts = o.maxReceipts;
+  if (o.requireTenantConsistency !== undefined) integrityOptions.requireTenantConsistency = o.requireTenantConsistency;
+  if (o.requireNFC !== undefined) integrityOptions.requireNFC = o.requireNFC;
+  const witnessEvidence = o.checkpoint === undefined ? "NOT_PROVIDED" : "PROVIDED";
+  const initialAvailability: HistoricalEvidenceAvailability = o.checkpoint === undefined ? "NOT_PROVIDED" : "AVAILABLE";
+
+  // ONE RECEIPT SNAPSHOT, TWO QUESTIONS. A Uint8Array can be backed by SharedArrayBuffer and change
+  // between reads. Calling public `verifyChain(receipts)` and then parsing `receipts` again for the
+  // checkpoint map let signature verification and reconciliation reason over different byte views.
+  // Parse once at this boundary and pass that exact safe tree into the module-private verifier; the
+  // by-seq map below is built from the same object graph. No second parser or mutable-byte reread.
+  const receiptsParsed = parseDocument(receipts, "receipts");
+  if (!receiptsParsed.ok || !isArray(receiptsParsed.value)) {
+    return historicalResult(
+      "INVALID",
+      "RECEIPT_MALFORMED",
+      historicalDimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, witnessEvidence, initialAvailability),
+      null,
+      0,
+    );
+  }
+  const chainResult = verifyParsedChain(receiptsParsed.value, integrityOptions);
+
+  if (chainResult.status !== "VALID" || chainResult.signaturesVerified !== true) {
+    if (chainResult.status === "TAMPERED") {
+      return historicalResult(
+        "INVALID",
+        "RECEIPT_INTEGRITY_FAILURE",
+        historicalDimensions("BROKEN", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, witnessEvidence, initialAvailability),
+        chainResult.chain,
+        chainResult.count,
+      );
+    }
+    if (chainResult.status === "UNTRUSTED") {
+      return historicalResult(
+        "INVALID",
+        "RECEIPT_IDENTITY_UNTRUSTED",
+        historicalDimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, witnessEvidence, initialAvailability),
+        chainResult.chain,
+        chainResult.count,
+      );
+    }
+    return historicalResult(
+      "INVALID",
+      "RECEIPT_MALFORMED",
+      historicalDimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, witnessEvidence, initialAvailability),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+
+  const bySeq = newMap<number, Receipt>();
+  const receiptList = receiptsParsed.value as Receipt[];
+  for (let i = 0; i < receiptList.length; i++) {
+    const receipt = receiptList[i] as Receipt;
+    mapSet(bySeq, receipt.chain.seq, receipt);
+  }
+  const ordered: Receipt[] = [];
+  for (let seq = 0; seq < receiptList.length; seq++) {
+    const receipt = mapGet(bySeq, seq);
+    if (receipt === undefined) {
+      return historicalResult(
+        "INVALID",
+        "RECEIPT_INTEGRITY_FAILURE",
+        historicalDimensions("BROKEN", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, witnessEvidence, initialAvailability),
+        chainResult.chain,
+        chainResult.count,
+      );
+    }
+    arrayPush(ordered, receipt);
+  }
+  const head = ordered[ordered.length - 1] as Receipt;
+
+  if (o.checkpoint === undefined) {
+    return historicalResult(
+      "UNVERIFIED",
+      "NO_WITNESS",
+      historicalDimensions("INTACT", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, "NOT_PROVIDED", "NOT_PROVIDED"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+  if (o.checkpointKeyring === undefined) {
+    return historicalResult(
+      "UNVERIFIED",
+      "WITNESS_ROOT_NOT_PROVIDED",
+      historicalDimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, "PROVIDED", "AVAILABLE"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+
+  const witnessTrustParsed = parseVerificationKeyring(o.checkpointKeyring, "checkpointKeyring");
+  if (!witnessTrustParsed.ok) {
+    return historicalResult(
+      "UNVERIFIED",
+      "WITNESS_ROOT_INVALID",
+      historicalDimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, "PROVIDED", "AVAILABLE"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+  const checkpointParsed = parseDocument(o.checkpoint, "checkpoint");
+  if (!checkpointParsed.ok || typeof checkpointParsed.value !== "object" || checkpointParsed.value === null || isArray(checkpointParsed.value)) {
+    return historicalResult(
+      "INVALID",
+      "WITNESS_MALFORMED",
+      historicalDimensions("BROKEN", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, "PROVIDED", "AVAILABLE"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+  const witnessTrust = witnessTrustParsed.value;
+  // ONE CHECKPOINT SNAPSHOT, TWO QUESTIONS. Signature authentication and the mapping checks below
+  // must consume the exact parsed tree. Re-entering the public bytes API here would parse a
+  // SharedArrayBuffer-backed Uint8Array twice and permit the authenticated bytes to differ from the
+  // reconciled bytes. Retirement is evaluated separately below, after the signature is checked, so
+  // retained witness public material can establish cryptographic integrity without reviving the
+  // key as a current witness.
+  const retainedWitnessTrust = objectCreateNull<Mutable<ParsedVerificationKeyring>>();
+  retainedWitnessTrust.keyring = witnessTrust.keyring;
+  retainedWitnessTrust.retiredKids = objectCreateNull<Record<string, true>>();
+  retainedWitnessTrust.validFromByKid = witnessTrust.validFromByKid;
+  retainedWitnessTrust.retiredAtByKid = witnessTrust.retiredAtByKid;
+  retainedWitnessTrust.lifecycle = witnessTrust.lifecycle;
+  const checkpoint = checkpointParsed.value as Checkpoint;
+  const checkpointVerdict = verifyCheckpointParsed(checkpoint, retainedWitnessTrust);
+  if (checkpointVerdict === "unverified") {
+    return historicalResult(
+      "UNVERIFIED",
+      "WITNESS_KEY_NOT_TRUSTED",
+      historicalDimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, "PROVIDED", "AVAILABLE"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+  if (checkpointVerdict === "bad spec" || checkpointVerdict === "malformed checkpoint") {
+    return historicalResult(
+      "INVALID",
+      "WITNESS_MALFORMED",
+      historicalDimensions("BROKEN", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, "PROVIDED", "AVAILABLE"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+  if (checkpointVerdict !== "ok") {
+    return historicalResult(
+      "INVALID",
+      "WITNESS_INTEGRITY_FAILURE",
+      historicalDimensions("BROKEN", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, "PROVIDED", "AVAILABLE"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+  const witnessPublicKey = witnessTrust.keyring[checkpoint.sig.kid];
+  if (witnessPublicKey === undefined) {
+    return historicalResult(
+      "UNVERIFIED",
+      "WITNESS_KEY_NOT_TRUSTED",
+      historicalDimensions("UNANSWERED", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, "PROVIDED", "AVAILABLE"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+
+  // CONTROL G2-WITNESS-KEY-SEPARATION: compare both kid and decoded canonical SPKI material against every
+  // actual receipt signer. A relabelled copy of the same key is still the same witness and cannot
+  // establish historical time. Every compared key has already passed `verifyEd25519`, which pins a
+  // canonical Ed25519 SPKI; hashing the decoded DER makes the comparison independent of kid labels
+  // and string representation. This says nothing about organizational independence.
+  const witnessKeyFingerprint = sha256Hex(bufferFrom(witnessPublicKey, "base64"));
+  let witnessKeySeparated = true;
+  for (let i = 0; i < ordered.length; i++) {
+    const receipt = ordered[i] as Receipt;
+    const receiptPublicKey = receiptTrust.keyring[receipt.sig.kid] as string;
+    if (
+      checkpoint.sig.kid === receipt.sig.kid
+      || witnessKeyFingerprint === sha256Hex(bufferFrom(receiptPublicKey, "base64"))
+    ) {
+      witnessKeySeparated = false;
+      break;
+    }
+  }
+  if (!witnessKeySeparated) {
+    return historicalResult(
+      "UNVERIFIED",
+      "WITNESS_KEY_NOT_SEPARATE",
+      historicalDimensions("INTACT", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, "PROVIDED", "AVAILABLE"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+  if (witnessTrust.retiredKids[checkpoint.sig.kid] === true) {
+    return historicalResult(
+      "UNVERIFIED",
+      "WITNESS_KEY_RETIRED",
+      historicalDimensions("INTACT", "UNANSWERED", "UNATTRIBUTABLE", retirementEvidence, "PROVIDED", "AVAILABLE"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+
+  if (checkpoint.chain !== head.scope.chain) {
+    return historicalResult(
+      "CONFLICT",
+      "CHECKPOINT_CONFLICT",
+      historicalDimensions("INTACT", "CONFLICT", "UNATTRIBUTABLE", retirementEvidence, "PROVIDED", "AVAILABLE"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+  if (checkpoint.highestSeq > head.chain.seq) {
+    return historicalResult(
+      "CONFLICT",
+      "CHECKPOINT_AHEAD",
+      historicalDimensions("INTACT", "CONFLICT", "UNATTRIBUTABLE", retirementEvidence, "PROVIDED", "MISSING_RELATIVE_TO_CHECKPOINT"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+  const checkpointedReceipt = mapGet(bySeq, checkpoint.highestSeq);
+  if (checkpointedReceipt === undefined || checkpointedReceipt.chain.hash !== checkpoint.headHash) {
+    return historicalResult(
+      "CONFLICT",
+      "CHECKPOINT_CONFLICT",
+      historicalDimensions("INTACT", "CONFLICT", "UNATTRIBUTABLE", retirementEvidence, "PROVIDED", "AVAILABLE"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+
+  const completeness: HistoricalCompleteness = checkpoint.highestSeq === head.chain.seq
+    ? "HEAD_ANCHORED"
+    : "PREFIX_ANCHORED";
+  const checkpointTime = lifecycleInstantNanos(checkpoint.ts);
+  let checkpointBeforeActivation = false;
+  let checkpointAfterRetirement = checkpointTime === null;
+  for (let seq = 0; seq <= checkpoint.highestSeq; seq++) {
+    const receipt = mapGet(bySeq, seq) as Receipt;
+    const validFrom = receiptTrust.validFromByKid[receipt.sig.kid];
+    const retiredAt = receiptTrust.retiredAtByKid[receipt.sig.kid];
+    // The lower bound is inclusive. It is enforceable only when the lifecycle source explicitly
+    // declared it; legacy `{publicKey, retiredAt}` entries remain unbounded below rather than being
+    // assigned fabricated activation history.
+    if (typeof validFrom === "string") {
+      const activationTime = lifecycleInstantNanos(validFrom);
+      if (checkpointTime === null || activationTime === null || checkpointTime < activationTime) {
+        checkpointBeforeActivation = true;
+      }
+    }
+    // The witness must strictly predate retirement. Equality has no ordering margin and therefore
+    // cannot prove the signature existed while the key was still active.
+    if (typeof retiredAt === "string") {
+      const retirementTime = lifecycleInstantNanos(retiredAt);
+      if (checkpointTime === null || retirementTime === null || checkpointTime >= retirementTime) {
+        checkpointAfterRetirement = true;
+      }
+    }
+  }
+  if (checkpointBeforeActivation) {
+    return historicalResult(
+      "UNVERIFIED",
+      "CHECKPOINT_BEFORE_ACTIVATION",
+      historicalDimensions("INTACT", completeness, "UNATTRIBUTABLE", retirementEvidence, "PROVIDED", "AVAILABLE"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+  if (checkpointAfterRetirement) {
+    return historicalResult(
+      "UNVERIFIED",
+      "CHECKPOINT_AFTER_RETIREMENT",
+      historicalDimensions("INTACT", completeness, "UNATTRIBUTABLE", retirementEvidence, "PROVIDED", "AVAILABLE"),
+      chainResult.chain,
+      chainResult.count,
+    );
+  }
+
+  return historicalResult(
+    completeness === "HEAD_ANCHORED" ? "VERIFIED" : "PARTIAL",
+    completeness,
+    historicalDimensions("INTACT", completeness, "ATTRIBUTABLE_AS_OF", retirementEvidence, "PROVIDED", "AVAILABLE"),
+    chainResult.chain,
+    chainResult.count,
+    checkpoint.highestSeq,
+    checkpoint.ts,
+  );
 }
 
 type CheckpointVerdict = "ok" | "unverified" | "retired signing key" | "bad spec" | "malformed checkpoint" | "bad checkpoint signature";

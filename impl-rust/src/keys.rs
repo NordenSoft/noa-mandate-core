@@ -75,7 +75,7 @@ pub fn strict_b64decode(s: &str) -> Result<Vec<u8>, String> {
 }
 
 /// base64(DER SPKI Ed25519) → raw 32-byte key, with small-order + non-canonical-y rejection.
-fn spki_to_raw(pub_b64: &str) -> Result<[u8; 32], String> {
+pub(crate) fn spki_to_raw(pub_b64: &str) -> Result<[u8; 32], String> {
     let der = strict_b64decode(pub_b64)?;
     if der.len() != 44 || der[..12] != SPKI_PREFIX {
         return Err("not a canonical Ed25519 SPKI".into());

@@ -8,18 +8,20 @@
 //! Usage:  noa-verify <receipts.json> [keyring.json] [--identity <m.json>] [--checkpoint <cp.json>]
 //! Exit:   0 VALID · 1 UNVERIFIED (no keyring) · 2 TAMPERED · 3 MALFORMED · 4 USAGE · 5 UNTRUSTED
 
+mod historical;
 mod jcs;
 mod json;
 mod keys;
 mod schema;
 mod verify;
 
+use historical::verify_historical_chain;
 use json::Json;
 use std::process::exit;
 use verify::{verify_chain, Status};
 
 const USAGE: &str =
-    "usage: noa-verify <receipts.json> [keyring.json] [--identity <m.json>] [--checkpoint <cp.json>]";
+    "usage: noa-verify <receipts.json> [keyring.json] [--purpose current|historical] [--identity <m.json>] [--checkpoint <cp.json>] [--checkpoint-keyring <k.json>]";
 
 /// Minimal JSON-string escape for the emitted `detail` (exit code is the contract; this is diagnostic).
 fn esc(s: &str) -> String {
@@ -49,11 +51,24 @@ fn run() -> i32 {
     let mut keyring_path: Option<String> = None;
     let mut identity_path: Option<String> = None;
     let mut checkpoint_path: Option<String> = None;
+    let mut checkpoint_keyring_path: Option<String> = None;
+    let mut purpose = "current";
 
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
-        if a == "--identity" {
+        if a == "--purpose" {
+            if i + 1 >= args.len() || (args[i + 1] != "current" && args[i + 1] != "historical") {
+                eprintln!("{USAGE}");
+                return 4;
+            }
+            i += 1;
+            purpose = if args[i] == "historical" {
+                "historical"
+            } else {
+                "current"
+            };
+        } else if a == "--identity" {
             if i + 1 >= args.len() {
                 eprintln!("{USAGE}");
                 return 4;
@@ -67,6 +82,13 @@ fn run() -> i32 {
             }
             i += 1;
             checkpoint_path = Some(args[i].clone());
+        } else if a == "--checkpoint-keyring" {
+            if i + 1 >= args.len() {
+                eprintln!("{USAGE}");
+                return 4;
+            }
+            i += 1;
+            checkpoint_keyring_path = Some(args[i].clone());
         } else if a.starts_with("--") {
             eprintln!("unknown flag: {a}");
             return 4;
@@ -88,6 +110,18 @@ fn run() -> i32 {
             return 4;
         }
     };
+    if purpose == "historical" && keyring_path.is_none() {
+        eprintln!("{USAGE}");
+        return 4;
+    }
+    if purpose == "current" && checkpoint_keyring_path.is_some() {
+        eprintln!("{USAGE}");
+        return 4;
+    }
+    if checkpoint_keyring_path.is_some() && checkpoint_path.is_none() {
+        eprintln!("{USAGE}");
+        return 4;
+    }
 
     // Parse every input file with the strict parser (parity with the TS CLI readJsonFile -> safeParse).
     let receipts = match read_and_parse(&receipts_path) {
@@ -115,6 +149,13 @@ fn run() -> i32 {
         },
         None => None,
     };
+    let checkpoint_keyring = match &checkpoint_keyring_path {
+        Some(p) => match read_and_parse(p) {
+            Ok(v) => Some(v),
+            Err(e) => return emit_malformed(&e),
+        },
+        None => None,
+    };
 
     // A trust/aux file that was GIVEN but is not an object is an operator error → MALFORMED (parity with
     // the Python CLI guards), NOT silently treated as absent (which would drop the security control).
@@ -126,6 +167,38 @@ fn run() -> i32 {
     }
     if keyring_path.is_some() && !keyring.as_ref().map(Json::is_object).unwrap_or(false) {
         return emit_malformed("keyring must be an object (kid -> base64 SPKI)");
+    }
+    if checkpoint_keyring_path.is_some()
+        && !checkpoint_keyring
+            .as_ref()
+            .map(Json::is_object)
+            .unwrap_or(false)
+    {
+        return emit_malformed("checkpoint keyring must be an object");
+    }
+
+    if purpose == "historical" {
+        let result = verify_historical_chain(
+            &receipts,
+            keyring.as_ref().unwrap(),
+            checkpoint.as_ref(),
+            checkpoint_keyring.as_ref(),
+            identity.as_ref(),
+        );
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+        let classification = result
+            .get("classification")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("INVALID");
+        return match classification {
+            "VERIFIED" => 0,
+            "PARTIAL" | "UNVERIFIED" => 1,
+            "CONFLICT" => 7,
+            _ => match result.get("code").and_then(serde_json::Value::as_str) {
+                Some("RECEIPT_INTEGRITY_FAILURE" | "WITNESS_INTEGRITY_FAILURE") => 8,
+                _ => 3,
+            },
+        };
     }
 
     let (status, detail) = verify_chain(
