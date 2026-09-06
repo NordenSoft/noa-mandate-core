@@ -783,8 +783,8 @@ test("COVERAGE — what this control reads is stated exactly, not claimed univer
     `${r.analysed ? "ANALYSED    " : "not analysed"} ${r.dir.slice(REPO.length + 1)}` +
     (r.analysed ? "" : `  [${r.census.map(([e, n]) => `${n}${e}`).join(" ")}]`));
   assert.deepEqual(shown, [
-    "not analysed impl-csharp/src  [6.cs]",
-    "not analysed impl-rust/src  [6.rs]",
+    "not analysed impl-csharp/src  [7.cs]",
+    "not analysed impl-rust/src  [7.rs]",
     "ANALYSED     packages/adapter-core/src",
     "ANALYSED     packages/approval-artifacts/src",
     "ANALYSED     packages/e2e-demo/src",

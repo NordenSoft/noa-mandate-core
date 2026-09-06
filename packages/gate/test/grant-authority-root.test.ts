@@ -132,6 +132,12 @@ interface Harness {
   phone: { kid: string; privateKey: string; publicKey: string };
 }
 let H: Harness;
+let fixtureDir: string | undefined;
+let fixtureChild: ChildProcess | undefined;
+
+// Darwin's sockaddr_un has a 104-byte sun_path. Keep test sockets below that limit so an isolated
+// child environment cannot turn this security test into an ENOENT setup failure before it runs.
+const MAX_DARWIN_UNIX_SOCKET_PATH_BYTES = 100;
 
 /** The attacker's own channel to the signer: the socket path and the shim, nothing else. This is
  *  literally what a compromised gate process holds, used exactly as it would use it. */
@@ -187,9 +193,14 @@ function freshHold(chain: string): { holdId: string; holdEnvelope: HoldEnvelope;
 }
 
 before(async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), "noa-grant-signer-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "n-"));
+  fixtureDir = dir;
   chmodSync(dir, 0o700);
-  const socket = path.join(dir, "grant.sock");
+  const socket = path.join(dir, "s");
+  assert.ok(
+    Buffer.byteLength(socket, "utf8") <= MAX_DARWIN_UNIX_SOCKET_PATH_BYTES,
+    `grant signer socket path is ${Buffer.byteLength(socket, "utf8")} bytes; must stay within the ${MAX_DARWIN_UNIX_SOCKET_PATH_BYTES}-byte Darwin-safe fixture bound`,
+  );
   const keyFile = path.join(dir, "grant-signer.key.json");
   const trustFile = path.join(dir, "grant-signer-trust.json");
 
@@ -229,6 +240,7 @@ before(async () => {
   const child = spawn(process.execPath, [SIDECAR, "--key-file", keyFile, "--trust-file", trustFile, "--socket", socket], {
     stdio: ["ignore", "pipe", "pipe"],
   });
+  fixtureChild = child;
   await new Promise<void>((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("grant sidecar did not report listening within 10s")), 10_000);
     child.stderr!.setEncoding("utf8");
@@ -266,8 +278,9 @@ before(async () => {
 });
 
 after(() => {
-  H?.child?.kill("SIGTERM");
-  if (H?.dir) rmSync(H.dir, { recursive: true, force: true });
+  fixtureChild?.kill("SIGTERM");
+  fixtureChild = undefined;
+  if (fixtureDir) rmSync(fixtureDir, { recursive: true, force: true });
 });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
