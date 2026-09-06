@@ -9609,6 +9609,304 @@ test("capture reuses metadata evidence while each fresh arm is observed in fixed
   }
 });
 
+test("Darwin directory cohorts batch more than 64 siblings across distinct depths", (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("requires the Darwin metadata backend");
+    return;
+  }
+  const fixture = minimalCaptureFixture("directory-cohort-depths");
+  const originalMkdir = fs.mkdirSync;
+  const originalSpawn = childProcess.spawnSync;
+  const copiedIdentities = new Set<string>();
+  const observedModes = new Map<string, Set<string>>();
+  let copiedMetadataCalls = 0;
+  let widestBatch = 0;
+  let captured: Capture | null = null;
+  try {
+    for (let index = 0; index < 70; index += 1) {
+      const directory = path.join(fixture.source, `cohort-${index}`, "nested");
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(directory, "leaf.txt"), `cohort ${index}\n`, { mode: 0o600 });
+    }
+    fs.mkdirSync = ((...args: Parameters<typeof fs.mkdirSync>) => {
+      const result = Reflect.apply(originalMkdir, fs, args);
+      if (String(args[0]).includes(`${path.sep}workspace${path.sep}cohort-`)) {
+        const stat = fs.lstatSync(args[0], { bigint: true });
+        copiedIdentities.add(`${stat.dev}:${stat.ino}`);
+      }
+      return result;
+    }) as typeof fs.mkdirSync;
+    childProcess.spawnSync = ((...args: Parameters<typeof childProcess.spawnSync>) => {
+      const childArgs = args[1];
+      if (Array.isArray(childArgs) && childArgs.includes("/usr/bin/python3")) {
+        const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
+        if (Array.isArray(stdio) && stdio.length > 4) {
+          const mode = childArgs.includes("acl") ? "acl" : "xattr";
+          const identities = stdio.slice(4).map((fd) => {
+            assert.equal(typeof fd, "number");
+            const stat = fs.fstatSync(fd as number, { bigint: true });
+            return `${stat.dev}:${stat.ino}`;
+          });
+          assert.ok(identities.length <= 64, "native metadata descriptor bound exceeded");
+          const matching = identities.filter((identity) => copiedIdentities.has(identity));
+          if (matching.length > 0) {
+            copiedMetadataCalls += 1;
+            widestBatch = Math.max(widestBatch, matching.length);
+            for (const identity of matching) {
+              const modes = observedModes.get(identity) ?? new Set<string>();
+              modes.add(mode);
+              observedModes.set(identity, modes);
+            }
+          }
+        }
+      }
+      return Reflect.apply(originalSpawn, childProcess, args);
+    }) as typeof childProcess.spawnSync;
+    syncBuiltinESMExports();
+    captured = workspace.captureAndSealCandidate({
+      custodyRoot: fixture.custody,
+      maxAttempts: 1,
+      sourceRoot: fixture.source,
+    });
+    assert.equal(copiedIdentities.size, 140);
+    assert.ok(widestBatch > 1, "directory metadata was never batched");
+    assert.ok(copiedMetadataCalls < copiedIdentities.size, "per-directory helper amplification remains");
+    for (const identity of copiedIdentities) {
+      assert.deepEqual([...(observedModes.get(identity) ?? [])].sort(), ["acl", "xattr"]);
+    }
+    for (let index = 0; index < 70; index += 1) {
+      assert.equal(
+        fs.readFileSync(path.join(captured.workspaceRoot, `cohort-${index}`, "nested/leaf.txt"), "utf8"),
+        `cohort ${index}\n`,
+      );
+    }
+    assert.doesNotThrow(() => workspace.verifySealedSeed(captured!));
+    t.diagnostic(JSON.stringify({ directories: copiedIdentities.size, copiedMetadataCalls, widestBatch }));
+  } finally {
+    fs.mkdirSync = originalMkdir;
+    childProcess.spawnSync = originalSpawn;
+    syncBuiltinESMExports();
+    cleanupReportedScratchRoots(captured?.retainedPrivateRoots ?? []);
+    removeFixturePath(fixture.source);
+    removeFixturePath(fixture.custody);
+  }
+});
+
+for (const fault of ["parent-replacement", "child-replacement", "child-xattr", "child-fsync", "child-close", "parent-close"] as const) {
+  test(`Darwin directory cohort refuses ${fault} before copied file use`, (t) => {
+    if (process.platform !== "darwin") {
+      t.skip("requires the Darwin directory cohort path");
+      return;
+    }
+    const fixture = minimalCaptureFixture(`directory-cohort-${fault}`);
+    const originalMkdir = fs.mkdirSync;
+    const originalOpen = fs.openSync;
+    const originalClose = fs.closeSync;
+    const originalFsync = fs.fsyncSync;
+    const descriptors = new Map<number, string>();
+    let createdPath: string | null = null;
+    let heldParentDescriptor: number | null = null;
+    let injected = false;
+    let copiedLeafOpened = false;
+    let refusal: WorkspaceError | null = null;
+    let captured: Capture | null = null;
+    const injectionMessage = `injected directory cohort ${fault}`;
+    try {
+      fs.mkdirSync(path.join(fixture.source, "cohort-parent", "nested"), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(fixture.source, "cohort-parent", "nested", "leaf.txt"), "protected bytes\n");
+      fs.mkdirSync = ((...args: Parameters<typeof fs.mkdirSync>) => {
+        const result = Reflect.apply(originalMkdir, fs, args);
+        const absolute = String(args[0]);
+        if (absolute.includes(`${path.sep}workspace${path.sep}cohort-parent`)) {
+          createdPath = absolute;
+          if (fault === "parent-close" && heldParentDescriptor === null) {
+            const held = [...descriptors].find(([, directory]) => directory === path.dirname(absolute));
+            assert.notEqual(held, undefined, "the cohort parent descriptor is not held across mkdir");
+            heldParentDescriptor = held![0];
+          }
+          if (!injected && fault === "parent-replacement" && path.basename(absolute) === "nested") {
+            injected = true;
+            const parent = path.dirname(absolute);
+            fs.renameSync(parent, `${parent}-retained`);
+            originalMkdir(parent, { mode: 0o700 });
+          }
+        }
+        return result;
+      }) as typeof fs.mkdirSync;
+      fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+        const absolute = String(args[0]);
+        if (absolute.includes(`${path.sep}workspace${path.sep}cohort-parent${path.sep}nested${path.sep}leaf.txt`)) {
+          copiedLeafOpened = true;
+        }
+        const fd = Reflect.apply(originalOpen, fs, args);
+        descriptors.set(fd, absolute);
+        return fd;
+      }) as typeof fs.openSync;
+      fs.fsyncSync = (fd: number) => {
+        originalFsync(fd);
+        const absolute = descriptors.get(fd);
+        if (injected || createdPath === null) return;
+        if (fault === "child-fsync" && absolute === createdPath) {
+          injected = true;
+          throw Object.assign(new Error(injectionMessage), { code: "EIO" });
+        }
+        if (absolute !== path.dirname(createdPath) || !["child-replacement", "child-xattr"].includes(fault)) return;
+        injected = true;
+        if (fault === "child-replacement") {
+          fs.renameSync(createdPath, `${createdPath}-retained`);
+          originalMkdir(createdPath, { mode: 0o700 });
+        } else {
+          execFileSync("/usr/bin/xattr", ["-w", "com.noa.cohort-test", "changed", createdPath]);
+        }
+      };
+      fs.closeSync = (fd: number) => {
+        const absolute = descriptors.get(fd);
+        descriptors.delete(fd);
+        originalClose(fd);
+        if (injected || createdPath === null) return;
+        if ((fault === "child-close" && absolute === createdPath)
+          || (fault === "parent-close" && fd === heldParentDescriptor)) {
+          injected = true;
+          throw Object.assign(new Error(injectionMessage), { code: "EIO" });
+        }
+      };
+      syncBuiltinESMExports();
+      assert.throws(() => {
+        captured = workspace.captureAndSealCandidate({
+          custodyRoot: fixture.custody,
+          maxAttempts: 1,
+          sourceRoot: fixture.source,
+        });
+      }, (error: WorkspaceError) => {
+        refusal = error;
+        return error instanceof Error;
+      });
+      assert.equal(injected, true, "the directory cohort fault window was not reached");
+      assert.equal(copiedLeafOpened, false, "an unvalidated cohort reached copied file use");
+      assert.equal(captured, null, "a failed cohort published a capture capability");
+      if (fault.endsWith("close") || fault === "child-fsync") {
+        assert.ok(errorTreeHasCode(refusal, "EIO"), `the injected durability/close failure was lost: ${errorChain(refusal)}`);
+      }
+      assert.equal(fs.readFileSync(path.join(fixture.source, "cohort-parent", "nested", "leaf.txt"), "utf8"), "protected bytes\n");
+    } finally {
+      fs.mkdirSync = originalMkdir;
+      fs.openSync = originalOpen;
+      fs.closeSync = originalClose;
+      fs.fsyncSync = originalFsync;
+      syncBuiltinESMExports();
+      cleanupReportedScratchRoots(errorPrivateRoots(refusal));
+      cleanupReportedScratchRoots((captured as Capture | null)?.retainedPrivateRoots ?? []);
+      removeFixturePath(fixture.source);
+      removeFixturePath(fixture.custody);
+    }
+  });
+}
+
+for (const refusalKind of ["deadline", "principal"] as const) {
+  for (const closeFails of [false, true]) {
+    test(`Darwin cohort provisional parent closes on ${refusalKind} refusal with close failure ${closeFails}`, (t) => {
+      if (process.platform !== "darwin") {
+        t.skip("requires the Darwin directory cohort path");
+        return;
+      }
+      const fixture = minimalCaptureFixture(`cohort-bind-${refusalKind}-${closeFails}`);
+      const originalOpen = fs.openSync;
+      const originalFstat = fs.fstatSync;
+      const originalClose = fs.closeSync;
+      const originalMkdir = fs.mkdirSync;
+      const clockDescriptor = Object.getOwnPropertyDescriptor(process.hrtime, "bigint");
+      const uidDescriptor = Object.getOwnPropertyDescriptor(process, "geteuid");
+      assert.ok(clockDescriptor !== undefined);
+      assert.ok(uidDescriptor !== undefined);
+      const originalClock = process.hrtime.bigint;
+      const originalUid = process.geteuid!;
+      let provisionalFd: number | null = null;
+      let injected = false;
+      let closeCalls = 0;
+      let childCreated = false;
+      let copiedLeafOpened = false;
+      let refusal: WorkspaceError | null = null;
+      let captured: Capture | null = null;
+      const expectedCode = workspaceErrorCode(
+        refusalKind === "deadline" ? "OPERATION_DEADLINE_EXCEEDED" : "PRIVATE_ROOT_UNSAFE",
+      );
+      try {
+        fs.mkdirSync(path.join(fixture.source, "cohort-child"), { mode: 0o700 });
+        fs.writeFileSync(path.join(fixture.source, "cohort-child", "leaf.txt"), "preserved bytes\n");
+        fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+          if (String(args[0]).includes(`${path.sep}workspace${path.sep}cohort-child${path.sep}leaf.txt`)) {
+            copiedLeafOpened = true;
+          }
+          const fd = Reflect.apply(originalOpen, fs, args);
+          // Select the actual held-parent admission, rather than an earlier metadata anchor.
+          const stack = new Error().stack ?? "";
+          if (provisionalFd === null && stack.includes("bindDirectoryDescriptor")
+            && stack.includes("createPrivateDirectoryCohort")) provisionalFd = fd;
+          return fd;
+        }) as typeof fs.openSync;
+        fs.fstatSync = ((...args: Parameters<typeof fs.fstatSync>) => {
+          const result = Reflect.apply(originalFstat, fs, args);
+          if (args[0] === provisionalFd) injected = true;
+          return result;
+        }) as typeof fs.fstatSync;
+        fs.mkdirSync = ((...args: Parameters<typeof fs.mkdirSync>) => {
+          if (String(args[0]).includes(`${path.sep}workspace${path.sep}cohort-child`)) childCreated = true;
+          return Reflect.apply(originalMkdir, fs, args);
+        }) as typeof fs.mkdirSync;
+        fs.closeSync = (fd: number) => {
+          if (fd === provisionalFd) closeCalls += 1;
+          originalClose(fd);
+          if (fd === provisionalFd && closeFails) {
+            throw Object.assign(new Error("injected provisional parent close failure"), { code: "EIO" });
+          }
+        };
+        Object.defineProperty(process.hrtime, "bigint", {
+          ...clockDescriptor,
+          value: () => originalClock() + (injected && refusalKind === "deadline" ? 86_400_000_000_000n : 0n),
+        });
+        Object.defineProperty(process, "geteuid", {
+          ...uidDescriptor,
+          value: () => originalUid() + (injected && refusalKind === "principal" ? 1 : 0),
+        });
+        syncBuiltinESMExports();
+        assert.throws(() => {
+          captured = workspace.captureAndSealCandidate({
+            custodyRoot: fixture.custody,
+            maxAttempts: 1,
+            sourceRoot: fixture.source,
+          });
+        }, (error: WorkspaceError) => {
+          refusal = error;
+          return error.code === expectedCode;
+        });
+        assert.equal(injected, true, "the provisional parent admission window was not reached");
+        assert.match(errorChain(refusal), /descriptor bind for private-directory cohort parent/);
+        assert.equal(childCreated, false, "refused parent custody reached child creation");
+        assert.equal(copiedLeafOpened, false, "refused parent custody reached copied file use");
+        assert.equal(captured, null, "refused parent custody published a capture capability");
+        t.diagnostic(JSON.stringify({ refusalKind, closeFails, closeCalls }));
+        assert.equal(closeCalls, 1, "the provisional parent descriptor must be closed exactly once");
+        assert.throws(() => originalFstat(provisionalFd!), (error: NodeJS.ErrnoException) => error.code === "EBADF");
+        assert.equal(errorTreeHasCode(refusal, "EIO"), closeFails, "the close failure must remain visible");
+        assert.equal(fs.readFileSync(path.join(fixture.source, "cohort-child", "leaf.txt"), "utf8"), "preserved bytes\n");
+      } finally {
+        fs.openSync = originalOpen;
+        fs.fstatSync = originalFstat;
+        fs.closeSync = originalClose;
+        fs.mkdirSync = originalMkdir;
+        Object.defineProperty(process.hrtime, "bigint", clockDescriptor);
+        Object.defineProperty(process, "geteuid", uidDescriptor);
+        syncBuiltinESMExports();
+        if (provisionalFd !== null && closeCalls === 0) originalClose(provisionalFd);
+        cleanupReportedScratchRoots(errorPrivateRoots(refusal));
+        cleanupReportedScratchRoots((captured as Capture | null)?.retainedPrivateRoots ?? []);
+        removeFixturePath(fixture.source);
+        removeFixturePath(fixture.custody);
+      }
+    });
+  }
+}
+
 test("linked main-worktree child configuration is closed before any object command", () => {
   const fixture = linkedWorktreeFixture("common-worktree-refusal");
   const tools = privateTemp("noa-kws-common-worktree-refusal-tools-");
@@ -11199,7 +11497,10 @@ test("Phase 2 CLI has one isolated supervisor seam and no live-root execution fa
   assert.equal(manifest.scripts["lint:knockout"], "node scripts/lint-control-knockout.mjs");
 });
 
-test("Phase 2 CLI invalid selection and argument grammar stay hard and start no sweep", () => {
+test("Phase 2 CLI invalid selection and argument grammar stay hard and start no sweep", async () => {
+  const { BOUNDARY_NODE_VERSION } = await import(
+    pathToFileURL(path.join(repositoryRoot, "scripts/lib/boundary-bootstrap.mjs")).href
+  ) as { BOUNDARY_NODE_VERSION: string };
   const statusBefore = git(repositoryRoot, ["status", "--porcelain=v1", "-z"]);
   const indexPath = git(repositoryRoot, ["rev-parse", "--git-path", "index"]).trim();
   const absoluteIndexPath = path.isAbsolute(indexPath)
@@ -11213,7 +11514,12 @@ test("Phase 2 CLI invalid selection and argument grammar stay hard and start no 
     { cwd: repositoryRoot, encoding: "utf8", env: environment, timeout: 30_000 },
   );
   assert.equal(run.status, 1, run.stderr);
-  assert.match(run.stderr, /NOTHING_SELECTED: --only __absent__ does not name a registered knockout/);
+  if (process.versions.node === BOUNDARY_NODE_VERSION) {
+    assert.match(run.stderr, /NOTHING_SELECTED: --only __absent__ does not name a registered knockout/);
+  } else {
+    assert.match(run.stderr, /BOUNDARY_BOOTSTRAP_NODE_VERSION_MISMATCH/);
+    assert.ok(run.stderr.includes(`expected exact ${BOUNDARY_NODE_VERSION}`), run.stderr);
+  }
   assert.doesNotMatch(run.stdout, /L4 control knockout|proven load-bearing|retained custody/);
   for (const args of [
     ["--war"],

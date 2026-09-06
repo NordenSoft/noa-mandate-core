@@ -460,6 +460,65 @@ test("a committed disposable mutant survives release and a later guard start", (
   }
 });
 
+for (const mode of ["early-refusal", "retained-mutant", "observation-failure"] as const) {
+  test(`mutation target descriptor cleanup remains visible after ${mode}`, () => {
+    const fixtureState = fixture();
+    const { root, guard } = fixtureState;
+    const entries = registry();
+    const clean = baseline(root, entries[0].suite);
+    const originalOpen = fs.openSync;
+    const originalClose = fs.closeSync;
+    const closeFailure = new Error("injected identity descriptor close failure");
+    const observationFailure = new Error("injected companion observation failure");
+    let pinnedDescriptor: number | null = null;
+    let closeInjected = false;
+    try {
+      fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+        if (mode === "observation-failure" && args[0] === path.join(root, "companion.js")) {
+          throw observationFailure;
+        }
+        const fd = originalOpen(...args);
+        if (pinnedDescriptor === null && args[0] === path.join(root, "primary.js")) {
+          pinnedDescriptor = fd;
+        }
+        return fd;
+      }) as typeof fs.openSync;
+      fs.closeSync = (fd: number) => {
+        originalClose(fd);
+        if (fd === pinnedDescriptor && !closeInjected) {
+          closeInjected = true;
+          throw closeFailure;
+        }
+      };
+      const entry = mode === "early-refusal"
+        ? { ...entries[0], find: "NO_MATCH_FOR_THIS_CONTROL" }
+        : entries[0];
+      assert.throws(
+        () => runKnockout({
+          root,
+          entry,
+          registry: [entry, entries[1]],
+          baseline: clean,
+          timeoutMs: 60_000,
+          guard,
+          workspaceMode: "disposable",
+        }),
+        (error: unknown) => error instanceof AggregateError
+          && error.message === "mutation-target identity descriptor cleanup failed"
+          && error.errors.includes(closeFailure)
+          && (mode !== "observation-failure" || error.errors.includes(observationFailure)),
+      );
+      assert.equal(closeInjected, true, "the retained identity descriptor close was not reached");
+      assert.notEqual(pinnedDescriptor, null);
+      assert.throws(() => fs.fstatSync(pinnedDescriptor!), { code: "EBADF" });
+    } finally {
+      fs.openSync = originalOpen;
+      fs.closeSync = originalClose;
+      fixtureState.cleanup();
+    }
+  });
+}
+
 test("restoration refuses to erase an unexpected edit made while the suite runs", () => {
   const fixtureState = fixture();
   const { root, cacheDir, guard } = fixtureState;

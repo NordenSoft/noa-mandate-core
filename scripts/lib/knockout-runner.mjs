@@ -745,7 +745,7 @@ const fileIdentity = (stat) => `${stat.dev}:${stat.ino}`;
  * count must all describe the same stable inode. Identity/link metadata is intentionally transient:
  * it is runtime custody evidence, not part of the durable v4 marker schema.
  */
-function observeFileNoFollow(abs) {
+function observeFileNoFollow(abs, retainedDescriptors = null) {
   let first;
   try { first = fs.lstatSync(abs, { bigint: true }); }
   catch (error) {
@@ -786,14 +786,21 @@ function observeFileNoFollow(abs) {
     ) {
       throw new IncompleteSnapshotError(`${abs} changed while its bytes were being observed`);
     }
-    return Object.freeze({
+    const observation = Object.freeze({
       bytes,
       identity: fileIdentity(opened),
       mode: Number(opened.mode & 0o777n),
       nlink: Number(opened.nlink),
       sha: sha(bytes),
     });
-  } finally { fs.closeSync(fd); }
+    if (retainedDescriptors !== null) {
+      retainedDescriptors.push(fd);
+      fd = undefined;
+    }
+    return observation;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
 }
 
 /**
@@ -5843,11 +5850,17 @@ export function runKnockout({
   // concurrent editor changed a target again, preserving that unexpected change is safer than
   // silently erasing work and calling the pristine hash proof.
   const written = new Map();
+  const targetIdentityDescriptors = [];
+  let targetOperationError = null;
 
+  // Keep the observed inode alive through execution and final custody checks. A closed descriptor
+  // permits an unlink/create sequence to reuse the same device+inode number on Linux, making an
+  // unrelated replacement look like the original target even when its bytes are identical.
+  try {
   // ── (1) baseline hashes, captured BEFORE anything is touched ──────────────────────────────────
   for (const rel of targets) {
     const abs = path.join(root, rel);
-    const observed = observeFileNoFollow(abs);
+    const observed = observeFileNoFollow(abs, targetIdentityDescriptors);
     if (observed === null) throw new IncompleteSnapshotError(`${rel} vanished before mutation setup`);
     pristineNodes.set(rel, observed);
     pristine.set(rel, observed.bytes.toString("utf8"));
@@ -6403,6 +6416,22 @@ export function runKnockout({
       ev.detail = restorationFailures.join("; ");
     }
     ev.workspaceDisposition = ev.restored === true ? "RESTORED_IN_PLACE" : "RESTORATION_FAILED";
+    }
+  }
+  } catch (error) {
+    targetOperationError = error;
+    throw error;
+  } finally {
+    const closeFailures = [];
+    for (const fd of targetIdentityDescriptors) {
+      try { fs.closeSync(fd); }
+      catch (error) { closeFailures.push(error); }
+    }
+    if (closeFailures.length > 0) {
+      throw new AggregateError(
+        targetOperationError === null ? closeFailures : [targetOperationError, ...closeFailures],
+        "mutation-target identity descriptor cleanup failed",
+      );
     }
   }
 }

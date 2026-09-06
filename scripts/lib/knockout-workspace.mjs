@@ -3146,38 +3146,36 @@ function bindDirectoryDescriptor(directory, label, code, operationBudget = null)
     `cannot release the provisional descriptor for ${label}`,
     { path: directory.path },
   );
-  let opened;
-  try { opened = fs.fstatSync(fd, { bigint: true }); }
-  catch (error) {
-    const primary = workspaceError(
-      code,
-      `cannot observe bound ${label}`,
-      { path: directory.path },
-      error,
-    );
-    const failures = [];
-    try { closeProvisional(); }
-    catch (cleanupError) { failures.push(cleanupError); }
-    throw combineWorkspaceFailures(
-      primary,
-      failures,
-      code,
-      `cannot release ${label} after descriptor observation failure`,
-    );
-  }
-  if (
-    !opened.isDirectory() || identityOf(opened) !== directory.identity ||
-    !sameDirectoryObservation(directoryObservation(opened), directory.observation)
-  ) {
-    const primary = workspaceError(
-      code,
-      `${label} changed while binding its directory descriptor`,
-      {
-        expectedIdentity: directory.identity,
-        observedIdentity: identityOf(opened),
-        path: directory.path,
-      },
-    );
+  try {
+    let opened;
+    try { opened = fs.fstatSync(fd, { bigint: true }); }
+    catch (error) {
+      fail(code, `cannot observe bound ${label}`, { path: directory.path }, error);
+    }
+    if (
+      !opened.isDirectory() || identityOf(opened) !== directory.identity ||
+      !sameDirectoryObservation(directoryObservation(opened), directory.observation)
+    ) {
+      fail(
+        code,
+        `${label} changed while binding its directory descriptor`,
+        {
+          expectedIdentity: directory.identity,
+          observedIdentity: identityOf(opened),
+          path: directory.path,
+        },
+      );
+    }
+    if (operationBudget !== null) remainingOperationMs(operationBudget, `descriptor bind for ${label}`);
+    const bound = Object.freeze({
+      fd,
+      identity: directory.identity,
+      observation: directory.observation,
+      path: directory.path,
+    });
+    boundDirectoryLeaseStates.set(bound, { fd });
+    return bound;
+  } catch (primary) {
     const failures = [];
     try { closeProvisional(); }
     catch (cleanupError) { failures.push(cleanupError); }
@@ -3188,15 +3186,6 @@ function bindDirectoryDescriptor(directory, label, code, operationBudget = null)
       `cannot release ${label} after descriptor binding refusal`,
     );
   }
-  if (operationBudget !== null) remainingOperationMs(operationBudget, `descriptor bind for ${label}`);
-  const bound = Object.freeze({
-    fd,
-    identity: directory.identity,
-    observation: directory.observation,
-    path: directory.path,
-  });
-  boundDirectoryLeaseStates.set(bound, { fd });
-  return bound;
 }
 
 function confirmBoundDirectory(bound, label, code, operationBudget = null) {
@@ -9600,7 +9589,7 @@ export function publishTerminalEvidence(options) {
   });
 }
 
-function bindCreatedPrivateDirectory(abs, fd, operationBudget = null, metadataAnchor = null) {
+function bindCreatedPrivateDirectoryIdentity(abs, fd, operationBudget = null) {
   if (operationBudget !== null) remainingOperationMs(operationBudget, `private-directory bind for ${abs}`);
   fs.fchmodSync(fd, 0o700);
   fs.fsyncSync(fd);
@@ -9620,23 +9609,36 @@ function bindCreatedPrivateDirectory(abs, fd, operationBudget = null, metadataAn
     );
   }
   const identity = identityOf(opened);
-  const createdDirectory = Object.freeze({ identity, path: path.resolve(abs) });
+  return Object.freeze({
+    identity,
+    observation: directoryObservation(opened),
+    path: path.resolve(abs),
+  });
+}
+
+function bindCreatedPrivateDirectory(abs, fd, operationBudget = null, metadataAnchor = null) {
+  const createdDirectory = bindCreatedPrivateDirectoryIdentity(abs, fd, operationBudget);
   observeMetadata(
     abs,
     false,
     operationBudget,
-    opened,
+    createdDirectory.observation,
     metadataAnchor ?? createdDirectory,
     null,
     KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
   );
   const confirmedOpened = fs.fstatSync(fd, { bigint: true });
   const confirmedAtPath = fs.lstatSync(abs, { bigint: true });
+  const uid = operationEffectiveUid(operationBudget, `private-directory owner bind for ${abs}`);
   if (
     !confirmedOpened.isDirectory() || confirmedAtPath.isSymbolicLink() ||
-    !confirmedAtPath.isDirectory() || identityOf(confirmedOpened) !== identity ||
-    identityOf(confirmedAtPath) !== identity || modeOf(confirmedOpened) !== 0o700 ||
+    !confirmedAtPath.isDirectory() ||
+    identityOf(confirmedOpened) !== createdDirectory.identity ||
+    identityOf(confirmedAtPath) !== createdDirectory.identity ||
+    modeOf(confirmedOpened) !== 0o700 ||
     modeOf(confirmedAtPath) !== 0o700 ||
+    !sameDirectoryObservation(directoryObservation(confirmedOpened), createdDirectory.observation) ||
+    !sameDirectoryObservation(directoryObservation(confirmedAtPath), createdDirectory.observation) ||
     (uid !== null &&
       (Number(confirmedOpened.uid) !== uid || Number(confirmedAtPath.uid) !== uid))
   ) {
@@ -9877,6 +9879,390 @@ function createPrivateDirectory(abs, options = {}) {
   fsyncDirectory(path.dirname(abs), operationBudget);
   if (operationBudget !== null) remainingOperationMs(operationBudget, `private-directory creation for ${abs}`);
   return created;
+}
+
+function inspectPrivateDirectoryForCohort(
+  value,
+  expected,
+  operationBudget,
+  label,
+) {
+  if (expected !== null && !validBoundDirectory(expected)) {
+    fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, `${label} expected binding is malformed`);
+  }
+  if (
+    expected?.observation !== undefined &&
+    !validDirectoryObservation(expected.observation)
+  ) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT,
+      `${label} expected observation is malformed`,
+    );
+  }
+  if (operationBudget !== null) remainingOperationMs(operationBudget, `cohort inspection for ${label}`);
+  const absolute = requireAbsolutePath(value, `${label} path`);
+  let stat;
+  let physical;
+  try {
+    stat = fs.lstatSync(absolute, { bigint: true });
+    physical = fs.realpathSync(absolute);
+  } catch (error) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
+      `cannot inspect ${label} ${absolute}`,
+      { path: absolute },
+      error,
+    );
+  }
+  const uid = operationEffectiveUid(operationBudget, `cohort owner inspection for ${label}`);
+  const observed = Object.freeze({
+    identity: identityOf(stat),
+    observation: directoryObservation(stat),
+    path: physical,
+  });
+  if (
+    stat.isSymbolicLink() || !stat.isDirectory() || physical !== absolute ||
+    modeOf(stat) !== 0o700 || (uid !== null && Number(stat.uid) !== uid) ||
+    (expected !== null &&
+      (observed.identity !== expected.identity || observed.path !== expected.path)) ||
+    (expected?.observation !== undefined &&
+      !sameDirectoryObservation(observed.observation, expected.observation))
+  ) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
+      `${label} no longer names the expected private directory`,
+      {
+        expectedIdentity: expected?.identity ?? null,
+        observedIdentity: observed.identity,
+        path: absolute,
+      },
+    );
+  }
+  if (operationBudget !== null) remainingOperationMs(operationBudget, `cohort inspection for ${label}`);
+  return observed;
+}
+
+function observePrivateDirectoryCohort(entries, anchorRoot, operationBudget, label) {
+  if (!Array.isArray(entries) || entries.length === 0 || !validBoundDirectory(anchorRoot)) {
+    fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, `${label} metadata cohort is malformed`);
+  }
+  const before = entries.map((entry, index) => {
+    if (
+      entry === null || typeof entry !== "object" || Array.isArray(entry) ||
+      typeof entry.path !== "string"
+    ) {
+      fail(
+        KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT,
+        `${label} metadata cohort entry ${index} is malformed`,
+      );
+    }
+    return inspectPrivateDirectoryForCohort(
+      entry.path,
+      entry.expected ?? null,
+      operationBudget,
+      `${label} entry ${index}`,
+    );
+  });
+  try {
+    observeMetadataBatch(
+      before.map((directory) => Object.freeze({
+        abs: directory.path,
+        expected: directory.observation,
+        isSymlink: false,
+      })),
+      operationBudget,
+      anchorRoot,
+      null,
+    );
+  } catch (error) {
+    if (
+      error instanceof KnockoutWorkspaceError &&
+      error.code === KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE
+    ) {
+      fail(
+        KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
+        `${label} changed during batched private-metadata inspection`,
+        null,
+        error,
+      );
+    }
+    throw error;
+  }
+  return Object.freeze(before.map((directory, index) =>
+    inspectPrivateDirectoryForCohort(
+      directory.path,
+      directory,
+      operationBudget,
+      `${label} confirmed entry ${index}`,
+    )));
+}
+
+function observeBoundPrivateDirectoryCurrent(
+  bound,
+  expectedObservation,
+  operationBudget,
+  label,
+) {
+  confirmBoundDirectoryIdentity(
+    bound,
+    label,
+    KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
+    operationBudget,
+    { privateMode: true },
+  );
+  const leaseState = boundDirectoryLeaseStates.get(bound);
+  let opened;
+  let atPath;
+  try {
+    opened = fs.fstatSync(leaseState.fd, { bigint: true });
+    atPath = fs.lstatSync(bound.path, { bigint: true });
+  } catch (error) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
+      `cannot inspect ${label}`,
+      { path: bound.path },
+      error,
+    );
+  }
+  const openedObservation = directoryObservation(opened);
+  const pathObservation = directoryObservation(atPath);
+  if (
+    !sameDirectoryObservation(openedObservation, pathObservation) ||
+    (expectedObservation !== null &&
+      !sameDirectoryObservation(openedObservation, expectedObservation))
+  ) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
+      `${label} changed outside its authorized child insertion`,
+      {
+        expected: expectedObservation,
+        observedDescriptor: openedObservation,
+        observedPath: pathObservation,
+        path: bound.path,
+      },
+    );
+  }
+  return openedObservation;
+}
+
+function fsyncBoundPrivateDirectory(bound, expectedObservation, operationBudget, label) {
+  const before = observeBoundPrivateDirectoryCurrent(
+    bound,
+    expectedObservation,
+    operationBudget,
+    label,
+  );
+  const leaseState = boundDirectoryLeaseStates.get(bound);
+  try {
+    fs.fsyncSync(leaseState.fd);
+  } catch (error) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.DURABILITY_FAILED,
+      `cannot durably synchronize ${label}`,
+      { path: bound.path },
+      error,
+    );
+  }
+  if (operationBudget !== null) remainingOperationMs(operationBudget, `directory fsync for ${label}`);
+  return observeBoundPrivateDirectoryCurrent(bound, before, operationBudget, label);
+}
+
+function createPrivateDirectoryWithinCohort(abs, parentState, operationBudget) {
+  let primaryError = null;
+  const cleanupFailures = [];
+  let fd;
+  let created = null;
+  try {
+    parentState.observation = observeBoundPrivateDirectoryCurrent(
+      parentState.bound,
+      parentState.observation,
+      operationBudget,
+      `private-directory cohort parent ${parentState.bound.path}`,
+    );
+    if (operationBudget !== null) remainingOperationMs(operationBudget, `private-directory creation for ${abs}`);
+    try { fs.mkdirSync(abs, { mode: 0o700 }); }
+    catch (error) {
+      if (error && error.code === "EEXIST") {
+        fail(KNOCKOUT_WORKSPACE_ERROR_CODES.DESTINATION_EXISTS, `${abs} already exists`, null, error);
+      }
+      fail(KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE, `cannot create ${abs}`, null, error);
+    }
+    parentState.observation = observeBoundPrivateDirectoryCurrent(
+      parentState.bound,
+      null,
+      operationBudget,
+      `private-directory cohort parent ${parentState.bound.path}`,
+    );
+    fd = fs.openSync(abs, fs.constants.O_RDONLY | DIRECTORY | NOFOLLOW);
+    created = bindCreatedPrivateDirectoryIdentity(abs, fd, operationBudget);
+    const closingFd = fd;
+    fd = undefined;
+    fs.closeSync(closingFd);
+    parentState.observation = fsyncBoundPrivateDirectory(
+      parentState.bound,
+      parentState.observation,
+      operationBudget,
+      `private-directory cohort parent ${parentState.bound.path}`,
+    );
+  } catch (error) {
+    primaryError = error instanceof KnockoutWorkspaceError
+      ? error
+      : workspaceError(
+          KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
+          `cannot bind created private directory ${abs}`,
+          null,
+          error,
+        );
+  } finally {
+    if (fd !== undefined) {
+      const closingFd = fd;
+      fd = undefined;
+      try { fs.closeSync(closingFd); }
+      catch (error) {
+        cleanupFailures.push(workspaceError(
+          KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
+          `cannot release created private directory ${abs}`,
+          { path: abs },
+          error,
+        ));
+      }
+    }
+  }
+  primaryError = combineWorkspaceFailures(
+    primaryError,
+    cleanupFailures,
+    KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
+    `cannot release created private directory ${abs}`,
+    { path: abs },
+  );
+  if (primaryError !== null) throw primaryError;
+  return created;
+}
+
+function createPrivateDirectoryCohort(paths, options) {
+  const operationBudget = options.operationBudget ?? null;
+  const anchorRoot = options.expectedDestinationRoot ?? null;
+  if (
+    !Array.isArray(paths) || paths.length === 0 ||
+    paths.length > MAC_METADATA_BATCH_NODE_LIMIT ||
+    !validBoundDirectory(anchorRoot)
+  ) {
+    fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "private-directory cohort is malformed");
+  }
+  const absolutePaths = paths.map((value, index) =>
+    requireAbsolutePath(value, `private-directory cohort path ${index}`));
+  if (new Set(absolutePaths).size !== absolutePaths.length) {
+    fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "private-directory cohort paths repeat");
+  }
+  const relativeDepths = new Set(absolutePaths.map((absolute) => {
+    const relative = path.relative(anchorRoot.path, absolute);
+    if (
+      relative.length === 0 || relative === ".." || relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative)
+    ) {
+      fail(
+        KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT,
+        "private-directory cohort path escapes its destination root",
+      );
+    }
+    return relative.split(path.sep).length;
+  }));
+  if (relativeDepths.size !== 1) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT,
+      "private-directory cohort must contain one directory depth",
+    );
+  }
+  const parentPaths = [...new Set(absolutePaths.map((absolute) => path.dirname(absolute)))];
+  const expectedAnchorIdentity = Object.freeze({
+    identity: anchorRoot.identity,
+    path: anchorRoot.path,
+  });
+  let primaryError = null;
+  const cleanupFailures = [];
+  const parentStates = [];
+  const createdDirectories = [];
+  try {
+    const admittedParents = observePrivateDirectoryCohort(
+      parentPaths.map((parentPath) => Object.freeze({
+        expected: parentPath === anchorRoot.path ? expectedAnchorIdentity : null,
+        path: parentPath,
+      })),
+      anchorRoot,
+      operationBudget,
+      "private-directory cohort parents before creation",
+    );
+    for (const parent of admittedParents) {
+      const bound = bindDirectoryDescriptor(
+        parent,
+        `private-directory cohort parent ${parent.path}`,
+        KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
+        operationBudget,
+      );
+      parentStates.push({ bound, observation: parent.observation });
+    }
+    const parentsByPath = new Map(parentStates.map((state) => [state.bound.path, state]));
+    for (const absolute of absolutePaths) {
+      const parentState = parentsByPath.get(path.dirname(absolute));
+      if (parentState === undefined) {
+        fail(
+          KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
+          `private-directory cohort lost its parent for ${absolute}`,
+        );
+      }
+      createdDirectories.push(
+        createPrivateDirectoryWithinCohort(absolute, parentState, operationBudget),
+      );
+    }
+    observePrivateDirectoryCohort(
+      [
+        ...parentStates.map((state) => Object.freeze({
+          expected: Object.freeze({
+            identity: state.bound.identity,
+            observation: state.observation,
+            path: state.bound.path,
+          }),
+          path: state.bound.path,
+        })),
+        ...createdDirectories.map((directory) => Object.freeze({
+          expected: directory,
+          path: directory.path,
+        })),
+      ],
+      anchorRoot,
+      operationBudget,
+      "private-directory cohort after creation",
+    );
+  } catch (error) {
+    primaryError = error instanceof KnockoutWorkspaceError
+      ? error
+      : workspaceError(
+          KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
+          "private-directory cohort could not be created",
+          null,
+          error,
+        );
+  } finally {
+    for (const state of [...parentStates].reverse()) {
+      try {
+        closeBoundDirectory(
+          state.bound,
+          `private-directory cohort parent ${state.bound.path}`,
+          KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
+        );
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+    }
+  }
+  primaryError = combineWorkspaceFailures(
+    primaryError,
+    cleanupFailures,
+    KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE,
+    "private-directory cohort descriptors could not be closed",
+  );
+  if (primaryError !== null) throw primaryError;
+  return Object.freeze(createdDirectories);
 }
 
 function createUniquePrivateDirectory(
@@ -10199,11 +10585,35 @@ function copyLiveWorktree(sourceCensus, destinationRoot, options = {}) {
   const directoryNodes = sourceCensus.nodes
     .filter((node) => node.type === "directory" && node.path !== ".")
     .sort((left, right) => left.path.split("/").length - right.path.split("/").length);
-  for (const node of directoryNodes) {
-    createPrivateDirectory(
-      path.join(destinationRoot, ...node.path.split("/")),
-      { operationBudget },
-    );
+  if (process.platform === "darwin" && expectedDestinationRoot !== null) {
+    for (let offset = 0; offset < directoryNodes.length;) {
+      const depth = directoryNodes[offset].path.split("/").length;
+      let depthEnd = offset + 1;
+      while (
+        depthEnd < directoryNodes.length &&
+        directoryNodes[depthEnd].path.split("/").length === depth
+      ) depthEnd += 1;
+      for (
+        let cohortOffset = offset;
+        cohortOffset < depthEnd;
+        cohortOffset += MAC_METADATA_BATCH_NODE_LIMIT
+      ) {
+        createPrivateDirectoryCohort(
+          directoryNodes
+            .slice(cohortOffset, Math.min(depthEnd, cohortOffset + MAC_METADATA_BATCH_NODE_LIMIT))
+            .map((node) => path.join(destinationRoot, ...node.path.split("/"))),
+          { expectedDestinationRoot, operationBudget },
+        );
+      }
+      offset = depthEnd;
+    }
+  } else {
+    for (const node of directoryNodes) {
+      createPrivateDirectory(
+        path.join(destinationRoot, ...node.path.split("/")),
+        { operationBudget },
+      );
+    }
   }
   const hardlinkPrimary = new Map();
   for (const node of sourceCensus.nodes) {

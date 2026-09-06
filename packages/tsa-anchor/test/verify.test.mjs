@@ -78,17 +78,36 @@ test("verifyStamp: a caller cannot forge the CLI's opaque resource-budget capabi
 test("resource budget registry: discarded capability tokens are not strongly retained", () => {
   const verifyModule = new URL("../src/verify.mjs", import.meta.url).href;
   const source = `
+    const { setImmediate } = await import("node:timers/promises");
     const { createVerificationResourceBudget } = await import(${JSON.stringify(verifyModule)});
-    const collect = () => { for (let i = 0; i < 8; i++) globalThis.gc(); };
-    for (let warmup = 0; warmup < 2; warmup++) {
-      for (let i = 0; i < 250000; i++) createVerificationResourceBudget(100, 1);
-      collect();
+    const discarded = Array.from(
+      { length: 2048 },
+      () => new WeakRef(createVerificationResourceBudget(100, 1)),
+    );
+    const intentionallyRetained = new Map(
+      Array.from(
+        { length: 32 },
+        (_, index) => [index, createVerificationResourceBudget(100, 1)],
+      ),
+    );
+    for (let turn = 0; turn < 16; turn++) {
+      {
+        const pressure = new Array(131072).fill({ turn });
+        globalThis.gc();
+        pressure.length = 0;
+      }
+      await setImmediate();
+      globalThis.gc();
+      await setImmediate();
     }
-    const before = process.memoryUsage().heapUsed;
-    for (let i = 0; i < 250000; i++) createVerificationResourceBudget(100, 1);
-    collect();
-    const after = process.memoryUsage().heapUsed;
-    process.stdout.write(JSON.stringify({ before, after, delta: after - before }));
+    const discardedLive = discarded.filter((reference) => reference.deref() !== undefined).length;
+    const retainedLive = [...intentionallyRetained.values()].filter((token) => token !== undefined).length;
+    process.stdout.write(JSON.stringify({
+      discardedLive,
+      discardedTotal: discarded.length,
+      retainedLive,
+      retainedTotal: intentionallyRetained.size,
+    }));
   `;
   const child = spawnSync(process.execPath, ["--expose-gc", "--input-type=module", "--eval", source], {
     encoding: "utf8",
@@ -98,10 +117,12 @@ test("resource budget registry: discarded capability tokens are not strongly ret
   });
   assert.equal(child.status, 0, child.stderr || child.error?.message);
   const observed = JSON.parse(child.stdout);
-  assert.ok(
-    observed.delta < 2 * 1024 * 1024,
-    `discarded resource capabilities must not be strongly retained after GC: delta=${observed.delta}`,
-  );
+  assert.deepEqual(observed, {
+    discardedLive: 0,
+    discardedTotal: 2048,
+    retainedLive: 32,
+    retainedTotal: 32,
+  });
 });
 
 test("resource budget registry: captured WeakMap operations resist same-realm poisoning", () => {

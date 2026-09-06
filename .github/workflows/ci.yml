@@ -186,6 +186,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Git's documented infinite-depth sentinel keeps checkout's exact-ref fetch path.
+          # fetch-depth: 0 would fetch every branch/tag, including unrelated retained history.
+          # https://git-scm.com/docs/shallow
+          fetch-depth: 2147483647
+          fetch-tags: false
+      - name: Verify complete candidate history and install metadata prerequisites
+        run: |
+          test "$(git rev-parse --is-shallow-repository)" = false
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends acl attr
+          /usr/bin/getfacl --version
+          /usr/bin/getfattr --version
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.22.2
@@ -310,6 +322,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Git's documented infinite-depth sentinel keeps checkout's exact-ref fetch path.
+          # fetch-depth: 0 would fetch every branch/tag, including unrelated retained history.
+          # https://git-scm.com/docs/shallow
+          fetch-depth: 2147483647
+          fetch-tags: false
+      - name: Verify complete candidate history and install metadata prerequisites
+        run: |
+          test "$(git rev-parse --is-shallow-repository)" = false
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends acl attr
+          /usr/bin/getfacl --version
+          /usr/bin/getfattr --version
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
@@ -654,6 +678,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Git's documented infinite-depth sentinel keeps checkout's exact-ref fetch path.
+          # fetch-depth: 0 would fetch every branch/tag, including unrelated retained history.
+          # https://git-scm.com/docs/shallow
+          fetch-depth: 2147483647
+          fetch-tags: false
+      - name: Verify complete candidate history and install metadata prerequisites
+        run: |
+          test "$(git rev-parse --is-shallow-repository)" = false
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends acl attr
+          /usr/bin/getfacl --version
+          /usr/bin/getfattr --version
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.22.2
