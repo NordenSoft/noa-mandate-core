@@ -4237,13 +4237,19 @@ export function containedObserverArgs(
 const TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 const ROOT_TEST_FIND = "$(find dist/test -name '*.test.js' -not -path '*/dogfood/*')";
 const ROOT_TEST_FIND_SENTINEL = "__NOA_TRUSTED_ROOT_TEST_FIND__";
+const ROOT_PRODUCT_TEST_FIND = "$(find dist/test -name '*.test.js' -not -path '*/dogfood/*' -not -path 'dist/test/knockout-runner-and-also.test.js' -not -path 'dist/test/knockout-workspace.test.js')";
+const ROOT_PRODUCT_TEST_FIND_SENTINEL = "__NOA_TRUSTED_ROOT_PRODUCT_TEST_FIND__";
+const ROOT_INFRASTRUCTURE_TEST_PATHS = new Set([
+  path.join("dist", "test", "knockout-runner-and-also.test.js"),
+  path.join("dist", "test", "knockout-workspace.test.js"),
+]);
 
 function bytewiseStringOrder(left, right) {
   return Buffer.from(left).compare(Buffer.from(right));
 }
 
 function expandTrustedTestArgument(cwd, argument) {
-  if (argument === ROOT_TEST_FIND_SENTINEL) {
+  if (argument === ROOT_TEST_FIND_SENTINEL || argument === ROOT_PRODUCT_TEST_FIND_SENTINEL) {
     const root = path.join(cwd, "dist", "test");
     const found = [];
     const walk = (directory, relative = "") => {
@@ -4258,7 +4264,12 @@ function expandTrustedTestArgument(cwd, argument) {
           if (next.split(path.sep).includes("dogfood")) continue;
           walk(path.join(directory, entry.name), next);
         } else if (entry.isFile() && entry.name.endsWith(".test.js")) {
-          found.push(path.join("dist", "test", next));
+          const testPath = path.join("dist", "test", next);
+          // These host-level suites exercise Docker and native metadata custody themselves.
+          // Only the explicitly declared product command excludes them; full npm test retains both.
+          if (argument !== ROOT_PRODUCT_TEST_FIND_SENTINEL || !ROOT_INFRASTRUCTURE_TEST_PATHS.has(testPath)) {
+            found.push(testPath);
+          }
         }
       }
     };
@@ -4337,9 +4348,11 @@ function parseTrustedNpmTestScript(cwd, script) {
   if (typeof script !== "string" || script.trim().length === 0) {
     throw new Error("npm test script is absent or empty");
   }
-  const rootFindCount = script.split(ROOT_TEST_FIND).length - 1;
+  const rootFindCount = script.split(ROOT_TEST_FIND).length - 1
+    + script.split(ROOT_PRODUCT_TEST_FIND).length - 1;
   if (rootFindCount > 1) throw new Error("root test discovery occurs more than once");
-  const normalized = script.replace(ROOT_TEST_FIND, ROOT_TEST_FIND_SENTINEL);
+  const normalized = script.replace(ROOT_TEST_FIND, ROOT_TEST_FIND_SENTINEL)
+    .replace(ROOT_PRODUCT_TEST_FIND, ROOT_PRODUCT_TEST_FIND_SENTINEL);
   const withoutConjunctions = normalized.replace(/\s+&&\s+/g, " ");
   if (/[$`'";&|<>\\\n\r]/.test(withoutConjunctions)) {
     throw new Error("npm test script uses shell syntax outside the trusted command grammar");

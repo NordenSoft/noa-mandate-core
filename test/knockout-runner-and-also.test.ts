@@ -95,9 +95,12 @@ const runner = await import(pathToFileURL(path.join(repoRoot, "scripts/lib/knock
     options?: { kind?: "gate" | "tests" },
   ) => Observation;
   validateKnockoutRegistry: (registry: object[]) => Map<string, object>;
+  trustedTestSteps: (root: string, suite: Suite) => Array<{
+    cmd: string; args: string[]; evidence: boolean;
+  }>;
   VERDICT: Record<string, string>;
 };
-const { createBuildStateGuard, runKnockout, observeSuite, validateKnockoutRegistry, VERDICT } = runner;
+const { createBuildStateGuard, runKnockout, observeSuite, trustedTestSteps, validateKnockoutRegistry, VERDICT } = runner;
 
 const PRIMARY = "const primary = REAL_PRIMARY;";
 const COMPANION = "const companion = REAL_COMPANION;";
@@ -270,6 +273,104 @@ test("direct node test registry admission preserves supported source-map and Typ
       }]).size, 1);
     }
   }
+});
+
+const fullRootDiscovery = "$(find dist/test -name '*.test.js' -not -path '*/dogfood/*')";
+const productRootDiscovery = "$(find dist/test -name '*.test.js' -not -path '*/dogfood/*' -not -path 'dist/test/knockout-runner-and-also.test.js' -not -path 'dist/test/knockout-workspace.test.js')";
+
+function withRootDiscoveryFixture(files: string[], body: (root: string) => void): void {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "noa-root-discovery-test-"));
+  try {
+    fs.mkdirSync(path.join(root, "dist", "test"), { recursive: true });
+    for (const file of files) {
+      const target = path.join(root, "dist", "test", file);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, "// Discovery-only fixture; never executed.\n");
+    }
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({
+      scripts: {
+        test: `node --test ${fullRootDiscovery}`,
+        "test:product": `node --test ${productRootDiscovery}`,
+      },
+    }));
+    body(root);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+}
+
+test("trusted root product discovery excludes only the two exact infrastructure paths", () => {
+  withRootDiscoveryFixture([
+    "product.test.js", "knockout-runner-and-also.test.js", "knockout-workspace.test.js",
+    "nested/knockout-workspace.test.js", "knockout-workspace-extra.test.js", "dogfood/ignored.test.js",
+  ], (root) => {
+    const [full] = trustedTestSteps(root, [".", "npm", ["test"]]);
+    const [product] = trustedTestSteps(root, [".", "npm", ["run", "test:product"]]);
+    assert.deepEqual(full!.args, ["--test", ...[
+      "knockout-runner-and-also.test.js", "knockout-workspace-extra.test.js",
+      "knockout-workspace.test.js", "nested/knockout-workspace.test.js", "product.test.js",
+    ].map((file) => path.join("dist", "test", file))]);
+    assert.deepEqual(product!.args, ["--test", ...[
+      "knockout-workspace-extra.test.js", "nested/knockout-workspace.test.js", "product.test.js",
+    ].map((file) => path.join("dist", "test", file))]);
+    assert.equal(full!.evidence, true);
+    assert.equal(product!.evidence, true);
+  });
+});
+
+test("trusted root full discovery retains infrastructure tests", () => {
+  withRootDiscoveryFixture(["knockout-runner-and-also.test.js", "knockout-workspace.test.js"], (root) => {
+    const [full] = trustedTestSteps(root, [".", "npm", ["test"]]);
+    assert.deepEqual(full!.args, ["--test", ...[
+      "knockout-runner-and-also.test.js", "knockout-workspace.test.js",
+    ].map((file) => path.join("dist", "test", file))]);
+  });
+});
+
+test("trusted root product command preserves full preparation and every other compiled test", () => {
+  const full = trustedTestSteps(repoRoot, [".", "npm", ["test"]]);
+  const product = trustedTestSteps(repoRoot, [".", "npm", ["run", "test:product"]]);
+  assert.deepEqual(product.filter((step) => !step.evidence), full.filter((step) => !step.evidence));
+  const fullEvidence = full.filter((step) => step.evidence);
+  const productEvidence = product.filter((step) => step.evidence);
+  assert.equal(fullEvidence.length, 1);
+  assert.equal(productEvidence.length, 1);
+  const excluded = new Set([
+    path.join("dist", "test", "knockout-runner-and-also.test.js"),
+    path.join("dist", "test", "knockout-workspace.test.js"),
+  ]);
+  assert.ok([...excluded].every((file) => fullEvidence[0]!.args.includes(file)));
+  assert.deepEqual(productEvidence[0], {
+    ...fullEvidence[0]!, args: fullEvidence[0]!.args.filter((arg) => !excluded.has(arg)),
+  });
+});
+
+test("trusted root product discovery refuses an empty product suite", () => {
+  withRootDiscoveryFixture(["knockout-runner-and-also.test.js", "knockout-workspace.test.js"], (root) => {
+    assert.throws(
+      () => trustedTestSteps(root, [".", "npm", ["run", "test:product"]]),
+      /trusted root test discovery matched zero files/,
+    );
+  });
+});
+
+test("trusted root product discovery refuses symlinks even at an excluded path", () => {
+  withRootDiscoveryFixture(["product.test.js"], (root) => {
+    fs.symlinkSync("product.test.js", path.join(root, "dist", "test", "knockout-workspace.test.js"));
+    for (const args of [["test"], ["run", "test:product"]]) {
+      assert.throws(() => trustedTestSteps(root, [".", "npm", args]), /symbolic link/);
+    }
+  });
+});
+
+test("trusted root product discovery refuses unreviewed exclusions and multiple discoveries", () => {
+  withRootDiscoveryFixture(["product.test.js"], (root) => {
+    const refuse = (script: string, expected: RegExp) => {
+      fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ scripts: { "test:product": script } }));
+      assert.throws(() => trustedTestSteps(root, [".", "npm", ["run", "test:product"]]), expected);
+    };
+    refuse(`node --test ${productRootDiscovery.replace("knockout-workspace.test.js", "product.test.js")}`, /shell syntax/);
+    refuse(`node --test ${fullRootDiscovery} ${productRootDiscovery}`, /discovery occurs more than once/);
+    refuse(`node --test ${productRootDiscovery} ${productRootDiscovery}`, /discovery occurs more than once/);
+  });
 });
 
 test("required values and nested also edits use closed schemas too", () => {

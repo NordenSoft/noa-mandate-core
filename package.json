@@ -58,6 +58,7 @@
     "gen:survivable-retirement-vectors": "node dist/scripts/gen-survivable-retirement-vectors.js",
     "test:action-digest": "npm run build && node --test dist/test/action-digest.test.js",
     "test": "npm run build && npm run gen:vectors && npm run gen:l2-vectors && npm run gen:federation-vectors && npm run gen:action-digest-vectors && npm run gen:survivable-retirement-vectors && node --test $(find dist/test -name '*.test.js' -not -path '*/dogfood/*')",
+    "test:product": "npm run build && npm run gen:vectors && npm run gen:l2-vectors && npm run gen:federation-vectors && npm run gen:action-digest-vectors && npm run gen:survivable-retirement-vectors && node --test $(find dist/test -name '*.test.js' -not -path '*/dogfood/*' -not -path 'dist/test/knockout-runner-and-also.test.js' -not -path 'dist/test/knockout-workspace.test.js')",
     "test:dogfood": "vitest run test/dogfood/",
     "lint:publish-surface": "node scripts/lib/stage-publish-artifacts.mjs --verify",
     "lint:publish-surface:selftest": "node scripts/lint-published-surface.mjs --selftest",

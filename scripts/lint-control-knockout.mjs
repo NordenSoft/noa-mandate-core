@@ -1596,7 +1596,7 @@ const KNOCKOUTS = [
     find: "return key === \"__proto__\"",
     replace: "return false && key === \"__proto__\"",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   // ── ADDED 2026-07-29 (round-3). One entry per finding, because the previous rounds' fixes shipped
   // with NO knockout at all: nothing in the repository would have gone red if any of them had been
@@ -1614,7 +1614,7 @@ const KNOCKOUTS = [
       replace: "import { verify as _liveVerify } from \"node:crypto\";\nimport {\n  bufferFrom, bufToString, bufEquals, bufSubarray, byteLength,",
     }],
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "t18-bigint-capture",
@@ -1623,7 +1623,7 @@ const KNOCKOUTS = [
     find: "toBigInt(yBytes[i]!)",
     replace: "BigInt(yBytes[i]!)",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "t18-curve-pin-accessor",
@@ -1632,7 +1632,7 @@ const KNOCKOUTS = [
     find: "    if (asymmetricKeyType(key) !== \"ed25519\") return false;",
     replace: "    if ((key as { asymmetricKeyType?: string }).asymmetricKeyType !== \"ed25519\") return false;",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "t19-parser-inert-arrays",
@@ -1641,7 +1641,7 @@ const KNOCKOUTS = [
     find: "        return inertArray(arr);",
     replace: "        return arr;",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "t19-validator-index-walk",
@@ -1666,7 +1666,7 @@ const KNOCKOUTS = [
     // measured basis for calling the index walk defence-in-depth.
     andAlso: "t19-parser-inert-arrays",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "t19b-cbor-inert-arrays",
@@ -1679,7 +1679,7 @@ const KNOCKOUTS = [
       replace: "        arrayPush(m, [key, val] as [CborValue, CborValue]);",
     }],
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "inert-proto-refuses-accessors",
@@ -1693,7 +1693,7 @@ const KNOCKOUTS = [
     find: "    if (!(_apply(_hasOwnProperty, d as never, [\"value\"] as never) as boolean)) continue;",
     replace: "    if (!(_apply(_hasOwnProperty, d as never, [\"value\"] as never) as boolean)) { _apply(_objectDefineProperty, undefined as never, [proto, key, { get: d.get, set: d.set, enumerable: false, configurable: false }] as never); continue; }",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "t20-l8-selftest",
@@ -1756,7 +1756,7 @@ const KNOCKOUTS = [
     find: "  return (block![1]!.match(/\"([^\"]+)\"/g) ?? []).map((s) => s.slice(1, -1));",
     replace: "  return [\"src/hash.ts\", \"src/signing.ts\", \"src/cose/cbor.ts\", \"src/nfc.ts\", \"src/verify.ts\"];",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   // ── ADDED 2026-07-29 (round-4). One entry per control this pass introduced. The previous three
   // rounds' fixes shipped with NO knockout, which is why the same class kept reappearing one call
@@ -1769,7 +1769,7 @@ const KNOCKOUTS = [
     find: "function _inert<T>(a: T[]): T[] {\n  _apply(_objectSetPrototypeOf, undefined as never, [a, INERT_ARRAY_PROTOTYPE] as never);\n  return a;\n}",
     replace: "function _inert<T>(a: T[]): T[] {\n  return a;\n}",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "r4-a2-noextrakeys-index-walk",
@@ -1786,7 +1786,7 @@ const KNOCKOUTS = [
     // the measured basis for calling this index walk defence-in-depth.
     andAlso: "r4-a1-inert-wrappers",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "r4-a2-checkpoint-index-walk",
@@ -1797,7 +1797,7 @@ const KNOCKOUTS = [
     replace: "  for (const k of objectKeys(c)) {\n    if (!arrayIncludes(CHECKPOINT_KEYS, k)) return \"malformed checkpoint\";\n  }",
     andAlso: "r4-a1-inert-wrappers",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "r4-a2-manifest-index-walk",
@@ -1808,7 +1808,7 @@ const KNOCKOUTS = [
     replace: "      for (const aid of objectGetOwnPropertyNames(live)) {",
     andAlso: "r4-a1-inert-wrappers",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "r4-t06-newset-captured-add",
@@ -1817,7 +1817,7 @@ const KNOCKOUTS = [
     find: "  const s = new _Set() as Set<T>;\n  if (init !== undefined) {\n    for (let i = 0; i < (init as { length: number }).length; i++) _apply(_setAdd, s as never, [init[i]] as never);\n  }\n  return s;",
     replace: "  return new _Set(init as never) as Set<T>;",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "r4-t07-audit-captured-weakset",
@@ -1826,7 +1826,7 @@ const KNOCKOUTS = [
     find: "    if (weakSetHas(seen, value as object)) return;\n    weakSetAdd(seen, value as object);",
     replace: "    if (seen.has(value as object)) return;\n    seen.add(value as object);",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "r4-a1c-publication-boundary",
@@ -1835,7 +1835,7 @@ const KNOCKOUTS = [
     find: "export function publishArray<T>(a: readonly T[]): T[] {\n  const out: T[] = [];\n  for (let i = 0; i < (a as { length: number }).length; i++) _apply(_push, out as never, [a[i]]);\n  return out;\n}",
     replace: "export function publishArray<T>(a: readonly T[]): T[] {\n  return a as T[];\n}",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "r4-a5-ast-load-time-exemption",
@@ -4088,7 +4088,7 @@ const KNOCKOUTS = [
     find: "    if (principal === \"SANDBOX_SIM\" && sandboxed === false)\n      arrayPush(errors, 'receipt.governance.sandboxed: must be true when agent.principal is \"SANDBOX_SIM\"');",
     replace: "    if (principal === \"SANDBOX_SIM\" && sandboxed === false)\n      arrayPush([] as string[], 'receipt.governance.sandboxed: must be true when agent.principal is \"SANDBOX_SIM\"');",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "coherence-r2-simulated-verdict-requires-sandboxed",
@@ -4101,7 +4101,7 @@ const KNOCKOUTS = [
     find: "    if (verdict === \"SIMULATED\" && sandboxed === false)\n      arrayPush(errors, 'receipt.governance.sandboxed: must be true when governance.verdict is \"SIMULATED\"');",
     replace: "    if (verdict === \"SIMULATED\" && sandboxed === false)\n      arrayPush([] as string[], 'receipt.governance.sandboxed: must be true when governance.verdict is \"SIMULATED\"');",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "coherence-r3-irreversible-carries-no-rollbackref",
@@ -4115,7 +4115,7 @@ const KNOCKOUTS = [
     find: "    if (reversible === false && rollbackRefPresent)\n      arrayPush(errors, \"receipt.action.rollbackRef: must be absent or null when action.reversible is false\");",
     replace: "    if (reversible === false && rollbackRefPresent)\n      arrayPush([] as string[], \"receipt.action.rollbackRef: must be absent or null when action.reversible is false\");",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "coherence-r4-rolled-back-requires-reversible",
@@ -4128,7 +4128,7 @@ const KNOCKOUTS = [
     find: "    if (verdict === \"ROLLED_BACK\" && reversible === false)\n      arrayPush(errors, 'receipt.action.reversible: must be true when governance.verdict is \"ROLLED_BACK\"');",
     replace: "    if (verdict === \"ROLLED_BACK\" && reversible === false)\n      arrayPush([] as string[], 'receipt.action.reversible: must be true when governance.verdict is \"ROLLED_BACK\"');",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "coherence-r5-ts-must-denote-a-real-instant",
@@ -4145,7 +4145,7 @@ const KNOCKOUTS = [
     find: "  if (month < 1 || month > 12) return false;\n  if (day < 1 || day > daysInMonth(year, month)) return false;\n  if (num2(s, 11) > 23) return false; // time-hour\n  if (num2(s, 14) > 59) return false; // time-minute\n  if (num2(s, 17) > 60) return false; // time-second — 60 is the leap second, and it is legal",
     replace: "  if (month < 1 || month > 99) return false;\n  if (day < 1 || day > 99 || daysInMonth(year, month) < 0) return false;\n  if (num2(s, 11) > 99) return false; // time-hour\n  if (num2(s, 14) > 99) return false; // time-minute\n  if (num2(s, 17) > 99) return false; // time-second",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   // ── ADDED 2026-08-15: TWO-SIGNATURE ATTRIBUTION ON THE COSE ENTRY POINT (spec §6) ───────────────
   // `receiptFromCose` checked the identity manifest against the OUTER COSE kid and never verified the
@@ -4169,7 +4169,7 @@ const KNOCKOUTS = [
     find: "    if (allowed === undefined || !arrayIncludes(allowed, nativeKid)) {",
     replace: "    if (allowed === undefined || r.kid === null || !arrayIncludes(allowed, r.kid)) {",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "cose-native-signature-is-verified",
@@ -4184,7 +4184,7 @@ const KNOCKOUTS = [
     find: "  if (!verifyEd25519(nativePub, signingMessage(RECEIPT_SIG_DOMAIN, hashInput), receipt.sig.value)) {",
     replace: "  if (false as boolean) {",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "cose-native-chain-hash-is-self-consistent",
@@ -4197,7 +4197,7 @@ const KNOCKOUTS = [
     find: "  if (\"sha256:\" + sha256Hex(hashInput) !== receipt.chain.hash) {",
     replace: "  if (false as boolean) {",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "cose-unknown-native-key-is-refused",
@@ -4211,7 +4211,7 @@ const KNOCKOUTS = [
     find: "  const nativePub = keyring[nativeKid];",
     replace: "  const nativePub = keyring[nativeKid] ?? keyring[r.kid ?? \"\"];",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "cose-unprotected-outer-kid-is-not-an-identity",
@@ -4225,7 +4225,7 @@ const KNOCKOUTS = [
     find: "  const envelopeKid = envelopeAuthenticated ? r.kid : null;",
     replace: "  const envelopeKid = r.kid;",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   {
     id: "cose-retired-native-key-is-refused",
@@ -4239,7 +4239,7 @@ const KNOCKOUTS = [
     find: "  if (verification.retiredKids[nativeKid] === true) {",
     replace: "  if (false as boolean) {",
     kind: "tests",
-    suite: [".", "npm", ["test"]],
+    suite: [".", "npm", ["run", "test:product"]],
   },
   // ── L12: THE OPEN-CORE PUBLISH BOUNDARY ──────────────────────────────────────────────────────
   //
