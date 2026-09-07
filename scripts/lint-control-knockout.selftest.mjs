@@ -1332,7 +1332,7 @@ check("the exported public registry snapshot is source-only and closed", () => {
   const boundaryGates = snapshot.registry.filter((entry) =>
     entry.gateId === "boundary-selftest" ||
     entry.id === "boundary-successful-operations-emit-provenance-terminal");
-  assert.equal(boundaryGates.length, 15,
+  assert.equal(boundaryGates.length, 16,
     "the reviewed Task3 plus Task4 boundary provenance frontier changed");
   assert.equal(boundaryGates.every((entry) => entry.expectedGateProvenance !== undefined), true,
     "a reviewed boundary gate can receive credit without candidate-bound provenance");
@@ -3303,6 +3303,7 @@ check("gate entries bind the exact gate and finding identities they claim to exe
     () => validateKnockoutRegistry([{
       ...gateEntry,
       kind: "tests",
+      suite: SUITE,
     }]),
     /only gate entries may declare gate evidence bindings/,
   );
@@ -3314,7 +3315,7 @@ check("every explicit boundary authority registry entry opts into one canonical 
   const gateLines = lines
     .map((line, index) => ({ line, index }))
     .filter(({ line }) => line.includes('gateId: "boundary-selftest"'));
-  assert.equal(gateLines.length, 14,
+  assert.equal(gateLines.length, 15,
     "the explicit boundary-selftest registry census changed without updating this reviewed proof");
   for (const { index } of gateLines) {
     assert.equal(
@@ -3327,8 +3328,8 @@ check("every explicit boundary authority registry entry opts into one canonical 
     lines.filter((line) => line.includes(
       "expectedGateProvenance: BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION",
     )).length,
-    15,
-    "the 14 boundary-selftest entries plus one successful-operation boundary entry are not explicit",
+    16,
+    "the 15 boundary-selftest entries plus one successful-operation boundary entry are not explicit",
   );
   const successfulOperationId = lines.findIndex((line) =>
     line.includes('id: "boundary-successful-operations-emit-provenance-terminal"'));
