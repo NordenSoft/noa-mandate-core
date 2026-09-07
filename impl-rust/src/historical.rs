@@ -607,7 +607,14 @@ pub fn verify_historical_chain(
         .get("ts")
         .and_then(Json::as_str)
         .and_then(parse_instant);
-    let mut checkpoint_before_activation = false;
+    let mut checkpoint_before_activation =
+        if let Some(Some(valid_from)) = witness_trust.valid_from.get(witness_kid) {
+            checkpoint_time
+                .map(|value| value < *valid_from)
+                .unwrap_or(true)
+        } else {
+            false
+        };
     let mut checkpoint_after_retirement = checkpoint_time.is_none();
     for seq in 0..=cp_seq {
         let receipt_kid = by_seq[&seq]

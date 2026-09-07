@@ -255,6 +255,11 @@ func verifyHistoricalChain(receipts, receiptRoot, checkpoint, checkpointRoot, id
 	}
 	cpTime, parsedCheckpointTime := parseInstant(checkpoint.get("ts").Str)
 	checkpointBeforeActivation := false
+	witnessValidFrom := witnessTrust.validFrom[witnessKid]
+	if witnessValidFrom != nil {
+		activationTime, parsed := parseInstant(*witnessValidFrom)
+		checkpointBeforeActivation = !parsedCheckpointTime || !parsed || cpTime.Before(activationTime)
+	}
 	checkpointAfterRetirement := !parsedCheckpointTime
 	for seq := int64(0); seq <= cpSeq; seq++ {
 		kid := bySeq[seq].get("sig").get("kid").Str

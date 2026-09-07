@@ -59,9 +59,9 @@ function input(seq: number): BuildInput {
   };
 }
 
-function lifecycle(retiredAt: string | null, validFrom?: string | null): SigningKeyLifecycle {
+function lifecycle(retiredAt: string | null, validFrom?: string | null, key = receiptKey): SigningKeyLifecycle {
   const entry: { publicKey: string; validFrom?: string | null; retiredAt: string | null } = {
-    publicKey: receiptKey.publicKey,
+    publicKey: key.publicKey,
     retiredAt,
   };
   // Omission is intentional: most corpus cases pin compatibility with the original two-field
@@ -69,7 +69,7 @@ function lifecycle(retiredAt: string | null, validFrom?: string | null): Signing
   if (validFrom !== undefined) entry.validFrom = validFrom;
   return {
     spec: "noa.signing-key-lifecycle/0.1",
-    keys: { [receiptKey.kid]: entry },
+    keys: { [key.kid]: entry },
   };
 }
 
@@ -121,6 +121,12 @@ const receiptBeforeActivation = lifecycle(RETIRED_AT, ACTIVATION_ONE_NANOSECOND_
 const receiptLowercaseWindow = lifecycle(LOWERCASE_RETIREMENT, LOWERCASE_ACTIVATION);
 const receiptInvalidInterval = lifecycle(RETIRED_AT, "2026-01-02T00:00:00.000000003Z");
 const checkpointRoot = { [witnessKey.kid]: witnessKey.publicKey };
+const checkpointLifecycle = lifecycle(null, undefined, witnessKey);
+const checkpointNullActivation = lifecycle(null, null, witnessKey);
+const checkpointWindow = lifecycle(null, ACTIVATION_BEFORE_CHECKPOINT, witnessKey);
+const checkpointAtActivation = lifecycle(null, ACTIVATION_AT_CHECKPOINT, witnessKey);
+const checkpointBeforeActivation = lifecycle(null, ACTIVATION_ONE_NANOSECOND_AFTER_CHECKPOINT, witnessKey);
+const checkpointRetired = lifecycle(RETIRED_AT, ACTIVATION_BEFORE_CHECKPOINT, witnessKey);
 const wrongRoot = { [wrongKey.kid]: wrongKey.publicKey };
 const sameKeyRoot = { [aliasSigner.kid]: receiptKey.publicKey };
 
@@ -138,6 +144,12 @@ write("receipt-keyring-before-activation.json", receiptBeforeActivation);
 write("receipt-keyring-lowercase-window.json", receiptLowercaseWindow);
 write("receipt-keyring-invalid-interval.json", receiptInvalidInterval);
 write("checkpoint-keyring.json", checkpointRoot);
+write("checkpoint-keyring-lifecycle.json", checkpointLifecycle);
+write("checkpoint-keyring-null-activation.json", checkpointNullActivation);
+write("checkpoint-keyring-window.json", checkpointWindow);
+write("checkpoint-keyring-at-activation.json", checkpointAtActivation);
+write("checkpoint-keyring-before-activation.json", checkpointBeforeActivation);
+write("checkpoint-keyring-retired.json", checkpointRetired);
 write("checkpoint-keyring-wrong.json", wrongRoot);
 write("checkpoint-keyring-same-material.json", sameKeyRoot);
 write("checkpoints/exact-before-retirement.json", exact);
@@ -343,6 +355,54 @@ const cases: CorpusCase[] = [
     expected: expected("CONFLICT", "CHECKPOINT_CONFLICT", dimensions("INTACT", "CONFLICT", "UNATTRIBUTABLE", "PROVIDED", "PROVIDED", "AVAILABLE"), 3),
   },
   {
+    id: "witness-legacy-lifecycle-no-activation",
+    receipts: "chain.json",
+    keyring: "receipt-keyring-retired.json",
+    checkpoint: "checkpoints/exact-before-retirement.json",
+    checkpointKeyring: "checkpoint-keyring-lifecycle.json",
+    expected: expected("VERIFIED", "HEAD_ANCHORED", dimensions("INTACT", "HEAD_ANCHORED", "ATTRIBUTABLE_AS_OF", "PROVIDED", "PROVIDED", "AVAILABLE"), 3, 2, BEFORE_RETIREMENT),
+  },
+  {
+    id: "witness-null-activation",
+    receipts: "chain.json",
+    keyring: "receipt-keyring-retired.json",
+    checkpoint: "checkpoints/exact-before-retirement.json",
+    checkpointKeyring: "checkpoint-keyring-null-activation.json",
+    expected: expected("VERIFIED", "HEAD_ANCHORED", dimensions("INTACT", "HEAD_ANCHORED", "ATTRIBUTABLE_AS_OF", "PROVIDED", "PROVIDED", "AVAILABLE"), 3, 2, BEFORE_RETIREMENT),
+  },
+  {
+    id: "witness-after-explicit-activation",
+    receipts: "chain.json",
+    keyring: "receipt-keyring-retired.json",
+    checkpoint: "checkpoints/exact-before-retirement.json",
+    checkpointKeyring: "checkpoint-keyring-window.json",
+    expected: expected("VERIFIED", "HEAD_ANCHORED", dimensions("INTACT", "HEAD_ANCHORED", "ATTRIBUTABLE_AS_OF", "PROVIDED", "PROVIDED", "AVAILABLE"), 3, 2, BEFORE_RETIREMENT),
+  },
+  {
+    id: "witness-at-explicit-activation",
+    receipts: "chain.json",
+    keyring: "receipt-keyring-retired.json",
+    checkpoint: "checkpoints/exact-before-retirement.json",
+    checkpointKeyring: "checkpoint-keyring-at-activation.json",
+    expected: expected("VERIFIED", "HEAD_ANCHORED", dimensions("INTACT", "HEAD_ANCHORED", "ATTRIBUTABLE_AS_OF", "PROVIDED", "PROVIDED", "AVAILABLE"), 3, 2, BEFORE_RETIREMENT),
+  },
+  {
+    id: "witness-one-nanosecond-before-activation",
+    receipts: "chain.json",
+    keyring: "receipt-keyring-retired.json",
+    checkpoint: "checkpoints/exact-before-retirement.json",
+    checkpointKeyring: "checkpoint-keyring-before-activation.json",
+    expected: expected("UNVERIFIED", "CHECKPOINT_BEFORE_ACTIVATION", dimensions("INTACT", "HEAD_ANCHORED", "UNATTRIBUTABLE", "PROVIDED", "PROVIDED", "AVAILABLE"), 3),
+  },
+  {
+    id: "witness-retired",
+    receipts: "chain.json",
+    keyring: "receipt-keyring-retired.json",
+    checkpoint: "checkpoints/exact-before-retirement.json",
+    checkpointKeyring: "checkpoint-keyring-retired.json",
+    expected: expected("UNVERIFIED", "WITNESS_KEY_RETIRED", dimensions("INTACT", "UNANSWERED", "UNATTRIBUTABLE", "PROVIDED", "PROVIDED", "AVAILABLE"), 3),
+  },
+  {
     id: "damaged-receipt",
     receipts: "chain-damaged.json",
     keyring: "receipt-keyring-retired.json",
@@ -355,7 +415,7 @@ const cases: CorpusCase[] = [
 write("cases.json", { spec: "noa.historical-verification-corpus/0.1", cases });
 write("README.json", {
   status: "NORMATIVE CONFORMANCE FIXTURE",
-  note: "Historical attribution uses an independently authenticated checkpoint inside each covered signer's explicit [validFrom, retiredAt) interval. The lower bound is inclusive, the upper bound is exclusive, and an absent validFrom in a legacy two-field lifecycle record stays unbounded rather than being fabricated. RFC 3339 T/Z are case-insensitive. Signer-authored receipt timestamps are never lifecycle evidence. PARTIAL + PREFIX_ANCHORED replaces the earlier informal DEGRADED label. PROVEN_SUPPRESSED is not emitted without presenter-possession/omission proof.",
+  note: "Historical attribution uses an independently authenticated checkpoint inside each covered receipt signer's explicit [validFrom, retiredAt) interval and at or after the witness key's explicit validFrom. The lower bounds are inclusive, the receipt retirement bound is exclusive, and an absent/null validFrom stays unbounded rather than being fabricated. A retired witness key remains refused: its own checkpoint timestamp cannot establish pre-retirement existence. RFC 3339 T/Z are case-insensitive. Signer-authored receipt timestamps are never lifecycle evidence. PARTIAL + PREFIX_ANCHORED replaces the earlier informal DEGRADED label. PROVEN_SUPPRESSED is not emitted without presenter-possession/omission proof.",
 });
 
 const receiptRoots: Readonly<Record<string, unknown>> = {
@@ -381,6 +441,12 @@ const checkpoints: Readonly<Record<string, Checkpoint>> = {
 };
 const checkpointRoots: Readonly<Record<string, unknown>> = {
   "checkpoint-keyring.json": checkpointRoot,
+  "checkpoint-keyring-lifecycle.json": checkpointLifecycle,
+  "checkpoint-keyring-null-activation.json": checkpointNullActivation,
+  "checkpoint-keyring-window.json": checkpointWindow,
+  "checkpoint-keyring-at-activation.json": checkpointAtActivation,
+  "checkpoint-keyring-before-activation.json": checkpointBeforeActivation,
+  "checkpoint-keyring-retired.json": checkpointRetired,
   "checkpoint-keyring-wrong.json": wrongRoot,
   "checkpoint-keyring-same-material.json": sameKeyRoot,
 };

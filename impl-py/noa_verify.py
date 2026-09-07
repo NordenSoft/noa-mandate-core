@@ -907,7 +907,10 @@ def verify_historical_chain(receipts, receipt_root, checkpoint=None, checkpoint_
 
     completeness = "HEAD_ANCHORED" if cp_seq == head["chain"]["seq"] else "PREFIX_ANCHORED"
     checkpoint_time = _instant(checkpoint["ts"])
-    checkpoint_before_activation = False
+    witness_valid_from = witness_trust["validFrom"].get(witness_kid)
+    checkpoint_before_activation = witness_valid_from is not None and (
+        checkpoint_time is None or checkpoint_time < _instant(witness_valid_from)
+    )
     checkpoint_after_retirement = checkpoint_time is None
     for seq in range(cp_seq + 1):
         kid = by_seq[seq]["sig"]["kid"]

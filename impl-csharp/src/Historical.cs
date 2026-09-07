@@ -283,7 +283,9 @@ public static class HistoricalVerifier
         string completeness = checkpointSeq == headSeq ? "HEAD_ANCHORED" : "PREFIX_ANCHORED";
         string checkpointTimeText = ((JStr)checkpoint.Get("ts")!).Value;
         BigInteger? checkpointTime = ParseInstant(checkpointTimeText);
-        bool checkpointBeforeActivation = false;
+        bool checkpointBeforeActivation = witnessTrust.ValidFrom.TryGetValue(witnessKid, out BigInteger? witnessValidFrom)
+            && witnessValidFrom.HasValue
+            && (!checkpointTime.HasValue || checkpointTime.Value < witnessValidFrom.Value);
         bool checkpointAfterRetirement = !checkpointTime.HasValue;
         for (long seq = 0; seq <= checkpointSeq; seq++)
         {

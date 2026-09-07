@@ -167,39 +167,43 @@ test("checkpoint one nanosecond before retirement remains attributable", () => {
   assert.equal(result.asOf, checkpointAt);
 });
 
-test("historical attribution enforces the explicit inclusive activation bound without inventing one for legacy records", () => {
+test("historical attribution enforces receipt and witness activation bounds without inventing legacy history", () => {
   const f = fixture();
   const checkpointAt = "2026-01-01T00:00:01.000000001Z";
   const cp = buildCheckpoint(f.chain[2]!, checkpointAt, f.witnessSigner);
-  const evaluate = (validFrom?: string | null) => verifyHistoricalChain(b(f.chain), {
-    keyring: b(lifecycle(f.receiptKey.kid, f.receiptKey.publicKey, RETIRED_AT, validFrom)),
-    checkpoint: b(cp),
-    checkpointKeyring: f.witnessRoot,
-  });
+  for (const subject of ["receipt", "witness"] as const) {
+    const key = subject === "receipt" ? f.receiptKey : f.witnessKey;
+    const retiredAt = subject === "receipt" ? RETIRED_AT : null;
+    const evaluate = (validFrom?: string | null) => verifyHistoricalChain(b(f.chain), {
+      keyring: subject === "receipt"
+        ? b(lifecycle(key.kid, key.publicKey, retiredAt, validFrom)) : f.retiredRoot,
+      checkpoint: b(cp),
+      checkpointKeyring: subject === "witness"
+        ? b(lifecycle(key.kid, key.publicKey, retiredAt, validFrom)) : f.witnessRoot,
+    });
 
-  const legacy = evaluate();
-  assert.equal(legacy.classification, "VERIFIED", "legacy two-field lifecycle gained a fabricated lower bound");
-  assert.deepEqual(
-    Object.keys(lifecycle(f.receiptKey.kid, f.receiptKey.publicKey, RETIRED_AT).keys[f.receiptKey.kid]!).sort(),
-    ["publicKey", "retiredAt"],
-    "compatibility control is not the original two-field lifecycle shape",
-  );
+    const legacy = evaluate();
+    assert.equal(legacy.classification, "VERIFIED", `${subject}: legacy lifecycle gained a lower bound`);
+    assert.deepEqual(evaluate(null), legacy, `${subject}: null activation changed legacy behavior`);
+    assert.deepEqual(
+      Object.keys(lifecycle(key.kid, key.publicKey, retiredAt).keys[key.kid]!).sort(),
+      ["publicKey", "retiredAt"],
+      `${subject}: compatibility control is not the original two-field lifecycle shape`,
+    );
 
-  const afterActivation = evaluate("2026-01-01T00:00:01.000000000Z");
-  assert.equal(afterActivation.classification, "VERIFIED");
-  assert.equal(afterActivation.dimensions.attribution, "ATTRIBUTABLE_AS_OF");
+    const afterActivation = evaluate("2026-01-01T00:00:01.000000000Z");
+    assert.deepEqual(afterActivation, legacy, `${subject}: checkpoint after activation`);
+    assert.deepEqual(evaluate(checkpointAt), legacy, `${subject}: validFrom must be inclusive`);
 
-  const atActivation = evaluate(checkpointAt);
-  assert.equal(atActivation.classification, "VERIFIED", "validFrom must be inclusive");
-  assert.equal(atActivation.dimensions.attribution, "ATTRIBUTABLE_AS_OF");
-
-  const beforeActivation = evaluate("2026-01-01T00:00:01.000000002Z");
-  assert.equal(beforeActivation.classification, "UNVERIFIED");
-  assert.equal(beforeActivation.code, "CHECKPOINT_BEFORE_ACTIVATION");
-  assert.equal(beforeActivation.dimensions.integrity, "INTACT");
-  assert.equal(beforeActivation.dimensions.completeness, "HEAD_ANCHORED");
-  assert.equal(beforeActivation.dimensions.attribution, "UNATTRIBUTABLE");
-  assert.equal(beforeActivation.asOf, null);
+    const beforeActivation = evaluate("2026-01-01T00:00:01.000000002Z");
+    assert.equal(beforeActivation.classification, "UNVERIFIED", subject);
+    assert.equal(beforeActivation.code, "CHECKPOINT_BEFORE_ACTIVATION", subject);
+    assert.equal(beforeActivation.dimensions.integrity, "INTACT", subject);
+    assert.equal(beforeActivation.dimensions.completeness, "HEAD_ANCHORED", subject);
+    assert.equal(beforeActivation.dimensions.attribution, "UNATTRIBUTABLE", subject);
+    assert.equal(beforeActivation.asOf, null, subject);
+    assert.equal(beforeActivation.attributedThroughSeq, null, subject);
+  }
 });
 
 test("lifecycle timestamps share lowercase RFC 3339 grammar and invalid explicit intervals fail closed", () => {

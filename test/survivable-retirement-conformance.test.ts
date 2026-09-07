@@ -36,7 +36,7 @@ function evaluate(c: CorpusCase): HistoricalVerificationResult {
 test("every survivable-retirement fixture reproduces its versioned result", () => {
   const corpus = JSON.parse(readFileSync(join(CORPUS, "cases.json"), "utf8")) as Corpus;
   assert.equal(corpus.spec, "noa.historical-verification-corpus/0.1");
-  assert.equal(corpus.cases.length, 19);
+  assert.equal(corpus.cases.length, 25);
   for (const c of corpus.cases) {
     assert.deepEqual(evaluate(c), c.expected, c.id);
   }
@@ -63,6 +63,12 @@ test("the corpus pins evidence monotonicity and never infers deliberate suppress
   assert.equal(results.get("checkpoint-after-explicit-activation")!.classification, "VERIFIED");
   assert.equal(results.get("checkpoint-at-explicit-activation")!.classification, "VERIFIED");
   assert.equal(results.get("checkpoint-one-nanosecond-before-activation")!.code, "CHECKPOINT_BEFORE_ACTIVATION");
+  for (const id of [
+    "witness-legacy-lifecycle-no-activation", "witness-null-activation",
+    "witness-after-explicit-activation", "witness-at-explicit-activation",
+  ]) assert.equal(results.get(id)!.classification, "VERIFIED", id);
+  assert.equal(results.get("witness-one-nanosecond-before-activation")!.code, "CHECKPOINT_BEFORE_ACTIVATION");
+  assert.equal(results.get("witness-retired")!.code, "WITNESS_KEY_RETIRED");
   assert.equal(results.get("lowercase-rfc3339-activation-boundary")!.classification, "VERIFIED");
   assert.equal(results.get("invalid-lifecycle-interval")!.code, "RECEIPT_ROOT_INVALID");
   assert.equal(results.get("authenticated-same-seq-contradiction")!.dimensions.completeness, "CONFLICT");

@@ -79,6 +79,7 @@ function replaceOnce(source, before, after, label) {
 const shippedCli = join(ROOT, "dist", "src", "cli.js");
 assertOracle(shippedCli, "checkpoint-after-retirement");
 assertOracle(shippedCli, "checkpoint-one-nanosecond-before-activation");
+assertOracle(shippedCli, "witness-one-nanosecond-before-activation");
 assertOracle(shippedCli, "same-key-witness-alias");
 
 const temp = mkdtempSync(join(ROOT, ".g2-knockout-"));
@@ -97,6 +98,12 @@ try {
       caseId: "checkpoint-one-nanosecond-before-activation",
       before: "if (checkpointTime === null || activationTime === null || checkpointTime < activationTime) {",
       after: "if (false) {",
+    },
+    {
+      name: "witness activation lower bound",
+      caseId: "witness-one-nanosecond-before-activation",
+      before: "const witnessValidFrom = witnessTrust.validFromByKid[checkpoint.sig.kid];",
+      after: "const witnessValidFrom = undefined;",
     },
     {
       name: "witness key-material separation",
@@ -132,4 +139,4 @@ try {
   rmSync(temp, { recursive: true, force: true });
 }
 
-process.stdout.write("survivable-retirement knockout: 3/3 controls load-bearing\n");
+process.stdout.write("survivable-retirement knockout: 4/4 controls load-bearing\n");

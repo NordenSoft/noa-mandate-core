@@ -1201,7 +1201,14 @@ export function verifyHistoricalChain(
     ? "HEAD_ANCHORED"
     : "PREFIX_ANCHORED";
   const checkpointTime = lifecycleInstantNanos(checkpoint.ts);
-  let checkpointBeforeActivation = false;
+  // The checkpoint must also respect its witness key's explicitly supplied activation bound.
+  // The earlier retired-witness refusal remains authoritative: its own timestamp cannot prove
+  // that the checkpoint existed before that witness key was retired.
+  const witnessValidFrom = witnessTrust.validFromByKid[checkpoint.sig.kid];
+  const witnessActivationTime = typeof witnessValidFrom === "string"
+    ? lifecycleInstantNanos(witnessValidFrom) : null;
+  let checkpointBeforeActivation = typeof witnessValidFrom === "string"
+    && (checkpointTime === null || witnessActivationTime === null || checkpointTime < witnessActivationTime);
   let checkpointAfterRetirement = checkpointTime === null;
   for (let seq = 0; seq <= checkpoint.highestSeq; seq++) {
     const receipt = mapGet(bySeq, seq) as Receipt;

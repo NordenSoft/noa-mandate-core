@@ -152,6 +152,13 @@ retirement. When the lifecycle explicitly supplies `validFrom`, attribution also
 no lower bound: verifiers do not invent activation history. An explicit empty or inverted interval
 (`validFrom >= retiredAt`) is rejected as `RECEIPT_ROOT_INVALID`.
 
+The checkpoint key's own explicit `validFrom` is also an inclusive lower bound on
+`checkpoint.ts`. A checkpoint before either activation bound is `UNVERIFIED` with
+`CHECKPOINT_BEFORE_ACTIVATION`; integrity and the authenticated head/prefix mapping remain intact,
+but attribution is withheld. Absent/null checkpoint-key activation retains the unbounded legacy
+behavior. A lifecycle-retired checkpoint key remains `WITNESS_KEY_RETIRED`: its own signed
+timestamp cannot prove that it existed before that key was retired.
+
 Lifecycle and checkpoint instants use the receipt profile's RFC 3339 grammar: one to nine fractional
 digits are accepted, and RFC 3339's `T`/`Z` separators are case-insensitive (`t`/`z` are valid).
 Comparisons retain nanosecond precision. A checkpoint ahead of the supplied bytes or contradicting
