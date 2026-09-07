@@ -194,6 +194,13 @@ jobs:
       - name: Verify complete candidate history and install metadata prerequisites
         run: |
           test "$(git rev-parse --is-shallow-repository)" = false
+          # Pinned checkout v7 writes this local performance setting before fetch. It is runner
+          # state, not candidate source configuration, and the closed capture policy rejects it.
+          # The suffix preserves trailing newlines until the exact value check.
+          checkout_gc_auto="$(git config --local --get-all gc.auto && printf .)"
+          test "$checkout_gc_auto" = $'0\n.'
+          git config --local --unset-all gc.auto
+          if git config --local --get-all gc.auto; then exit 1; else test "$?" -eq 1; fi
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends acl attr
           /usr/bin/getfacl --version
@@ -312,11 +319,12 @@ jobs:
     # 208 runnable. The number is derived where it is needed — the shard job asks the registry.
     timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
         include:
           - node: 20.19.0
             label: 20
-          - node: 22
+          - node: 22.22.2
             label: 22
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -330,6 +338,13 @@ jobs:
       - name: Verify complete candidate history and install metadata prerequisites
         run: |
           test "$(git rev-parse --is-shallow-repository)" = false
+          # Pinned checkout v7 writes this local performance setting before fetch. It is runner
+          # state, not candidate source configuration, and the closed capture policy rejects it.
+          # The suffix preserves trailing newlines until the exact value check.
+          checkout_gc_auto="$(git config --local --get-all gc.auto && printf .)"
+          test "$checkout_gc_auto" = $'0\n.'
+          git config --local --unset-all gc.auto
+          if git config --local --get-all gc.auto; then exit 1; else test "$?" -eq 1; fi
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends acl attr
           /usr/bin/getfacl --version
@@ -369,6 +384,13 @@ jobs:
           LD_AUDIT: ""
         # PHASES 2 and 3 — exactly as at the first evidence step in this file.
         run: /usr/bin/env -u NODE_OPTIONS -u NODE_REPL_EXTERNAL_MODULE -u npm_config_node_options -u npm_config_script_shell -u npm_config_shell -u BASH_ENV -u ENV -u SHELLOPTS -u DYLD_INSERT_LIBRARIES -u DYLD_LIBRARY_PATH -u DYLD_FRAMEWORK_PATH -u LD_PRELOAD -u LD_LIBRARY_PATH -u LD_AUDIT node scripts/lib/knockout-runner.mjs --launch-evidence npm test --ignore-scripts=false --script-shell=/bin/sh --node-options=
+      - name: Select attested tooling runtime for package preparation
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 20 }}
+        # Registry derivation is an attested controller operation pinned to this runtime.
+        # The product and reporter compatibility checks retain their matrix runtime below.
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.2
       - name: Prepare every package the proof lanes and the sweep resolve through
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # ONE RUNNER, CALLED BY EVERY JOB THAT NEEDS THE SAME TREE. It derives the proof preparation
@@ -377,6 +399,11 @@ jobs:
         # and `knockout-shards` below calls the identical line — see the file for why this is a
         # script and not a block of shell each job carries its own copy of.
         run: node scripts/prepare-proof-packages.mjs
+      - name: Restore product runtime before matrix proof checks
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 20 }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
       - name: Proof-runner reporter contract selftest (supported Node matrix)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # Machine evidence may not depend on Node's version/TTY-selected default reporter. This
@@ -686,6 +713,13 @@ jobs:
       - name: Verify complete candidate history and install metadata prerequisites
         run: |
           test "$(git rev-parse --is-shallow-repository)" = false
+          # Pinned checkout v7 writes this local performance setting before fetch. It is runner
+          # state, not candidate source configuration, and the closed capture policy rejects it.
+          # The suffix preserves trailing newlines until the exact value check.
+          checkout_gc_auto="$(git config --local --get-all gc.auto && printf .)"
+          test "$checkout_gc_auto" = $'0\n.'
+          git config --local --unset-all gc.auto
+          if git config --local --get-all gc.auto; then exit 1; else test "$?" -eq 1; fi
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends acl attr
           /usr/bin/getfacl --version

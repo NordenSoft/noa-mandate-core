@@ -863,7 +863,7 @@ function renderMarkdown({ table, totalTsPyResults, tsPyExitCode, fileLangRuns, o
   );
   lines.push("");
   lines.push(
-    "See also [`conformance/golden/`](golden/) for the SEPARATE cross-*version* backcompat guarantee (does a real past release's own signed output still verify today) — this matrix is cross-*implementation* only (does an independent verifier agree with the TS reference on the SAME, freshly-built bytes).",
+    "See also [`conformance/golden/`](golden/) for the SEPARATE cross-*version* backcompat guarantee (does a real past release's own signed output still verify today) — this matrix is cross-*implementation* only (does another language-specific verifier agree with its documented comparison target on the SAME, freshly-built bytes).",
   );
   lines.push("");
   return lines.join("\n");
