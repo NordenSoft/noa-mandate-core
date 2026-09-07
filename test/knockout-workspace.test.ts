@@ -831,11 +831,39 @@ function pathStableObservation(file: string): Record<string, boolean | number | 
 }
 
 function errorChain(error: unknown): string {
-  const chain: Array<{ code: unknown; details: unknown; message: unknown; name: unknown }> = [];
+  const chain: Array<{
+    code: unknown;
+    details: unknown;
+    errno: unknown;
+    message: unknown;
+    name: unknown;
+    pid: unknown;
+    signal: unknown;
+    status: unknown;
+    syscall: unknown;
+  }> = [];
   let current: unknown = error;
   while (current instanceof Error && chain.length < 8) {
-    const typed = current as WorkspaceError & { cause?: unknown; details?: unknown };
-    chain.push({ code: typed.code, details: typed.details, message: typed.message, name: typed.name });
+    const typed = current as WorkspaceError & {
+      cause?: unknown;
+      details?: unknown;
+      errno?: unknown;
+      pid?: unknown;
+      signal?: unknown;
+      status?: unknown;
+      syscall?: unknown;
+    };
+    chain.push({
+      code: typed.code,
+      details: typed.details,
+      errno: typed.errno,
+      message: typed.message,
+      name: typed.name,
+      pid: typed.pid,
+      signal: typed.signal,
+      status: typed.status,
+      syscall: typed.syscall,
+    });
     current = typed.cause;
   }
   return JSON.stringify(chain);
@@ -12761,7 +12789,10 @@ test("Phase 2 isolated runner refuses a captured registry mismatch before suite 
         suiteTimeoutMs: 60_000,
         workerTimeoutMs: workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS,
       }),
-      (error: WorkspaceError) => error.code === "ARM_REFUSED",
+      (error: WorkspaceError) => {
+        assert.equal(error.code, "ARM_REFUSED", errorChain(error));
+        return true;
+      },
     );
 
     assert.equal(fs.existsSync(path.join(fixture.source, "suite-ran.txt")), false);
