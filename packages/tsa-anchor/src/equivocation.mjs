@@ -585,6 +585,8 @@ function branchOf(rec, stampVerification) {
         code: res.code,
         reason: res.reason,
         genTime: res.genTime,
+        accuracy: res.accuracy,
+        timeBounds: res.timeBounds,
         tsaUrl: typeof record === "object" && record !== null ? record.tsaUrl : undefined,
         tsr: typeof record === "object" && record !== null ? record.tsr : undefined,
       };
@@ -627,7 +629,7 @@ function branchesOf(recs, maxBranches, stampVerification) {
  *                   `noa-tsa stamp`, so each branch of a finding carries an independent TSA time.
  *                 - `tsaVerification`: the explicit OpenSSL/root/policy/CRL/clock inputs required
  *                   by `verifyStamp`. Without it, attached stamps remain fail-closed and unverified.
- *                   Multi-stamp work is capped at 16 unique anchors, 80 OpenSSL processes, and one
+ *                   Multi-stamp work is capped at 16 unique anchors, 96 OpenSSL processes, and one
  *                   30000-ms aggregate deadline; exact repeated anchor/TSR inputs reuse a verdict.
  *
  * Three finding kinds, in descending strength of attribution:
@@ -1091,7 +1093,7 @@ function findCrossKeyPair(headEntries) {
  * HISTORY_CONTRADICTION: one side of that contradiction is the presented chain or checkpoint, which
  * is not a signed artifact carried inside the proof. Calling that transferable would be exactly the
  * kind of quiet overstatement this package exists to avoid. At most 16 branches are accepted; all
- * attached stamps share a private 80-process/30000-ms ceiling and exact repeats are verified once.
+ * attached stamps share a private 96-process/30000-ms ceiling and exact repeats are verified once.
  */
 export function verifyEquivocationProof(proof, trustSet, opts = {}) {
   try {
@@ -1217,7 +1219,7 @@ function verifyEquivocationProofInner(proof, trustSet, opts) {
     }
     const verified = res.ok === true;
     if (item.claimedVerified && !verified) stampClaimsRefuted++;
-    // ONLY `verified` AND `genTime` ARE RE-DERIVED. A TSA URL is not inside an RFC 3161 token, so
+    // ONLY authenticated time metadata is re-derived. A TSA URL is not inside an RFC 3161 token, so
     // it cannot be re-derived from anything — copying it out of the claim into a field sitting next
     // to `verified:true` laundered an attacker-chosen string into what reads as attested evidence.
     // It is carried under a name that says what it is, and nowhere else.
@@ -1228,6 +1230,8 @@ function verifyEquivocationProofInner(proof, trustSet, opts) {
       code: res.code,
       claimedVerified: item.claimedVerified,
       genTime: verified ? res.genTime : undefined,
+      accuracy: verified ? res.accuracy : undefined,
+      timeBounds: verified ? res.timeBounds : undefined,
       tsaUrlClaimed: item.tsaUrlClaimed,
       reason: res.reason,
     });

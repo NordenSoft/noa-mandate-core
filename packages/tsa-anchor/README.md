@@ -47,15 +47,23 @@ own hash.
 
 ## What noa-tsa proves — and does not
 
-**An authenticated TSA token proves the anchor existed at time T — it does not prove receipts' own
-ts fields.**
+**An authenticated TSA token proves the TSA signed an assertion about the anchor and its creation
+time — it does not prove receipts' own `ts` fields.**
 
 Precisely:
 - A TSA stamp that passes authenticated verification is evidence that a specific signed anchor
-  (frontier + witness signature) existed no later than the time the TSA granted the request. It does
+  (frontier + witness signature) existed no later than the token's authenticated latest creation-time
+  bound when signed `Accuracy` is present. RFC 3161 defines that bound as `genTime + Accuracy`. It does
   **not** prove the anchor did not exist even earlier, and it does **not** prove anything about the
   underlying receipt chain's own `ts` fields, which remain signer-asserted (see the parent
   `THREAT-MODEL.md`).
+- Signed `Accuracy` is returned as seconds/millis/micros plus exact `timeBounds.earliest/latest`.
+  Missing components inside an explicit Accuracy SEQUENCE mean zero. A wholly omitted Accuracy
+  instead returns `accuracy:null` and `{accuracyKnown:false, earliest:null, latest:null}`: RFC 3161
+  says accuracy may then be available through the TSA policy, so omission is not treated as exact
+  zero. Such a token remains usable as an authenticated TSA assertion at `genTime`, but this package
+  does not claim a signed no-later-than bound. A cutoff consumer must require a non-null `latest` or
+  independently resolve and enforce the accepted `TSAPolicyId` accuracy.
 - A chain with no witness anchor has no TSA coverage at all — this package only ever timestamps
   anchors that already went through the opt-in witness-federation path
   (`noa verify --anchors/--trust-set` in the parent package).
@@ -72,9 +80,12 @@ Precisely:
   `crl-check-all` policy, and a trusted verification instant with a bounded future skew. It then
   verifies the SHA-256 `messageImprint`, exactly one CMS `SignerInfo`, the CMS signature, the
   authenticated TSTInfo bytes, the embedded signer certificate and chain, timestamp-signing EKU,
-  certificate validity and CRL status at authenticated `genTime`, and the algorithm/security-level
-  constraints. Missing trust, policy, revocation evidence, clock policy, or OpenSSL fails closed
-  with a stable code.
+  certificate validity and CRL status across the authenticated creation-time interval when Accuracy
+  is present, and the algorithm/security-level constraints. Before the final OpenSSL path checks,
+  every available certificate and CRL candidate is restricted to exact original PEM blocks whose
+  validity covers that complete interval; unrelated PEM block kinds are omitted. Selected
+  `TRUSTED CERTIFICATE` blocks retain their original trust attributes. Missing trust, policy,
+  revocation evidence, clock policy, or OpenSSL fails closed with a stable code.
 - The signer certificate must be embedded in the CMS token. `untrustedCertificates` may contain
   chain intermediates only; it cannot supply an omitted signer certificate. Trust roots are always
   caller-supplied and are never inferred from the operating system. The compatible
@@ -87,10 +98,12 @@ Precisely:
   CRL-only and requires status for the whole chain; the verifier does not fetch OCSP or CRLs from
   the network.
 - `clock.now` is a caller-supplied UTC RFC 3339 instant. `clock.maxFutureSkewMs` is required and is
-  capped at 300000 ms; a signed `genTime` beyond that bound is rejected. Certificate validity and
-  CRL checks use the authenticated `genTime`, not the ambient wall clock. Because OpenSSL's
-  verification instant has one-second resolution, tokens with fractional `genTime` are rejected
-  instead of being rounded across a certificate or CRL boundary.
+  capped at 300000 ms; the signed latest creation-time bound, or `genTime` when Accuracy is absent,
+  must fit within it. Certificate validity and CRL checks use both Accuracy endpoints when known and
+  `genTime` otherwise, never the ambient wall clock. OpenSSL's verification instant has one-second
+  resolution, so Accuracy endpoints are rounded outward (earliest down, latest up) for conservative
+  checks. Tokens with fractional `genTime` remain rejected instead of being rounded across a
+  certificate or CRL boundary.
 - `inspectStamp` is the separate structural diagnostic API. It always returns
   `authenticated:false`, has no `ok` field, and cannot upgrade a parse result into a trust verdict.
   A manually run OpenSSL command is likewise diagnostic only and cannot change the API or CLI
@@ -151,7 +164,8 @@ result reports `transferable` separately from `ok` (see the honest limits below)
   that any forwarder can recompute: it catches drift and accident, not an active attacker.
 - **A TSA URL is a claim, not evidence.** It is not inside an RFC 3161 token, so it cannot be
   re-derived; it is carried as `tsaUrlClaimed` and never sits beside `verified:true` as if attested.
-  Only an authenticated `verified` result and its `genTime` are re-derived from the token bytes.
+  Only an authenticated `verified` result and its `genTime`/Accuracy/time bounds are re-derived from
+  the token bytes.
 
 Every result object carries these limits in its own `undetected` array, including a `CLEAN` one —
 which is exactly when a reader is most likely to over-read the answer.
@@ -187,8 +201,9 @@ floor is **refused**, not silently clamped.
 - `stampAnchor(anchor, { tsaUrl, certReq?, includeNonce?, nonceValue?, timeoutMs? }) -> Promise<StampRecord>`
   — requests a timestamp; fail-closed (`TsaError`) on any transport failure, non-grant, or a
   response whose messageImprint does not match the submitted anchor hash.
-- `verifyStamp(anchor, stampRecord, verification) -> { ok, authenticated, code, reason, ... }` —
-  never throws. `verification` is:
+- `verifyStamp(anchor, stampRecord, verification) -> { ok, authenticated, code, reason, genTime,
+  accuracy, timeBounds, ... }` — never throws. `genTime` is preserved for compatibility;
+  `accuracy:null` and null bounds mean the token omitted Accuracy. `verification` is:
   ```js
   {
     opensslExecutable: "/absolute/path/to/openssl", // OpenSSL 3.x
@@ -210,7 +225,7 @@ floor is **refused**, not silently clamped.
   when the scan ran to completion AND found nothing — malformed input leaves it `false`, so a caller
   reading nothing else still fails closed. Attached-stamp verification admits at most 16 unique
   canonical anchors, reuses one exact anchor/TSR verdict wherever that evidence repeats, and shares
-  a fixed 80-process/30000-ms aggregate budget. Never throws.
+  a fixed 96-process/30000-ms aggregate budget. Never throws.
 - `verifyEquivocationProof(finding, trustSet, {tsaVerification}?) -> { ok, transferable, reason, ... }`
   — never throws. It independently re-verifies attached token bytes; a carried `verified` claim is
   never trusted. It refuses more than 16 carried branches before OpenSSL, deduplicates identical
@@ -260,8 +275,9 @@ collection with `verify` must submit explicit batches of at most 16 and require 
 batches. Scan the complete pool without `--tsr`, then authenticate the bounded anchors carried by
 each resulting finding with explicit `verify` batches.
 
-Each admitted unique anchor receives exactly five OpenSSL process credits, for a command maximum
-of 80. All credits also share one monotonic aggregate deadline: 30000 ms by default, optionally set
+Each admitted unique anchor receives at most six OpenSSL process credits, for a command maximum
+of 96. A token with absent or explicit-zero Accuracy uses five because its endpoint checks coincide.
+All credits also share one monotonic aggregate deadline: 30000 ms by default, optionally set
 with `--tsa-command-timeout-ms` to an integer from 100 through 30000. This flag bounds the whole
 OpenSSL phase and does not alter the trusted RFC 3161 `--tsa-now` value. Deadline or process-credit
 exhaustion stops every remaining unique anchor without starting more processes and returns
@@ -276,10 +292,13 @@ object fails closed rather than extending work or manufacturing a verified resul
 
 All TSA verification values are trusted verifier configuration: the OpenSSL executable itself,
 CA roots, allowed policy OID, CRLs, and clock value must come from the verifier's controlled
-configuration, not from the token, sidecar, or TSA response. For a historical `genTime`, the CRL
-bundle must contain archived issuer CRLs whose validity intervals cover that instant and status for
-every non-trust-anchor certificate in the chain. This package performs no network retrieval or
-historical-CRL discovery; missing, stale, or not-yet-valid CRL evidence fails closed.
+configuration, not from the token, sidecar, or TSA response. For a historical creation-time
+interval, every certificate or CRL candidate admitted to the final trust decision must cover the
+whole interval; separate materials that cover only different points cannot be combined into
+continuous evidence. The CRL bundle must contain archived issuer CRLs with status for every
+non-trust-anchor certificate in the chain. When Accuracy is absent, the only checked instant is
+`genTime`. This package performs no network retrieval or historical-CRL discovery; missing, stale,
+not-yet-valid, or interval-incomplete CRL evidence fails closed.
 
 Exit codes: **`0` means CLEAN and nothing else** · `1` MISMATCH (verify: an anchor is unstamped or
 its stamp does not match; corroborate: quorum not met) · `2` TRANSPORT (stamp: the TSA request

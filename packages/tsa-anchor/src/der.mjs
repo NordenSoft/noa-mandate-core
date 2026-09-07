@@ -24,6 +24,7 @@ const {
   byteLength,
   getOwnPropertyDescriptor,
   hasOwn,
+  isBuffer,
   isSafeInteger,
   objectSetPrototypeOf,
   strCharCodeAt,
@@ -34,6 +35,13 @@ const {
 
 const MAX_SAFE_INTEGER = 9007199254740991;
 const DEFAULT_MAX_DEPTH = 32;
+// Package parsing profile, not general ASN.1 limits. Count every node and reserve every content
+// copy before descending; a byte-admitted tree must not multiply into unbounded heap work.
+const MAX_DECODE_NODES = 4096;
+const MAX_DECODED_BYTES = 16 * 1024 * 1024;
+const MAX_INTEGER_CONTENT_BYTES = 128;
+const MAX_OID_CONTENT_BYTES = 256;
+const MAX_TIME_CONTENT_BYTES = 64;
 
 function mutableInertArray() {
   const out = [];
@@ -42,9 +50,10 @@ function mutableInertArray() {
 }
 
 export class DerError extends Error {
-  constructor(m) {
+  constructor(m, code) {
     super(m);
     this.name = "DerError";
+    if (code !== undefined) this.code = code;
   }
 }
 
@@ -170,63 +179,108 @@ export function encGeneralizedTime(date) {
 }
 
 // ── decoder: generic recursive DER TLV walker (cursor-threaded, mirrors src/cose/cbor.ts's `Cur`) ──
-function decodeAt(c, depth, maxDepth) {
-  if (depth > maxDepth) throw new DerError("max depth exceeded");
-  const bufferLength = byteLength(c.buf);
-  if (c.i >= bufferLength) throw new DerError("truncated tag");
-  const tagByte = c.buf[c.i];
-  c.i += 1;
+function readElementBounds(buf, offset, enclosingEnd) {
+  if (offset >= enclosingEnd) throw new DerError("truncated tag");
+  const tagByte = buf[offset];
+  let cursor = offset + 1;
   const tagClass = tagByte >> 6; // 0 universal, 1 application, 2 context, 3 private
   const constructed = (tagByte & 0x20) !== 0;
   const tagNumber = tagByte & 0x1f;
   if (tagNumber === 0x1f) throw new DerError("high-tag-number form (tag number > 30) not supported");
 
-  if (c.i >= bufferLength) throw new DerError("truncated length");
-  const b0 = c.buf[c.i];
+  if (cursor >= enclosingEnd) throw new DerError("truncated length");
+  const b0 = buf[cursor];
   let length;
   if ((b0 & 0x80) === 0) {
     length = b0;
-    c.i += 1;
+    cursor += 1;
   } else {
     const numOctets = b0 & 0x7f;
     if (numOctets === 0) throw new DerError("indefinite length not supported (DER requires definite length)");
     if (numOctets > 4) throw new DerError("length too large (>4 length-octets unsupported)");
-    if (c.i + 1 + numOctets > bufferLength) throw new DerError("truncated length octets");
-    if (numOctets > 1 && c.buf[c.i + 1] === 0x00) throw new DerError("non-minimal (non-canonical) length encoding");
+    if (cursor + 1 + numOctets > enclosingEnd) throw new DerError("truncated length octets");
+    if (numOctets > 1 && buf[cursor + 1] === 0x00) throw new DerError("non-minimal (non-canonical) length encoding");
     length = 0;
-    for (let k = 0; k < numOctets; k++) length = length * 256 + c.buf[c.i + 1 + k];
+    for (let k = 0; k < numOctets; k++) length = length * 256 + buf[cursor + 1 + k];
     // DER (X.690 §10.1) requires the SHORTEST length form: a value < 128 MUST use short form, so a
     // long form that decodes to < 128 is non-minimal (BER, not DER) and is rejected fail-closed.
     if (length < 0x80) throw new DerError("non-minimal length: long form used for a value < 128 (DER requires short form)");
-    c.i += 1 + numOctets;
+    cursor += 1 + numOctets;
   }
-  if (c.i + length > bufferLength) throw new DerError("value overruns buffer");
-  const start = c.i;
-  const end = c.i + length;
+  if (length > enclosingEnd - cursor) throw new DerError("value overruns containing element");
+  return {
+    tagClass,
+    constructed,
+    tagNumber,
+    contentStart: cursor,
+    contentEnd: cursor + length,
+    nextOffset: cursor + length,
+  };
+}
+
+/** Read one strict-DER header without copying or descending into its content. */
+export function derElementBounds(buf, offset = 0, enclosingEnd = byteLength(buf)) {
+  const bufferLength = byteLength(buf);
+  if (!isBuffer(buf)) throw new DerError("derElementBounds: expects a Buffer");
+  if (!isSafeInteger(offset) || offset < 0 || offset > bufferLength) {
+    throw new DerError("derElementBounds: offset must be an in-range integer");
+  }
+  if (!isSafeInteger(enclosingEnd) || enclosingEnd < offset || enclosingEnd > bufferLength) {
+    throw new DerError("derElementBounds: enclosingEnd must be an in-range integer at or after offset");
+  }
+  return readElementBounds(buf, offset, enclosingEnd);
+}
+
+function decodeAt(c, depth, enclosingEnd) {
+  if (depth > c.maxDepth) throw new DerError("max depth exceeded");
+  if (c.remainingNodes === 0) throw new DerError("DER node budget exceeded", "DER_RESOURCE_LIMIT");
+  c.remainingNodes--;
+  const bounds = readElementBounds(c.buf, c.i, enclosingEnd);
+  c.i = bounds.contentStart;
+  const start = bounds.contentStart;
+  const end = bounds.contentEnd;
+  const length = end - start;
+  if (length > c.remainingDecodedBytes) throw new DerError("DER decoded-content budget exceeded", "DER_RESOURCE_LIMIT");
+  c.remainingDecodedBytes -= length;
 
   let children = null;
-  if (constructed) {
+  if (bounds.constructed) {
     children = mutableInertArray();
-    while (c.i < end) arrayPush(children, decodeAt(c, depth + 1, maxDepth));
+    while (c.i < end) arrayPush(children, decodeAt(c, depth + 1, end));
     if (c.i !== end) throw new DerError("constructed value length mismatch");
   } else {
     c.i = end;
   }
-  return { tagClass, constructed, tagNumber, content: bufferFrom(bufSubarray(c.buf, start, end)), children };
+  return {
+    tagClass: bounds.tagClass,
+    constructed: bounds.constructed,
+    tagNumber: bounds.tagNumber,
+    content: bufferFrom(bufSubarray(c.buf, start, end)),
+    children,
+  };
 }
 
-/** Decode ONE top-level DER TLV starting at offset 0; throws DerError if trailing bytes remain. */
-export function derDecode(buf, opts = {}) {
-  let maxDepth = DEFAULT_MAX_DEPTH;
-  if (opts !== null && typeof opts === "object" && hasOwn(opts, "maxDepth")) {
-    const descriptor = getOwnPropertyDescriptor(opts, "maxDepth");
-    if (descriptor === undefined || !hasOwn(descriptor, "value") || !isSafeInteger(descriptor.value) || descriptor.value < 1 || descriptor.value > 128) {
-      throw new DerError("maxDepth must be an own integer data property from 1 through 128");
+function decodeLimit(opts, name, defaultValue, ceiling) {
+  if (opts !== null && typeof opts === "object" && hasOwn(opts, name)) {
+    const descriptor = getOwnPropertyDescriptor(opts, name);
+    if (descriptor === undefined || !hasOwn(descriptor, "value") || !isSafeInteger(descriptor.value) || descriptor.value < 1 || descriptor.value > ceiling) {
+      throw new DerError(`${name} must be an own integer data property from 1 through ${ceiling}`);
     }
-    maxDepth = descriptor.value;
+    return descriptor.value;
   }
-  const c = { buf, i: 0 };
-  const node = decodeAt(c, 0, maxDepth);
+  return defaultValue;
+}
+
+/** Decode ONE top-level DER TLV. Callers may tighten node/copy limits, never raise hard ceilings. */
+export function derDecode(buf, opts = {}) {
+  const c = {
+    buf,
+    i: 0,
+    maxDepth: decodeLimit(opts, "maxDepth", DEFAULT_MAX_DEPTH, 128),
+    remainingNodes: decodeLimit(opts, "maxNodes", MAX_DECODE_NODES, MAX_DECODE_NODES),
+    remainingDecodedBytes: decodeLimit(opts, "maxDecodedBytes", MAX_DECODED_BYTES, MAX_DECODED_BYTES),
+  };
+  const node = decodeAt(c, 0, byteLength(buf));
   if (c.i !== byteLength(buf)) throw new DerError("trailing bytes after the top-level TLV");
   return node;
 }
@@ -237,6 +291,7 @@ export function readIntegerBig(node) {
   // DER (X.690 §8.3): INTEGER content is >= 1 octet, and the first two octets must not be all-zero
   // (redundant leading 0x00 on a positive value) — both are non-minimal encodings, rejected fail-closed.
   const n = byteLength(node.content);
+  if (n > MAX_INTEGER_CONTENT_BYTES) throw new DerError("INTEGER exceeds the parsing profile", "DER_RESOURCE_LIMIT");
   if (n === 0) throw new DerError("zero-length INTEGER (DER requires at least one content octet)");
   if (n > 1 && node.content[0] === 0x00 && (node.content[1] & 0x80) === 0) {
     throw new DerError("non-minimal INTEGER: redundant leading 0x00 octet");
@@ -260,6 +315,7 @@ export function readOid(node) {
   if (!node || node.tagClass !== 0 || node.constructed || node.tagNumber !== 0x06) throw new DerError("not an OID");
   const bytes = node.content;
   const bytesLength = byteLength(bytes);
+  if (bytesLength > MAX_OID_CONTENT_BYTES) throw new DerError("OID exceeds the parsing profile", "DER_RESOURCE_LIMIT");
   if (bytesLength === 0) throw new DerError("empty OID");
   // Decode EVERY sub-identifier (including the first) as a base-128 group, then split the first
   // group back into arc0/arc1 — the mirror of encOid: `40*arc0 + arc1` is a single value that can
@@ -304,6 +360,7 @@ export function readOid(node) {
 /** DER GeneralizedTime (tag 0x18, primitive) -> ISO-8601 UTC string. */
 export function readGeneralizedTime(node) {
   if (!node || node.tagClass !== 0 || node.constructed || node.tagNumber !== 0x18) throw new DerError("not a GeneralizedTime");
+  if (byteLength(node.content) > MAX_TIME_CONTENT_BYTES) throw new DerError("GeneralizedTime exceeds the parsing profile", "DER_RESOURCE_LIMIT");
   const s = bufToString(node.content, "ascii");
   // HAND-SCANNED, NOT A REGEX. `RegExp.prototype.test/exec` performs a dynamic Get of `exec`
   // on the receiver, so even a captured matcher dispatches through a writable prototype slot

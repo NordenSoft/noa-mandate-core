@@ -404,6 +404,9 @@ test("STAMPS — both branches of a fork carry an authenticated independent TSA 
       assert.equal(branch.stamp.verified, true, branch.stamp.reason);
       assert.equal(branch.stamp.authenticated, true, branch.stamp.reason);
       assert.match(branch.stamp.genTime, /^\d{4}-\d{2}-\d{2}T/);
+      assert.deepEqual(branch.stamp.accuracy, { seconds: 1, millis: 0, micros: 0, totalMicroseconds: "1000000" });
+      assert.equal(branch.stamp.timeBounds.accuracyKnown, true);
+      assert.match(branch.stamp.timeBounds.latest, /^\d{4}-\d{2}-\d{2}T/);
       assert.equal(branch.stamp.tsaUrl, tsaUrlClaim);
     }
   } finally {
@@ -463,9 +466,11 @@ test("STAMP RESOURCES — transferable proof verification is bounded, deduplicat
       false,
       "exact duplicate proof jobs must reuse one authenticated verdict without resource exhaustion",
     );
-    assert.equal(dedupWrapper.count(), 2 * 5, "sixteen evidence positions over two exact anchor/TSR jobs must spawn ten processes");
     assert.equal(dedup.stampEvidence.length, 16);
     assert.ok(dedup.stampEvidence.every((entry) => entry.code === "OK"));
+    assert.ok(dedup.stampEvidence.every((entry) => entry.accuracy?.totalMicroseconds === "1000000"));
+    assert.ok(dedup.stampEvidence.every((entry) => entry.timeBounds?.accuracyKnown === true));
+    assert.equal(dedupWrapper.count(), 2 * 6, "sixteen evidence positions over two exact anchor/TSR jobs must spawn twelve processes");
 
     const overLimitDir = mkdtempSync(join(tmpdir(), "noa-tsa-proof-limit-"));
     dirs.push(overLimitDir);
@@ -483,7 +488,7 @@ test("STAMP RESOURCES — transferable proof verification is bounded, deduplicat
     const deadlineDir = mkdtempSync(join(tmpdir(), "noa-tsa-proof-deadline-"));
     dirs.push(deadlineDir);
     const deadlineWrapper = createCountingOpenSsl(deadlineDir, fixture.executable, { stall: true });
-    const deadlineBudget = createVerificationResourceBudget(1000, 2 * 5);
+    const deadlineBudget = createVerificationResourceBudget(1000, 2 * 6);
     const deadline = verifyEquivocationProof(
       { ...finding, branches: baseBranches },
       TRUST_SET,

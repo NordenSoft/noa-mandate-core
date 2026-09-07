@@ -36,11 +36,11 @@ test("buildTimeStampReq: rejects a non-Buffer / empty hashedMessage", () => {
 
 /** Hand-build a minimal, unsigned TimeStampResp DER blob for parseTimeStampResp's own unit test
  *  (the FULL mock-TSA server exercise is test/client.test.mjs; this is just the parser in isolation). */
-function buildTestTimeStampResp({ statusCode = 0, hashAlgOid = SHA256_OID, hashedMessage = ZERO32, genTime = new Date("2026-07-11T00:00:00Z") } = {}) {
+function buildTestTimeStampResp({ statusCode = 0, hashAlgOid = SHA256_OID, hashedMessage = ZERO32, genTime = new Date("2026-07-11T00:00:00Z"), accuracy } = {}) {
   const statusInfo = encSequence([encInteger(statusCode)]);
   if (statusCode !== 0 && statusCode !== 1) return encSequence([statusInfo]);
   const messageImprint = encSequence([encSequence([encOid(hashAlgOid), encNull()]), encOctetString(hashedMessage)]);
-  const tstInfo = encSequence([encInteger(1), encOid("1.2.3.4.5"), messageImprint, encInteger(1), encGeneralizedTime(genTime)]);
+  const tstInfo = encSequence([encInteger(1), encOid("1.2.3.4.5"), messageImprint, encInteger(1), encGeneralizedTime(genTime), ...(accuracy === undefined ? [] : [accuracy])]);
   const encapContentInfo = encSequence([encOid(ID_CT_TST_INFO), encContext(0, encOctetString(tstInfo))]);
   const signedData = encSequence([
     encInteger(3),
@@ -60,6 +60,54 @@ test("parseTimeStampResp: extracts genTime + messageImprint from a granted respo
   assert.equal(parsed.hashAlgOid, SHA256_OID);
   assert.deepEqual(parsed.hashedMessage, ZERO32);
   assert.equal(parsed.genTime, "2026-07-11T00:00:00Z");
+  assert.equal(parsed.accuracy, undefined);
+});
+
+test("parseTimeStampResp: preserves explicit RFC 3161 Accuracy and distinguishes omitted components", () => {
+  const implicitInteger = (tagNumber, value) => {
+    const encoded = Buffer.from(encInteger(value));
+    encoded[0] = 0x80 | tagNumber;
+    return encoded;
+  };
+  const parsed = parseTimeStampResp(buildTestTimeStampResp({
+    accuracy: encSequence([encInteger(1), implicitInteger(0, 500), implicitInteger(1, 100)]),
+  }));
+  assert.deepEqual(parsed.accuracy, {
+    seconds: 1,
+    millis: 500,
+    micros: 100,
+    totalMicroseconds: "1500100",
+  });
+
+  const explicitEmpty = parseTimeStampResp(buildTestTimeStampResp({ accuracy: encSequence([]) }));
+  assert.deepEqual(explicitEmpty.accuracy, {
+    seconds: 0,
+    millis: 0,
+    micros: 0,
+    totalMicroseconds: "0",
+  });
+});
+
+test("parseTimeStampResp: rejects malformed, duplicate, out-of-order, and out-of-range Accuracy", () => {
+  const implicitInteger = (tagNumber, value) => {
+    const encoded = Buffer.from(encInteger(value));
+    encoded[0] = 0x80 | tagNumber;
+    return encoded;
+  };
+  const invalidAccuracyValues = [
+    encSequence([implicitInteger(0, 0)]),
+    encSequence([implicitInteger(0, 1000)]),
+    encSequence([implicitInteger(1, 0)]),
+    encSequence([implicitInteger(1, 1000)]),
+    encSequence([encInteger(1), encInteger(2)]),
+    encSequence([implicitInteger(1, 1), implicitInteger(0, 1)]),
+    encSequence([encContext(0, encInteger(1))]),
+    encSequence([Buffer.from([0x82, 0x01, 0x01])]),
+    Buffer.from([0x10, 0x00]),
+  ];
+  for (const accuracy of invalidAccuracyValues) {
+    assert.throws(() => parseTimeStampResp(buildTestTimeStampResp({ accuracy })), DerError);
+  }
 });
 
 test("parseTimeStampResp: a rejection status (no timeStampToken) parses as granted:false", () => {

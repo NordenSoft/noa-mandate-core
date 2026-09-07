@@ -6,7 +6,7 @@
 import { DerError, encInteger, encOid, encNull, encOctetString, encBoolean, encSequence, derDecode, readInteger, readIntegerBig, readOid, readGeneralizedTime } from "./der.mjs";
 import { frozenTable, intrinsics } from "noa-receipt";
 
-const { arrayLength, arrayPush, byteLength, isBuffer } = intrinsics;
+const { arrayLength, arrayPush, byteLength, isBuffer, toBigInt } = intrinsics;
 
 export const SHA256_OID = "2.16.840.1.101.3.4.2.1";
 const ID_SIGNED_DATA = "1.2.840.113549.1.7.2";
@@ -45,6 +45,48 @@ function unwrapExplicit(node, label) {
     throw new DerError(`expected ${label} to be an EXPLICIT context tag wrapping exactly one value`);
   }
   return node.children[0];
+}
+
+function readImplicitAccuracyInteger(node, tagNumber, label) {
+  if (!node || node.tagClass !== 2 || node.constructed || node.tagNumber !== tagNumber) {
+    throw new DerError(`TSTInfo.accuracy.${label} must be a primitive IMPLICIT INTEGER`);
+  }
+  return readInteger({ tagClass: 0, constructed: false, tagNumber: 0x02, content: node.content });
+}
+
+function readAccuracy(node) {
+  assertSequence(node, "TSTInfo.accuracy");
+  let seconds = 0;
+  let millis = 0;
+  let micros = 0;
+  let lastField = -1;
+  const n = arrayLength(node.children);
+  for (let i = 0; i < n; i++) {
+    const field = node.children[i];
+    if (field.tagClass === 0 && !field.constructed && field.tagNumber === 0x02) {
+      if (lastField >= 0) throw new DerError("TSTInfo.accuracy.seconds is duplicated or out of order");
+      seconds = readInteger(field);
+      lastField = 0;
+      continue;
+    }
+    if (field.tagClass === 2 && !field.constructed && field.tagNumber === 0) {
+      if (lastField >= 1) throw new DerError("TSTInfo.accuracy.millis is duplicated or out of order");
+      millis = readImplicitAccuracyInteger(field, 0, "millis");
+      if (millis < 1 || millis > 999) throw new DerError("TSTInfo.accuracy.millis must be from 1 through 999");
+      lastField = 1;
+      continue;
+    }
+    if (field.tagClass === 2 && !field.constructed && field.tagNumber === 1) {
+      if (lastField >= 2) throw new DerError("TSTInfo.accuracy.micros is duplicated or out of order");
+      micros = readImplicitAccuracyInteger(field, 1, "micros");
+      if (micros < 1 || micros > 999) throw new DerError("TSTInfo.accuracy.micros must be from 1 through 999");
+      lastField = 2;
+      continue;
+    }
+    throw new DerError("TSTInfo.accuracy contains an unknown or malformed field");
+  }
+  const totalMicroseconds = toBigInt(seconds) * 1000000n + toBigInt(millis) * 1000n + toBigInt(micros);
+  return { seconds, millis, micros, totalMicroseconds: `${totalMicroseconds}` };
 }
 
 /**
@@ -100,6 +142,10 @@ export function parseTimeStampResp(buf) {
     throw new DerError("MessageImprint.hashedMessage is not an OCTET STRING");
   }
   const genTime = readGeneralizedTime(tstInfo.children[4]);
+  const accuracyNode = tstInfo.children[5];
+  const accuracy = accuracyNode?.tagClass === 0 && accuracyNode.tagNumber === 0x10
+    ? readAccuracy(accuracyNode)
+    : undefined;
 
   // signerInfos is the mandatory final SignedData field. Certificates [0] and CRLs [1] may occur
   // before it, but cannot move it away from the final position. Do not mistake an empty SET for an
@@ -171,6 +217,7 @@ export function parseTimeStampResp(buf) {
     hashAlgOid,
     hashedMessage: hashedMessageNode.content,
     genTime,
+    accuracy,
     nonce,
     signerInfoCount,
     embeddedCertificateCount,

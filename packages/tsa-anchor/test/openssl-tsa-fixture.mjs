@@ -6,13 +6,14 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { anchorHashDigest } from "../src/anchor-hash.mjs";
-import { buildTimeStampReq } from "../src/tsq.mjs";
+import { buildTimeStampReq, parseTimeStampResp } from "../src/tsq.mjs";
 import { derDecode, encGeneralizedTime, encInteger, encSequence } from "../src/der.mjs";
 
 const POLICY = "1.2.3.4.5";
@@ -66,6 +67,7 @@ function run(executable, args, cwd) {
   if (result.status !== 0) {
     throw new Error(`fixture command failed (${args.join(" ")}): ${result.stderr || result.stdout}`);
   }
+  return result;
 }
 
 function utcTime(date) {
@@ -108,7 +110,7 @@ function withoutEmbeddedCertificates(response) {
   return encSequence([encodeNode(root.children[0]), rebuiltContentInfo]);
 }
 
-function writeTsaConfig(dir, name, cert, key) {
+function writeTsaConfig(dir, name, cert, key, accuracy = "secs:1") {
   const path = join(dir, `${name}.cnf`);
   writeFileSync(
     path,
@@ -124,7 +126,7 @@ function writeTsaConfig(dir, name, cert, key) {
       `default_policy = ${POLICY}\n` +
       `other_policies = ${OTHER_POLICY}\n` +
       `digests = sha256\n` +
-      `accuracy = secs:1\n` +
+      `accuracy = ${accuracy}\n` +
       `ordering = no\n` +
       `tsa_name = yes\n` +
       `ess_cert_id_chain = yes\n` +
@@ -145,7 +147,7 @@ function stamp(executable, dir, config, output, extra = [], query = "request.tsq
   run(executable, ["ts", "-reply", "-config", config, "-section", "tsa_config", "-queryfile", query, ...extra, "-out", output], dir);
 }
 
-export function createAuthenticatedTsaFixture(anchor) {
+export function createAuthenticatedTsaFixture(anchor, { rootDates } = {}) {
   const executable = findOpenSsl();
   const dir = mkdtempSync(join(tmpdir(), "noa-tsa-test-"));
   chmodSync(dir, 0o700);
@@ -175,6 +177,11 @@ export function createAuthenticatedTsaFixture(anchor) {
         `copy_extensions = none\n` +
         `[ policy_any ]\n` +
         `commonName = supplied\n` +
+        `[ root_ca_ext ]\n` +
+        `basicConstraints = critical,CA:TRUE\n` +
+        `keyUsage = critical,keyCertSign,cRLSign\n` +
+        `subjectKeyIdentifier = hash\n` +
+        `authorityKeyIdentifier = keyid:always,issuer\n` +
         `[ tsa_ext ]\n` +
         `basicConstraints = critical,CA:FALSE\n` +
         `keyUsage = critical,digitalSignature\n` +
@@ -190,11 +197,22 @@ export function createAuthenticatedTsaFixture(anchor) {
       { mode: 0o600 },
     );
 
+    const now = Date.now();
+    const effectiveRootDates = rootDates ?? {
+      start: utcTime(new Date(now - 86400000)),
+      end: utcTime(new Date(now + 3650 * 86400000)),
+    };
     run(executable, ["req", "-x509", "-newkey", "rsa:3072", "-sha256", "-nodes", "-days", "3650", "-subj", "/CN=NOA-Test-Root", "-keyout", "root.key", "-out", "root.pem", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign"], dir);
+    run(executable, ["req", "-new", "-sha256", "-key", "root.key", "-subj", "/CN=NOA-Test-Root", "-out", "root.csr"], dir);
+    run(executable, ["ca", "-batch", "-selfsign", "-notext", "-config", "ca.cnf", "-extensions", "root_ca_ext", "-startdate", effectiveRootDates.start, "-enddate", effectiveRootDates.end, "-in", "root.csr", "-out", "root-backdated.pem"], dir);
+    renameSync(join(dir, "root-backdated.pem"), join(dir, "root.pem"));
     run(executable, ["req", "-x509", "-newkey", "rsa:3072", "-sha256", "-nodes", "-days", "3650", "-subj", "/CN=Wrong-Test-Root", "-keyout", "wrong-root.key", "-out", "wrong-root.pem", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign"], dir);
 
-    const now = Date.now();
-    issue(executable, dir, "valid-tsa", "tsa_ext");
+    const validDates = {
+      start: utcTime(new Date(now - 86400000)),
+      end: utcTime(new Date(now + 365 * 86400000)),
+    };
+    issue(executable, dir, "valid-tsa", "tsa_ext", validDates);
     issue(executable, dir, "expired-tsa", "tsa_ext", {
       start: utcTime(new Date(now - 4 * 86400000)),
       end: utcTime(new Date(now - 2 * 86400000)),
@@ -203,25 +221,64 @@ export function createAuthenticatedTsaFixture(anchor) {
       start: utcTime(new Date(now + 2 * 86400000)),
       end: utcTime(new Date(now + 30 * 86400000)),
     });
-    issue(executable, dir, "wrong-eku-tsa", "wrong_eku_ext");
-    issue(executable, dir, "weak-tsa", "tsa_ext", undefined, 1024);
-    issue(executable, dir, "revoked-tsa", "tsa_ext");
+    issue(executable, dir, "wrong-eku-tsa", "wrong_eku_ext", validDates);
+    issue(executable, dir, "weak-tsa", "tsa_ext", validDates, 1024);
+    issue(executable, dir, "revoked-tsa", "tsa_ext", validDates);
     run(executable, ["ca", "-config", "ca.cnf", "-revoke", "revoked-tsa.pem", "-crl_reason", "keyCompromise"], dir);
-    run(executable, ["ca", "-gencrl", "-config", "ca.cnf", "-out", "root.crl.pem"], dir);
+    run(executable, ["ca", "-gencrl", "-config", "ca.cnf", "-crl_lastupdate", utcTime(new Date(now - 86400000)), "-crl_nextupdate", utcTime(new Date(now + 30 * 86400000)), "-out", "root.crl.pem"], dir);
     run(executable, ["ca", "-gencrl", "-config", "ca.cnf", "-crl_lastupdate", "20200101000000Z", "-crl_nextupdate", "20200102000000Z", "-out", "stale.crl.pem"], dir);
 
     writeFileSync(join(dir, "request.tsq"), buildTimeStampReq(anchorHashDigest(anchor), { certReq: true }), { mode: 0o600 });
     const validConfig = writeTsaConfig(dir, "valid", "valid-tsa.pem", "valid-tsa.key");
+    const microAccuracyConfig = writeTsaConfig(dir, "micro-accuracy", "valid-tsa.pem", "valid-tsa.key", "secs:1, millisecs:500, microsecs:100");
+    const gapAccuracyConfig = writeTsaConfig(dir, "gap-accuracy", "valid-tsa.pem", "valid-tsa.key", "secs:5");
     const expiredConfig = writeTsaConfig(dir, "expired", "expired-tsa.pem", "expired-tsa.key");
     const futureConfig = writeTsaConfig(dir, "future", "future-tsa.pem", "future-tsa.key");
     const revokedConfig = writeTsaConfig(dir, "revoked", "revoked-tsa.pem", "revoked-tsa.key");
     const weakConfig = writeTsaConfig(dir, "weak", "weak-tsa.pem", "weak-tsa.key");
     stamp(executable, dir, validConfig, "valid.tsr");
+    stamp(executable, dir, microAccuracyConfig, "micro-accuracy.tsr");
+    stamp(executable, dir, gapAccuracyConfig, "gap-accuracy.tsr");
     stamp(executable, dir, validConfig, "other-policy.tsr", ["-tspolicy", OTHER_POLICY]);
     stamp(executable, dir, expiredConfig, "expired.tsr");
     stamp(executable, dir, futureConfig, "future.tsr");
     stamp(executable, dir, revokedConfig, "revoked.tsr");
     stamp(executable, dir, weakConfig, "weak.tsr");
+
+    const gapResponse = readFileSync(join(dir, "gap-accuracy.tsr"));
+    const gapGenTimeMs = Date.parse(parseTimeStampResp(gapResponse).genTime);
+    run(executable, ["ca", "-gencrl", "-config", "ca.cnf", "-crl_lastupdate", utcTime(new Date(gapGenTimeMs - 10000)), "-crl_nextupdate", utcTime(new Date(gapGenTimeMs - 2000)), "-out", "lower-gap.crl.pem"], dir);
+    run(executable, ["ca", "-gencrl", "-config", "ca.cnf", "-crl_lastupdate", utcTime(new Date(gapGenTimeMs + 2000)), "-crl_nextupdate", utcTime(new Date(gapGenTimeMs + 10000)), "-out", "upper-gap.crl.pem"], dir);
+    const gapCrls = Buffer.concat([
+      readFileSync(join(dir, "lower-gap.crl.pem")),
+      Buffer.from("\n"),
+      readFileSync(join(dir, "upper-gap.crl.pem")),
+    ]);
+    const gapRootDates = [
+      ["lower-gap-root.pem", -10000, -2000],
+      ["middle-gap-root.pem", -1000, 1000],
+      ["upper-gap-root.pem", 2000, 10000],
+    ];
+    for (const [output, startOffset, endOffset] of gapRootDates) {
+      run(executable, [
+        "ca", "-batch", "-selfsign", "-notext", "-config", "ca.cnf", "-extensions", "root_ca_ext",
+        "-startdate", utcTime(new Date(gapGenTimeMs + startOffset)),
+        "-enddate", utcTime(new Date(gapGenTimeMs + endOffset)),
+        "-in", "root.csr", "-out", output,
+      ], dir);
+    }
+    const gapTrustRoots = Buffer.concat(gapRootDates.flatMap(([output]) => [
+      readFileSync(join(dir, output)),
+      Buffer.from("\n"),
+    ]));
+    run(executable, ["x509", "-in", "root.pem", "-addtrust", "anyExtendedKeyUsage", "-trustout", "-out", "trusted-root.pem"], dir);
+    const x509TrustRoots = Buffer.from(
+      readFileSync(join(dir, "root.pem"), "ascii")
+        .replace("-----BEGIN CERTIFICATE-----", "-----BEGIN X509 CERTIFICATE-----")
+        .replace("-----END CERTIFICATE-----", "-----END X509 CERTIFICATE-----"),
+      "ascii",
+    );
+    writeFileSync(join(dir, "root-x509.pem"), x509TrustRoots, { mode: 0o600 });
 
     run(executable, ["ts", "-reply", "-in", "valid.tsr", "-token_out", "-out", "valid.token.der"], dir);
     run(executable, ["cms", "-verify", "-binary", "-inform", "DER", "-in", "valid.token.der", "-noverify", "-out", "valid.tstinfo.der"], dir);
@@ -234,13 +291,19 @@ export function createAuthenticatedTsaFixture(anchor) {
     const fractionalFields = validTstInfo.children.map((node, index) =>
       index === 4 ? encodeGeneralizedTimeText(wholeGenTime.slice(0, -1) + ".500Z") : encodeNode(node));
     writeFileSync(join(dir, "fractional-gentime.tstinfo.der"), encSequence(fractionalFields), { mode: 0o600 });
+    const noAccuracyFields = validTstInfo.children
+      .filter((node, index) => index !== 5)
+      .map((node) => encodeNode(node));
+    writeFileSync(join(dir, "no-accuracy.tstinfo.der"), encSequence(noAccuracyFields), { mode: 0o600 });
     run(executable, ["cms", "-sign", "-binary", "-nodetach", "-cades", "-nosmimecap", "-in", "future-gentime.tstinfo.der", "-signer", "valid-tsa.pem", "-inkey", "valid-tsa.key", "-md", "sha256", "-econtent_type", "1.2.840.113549.1.9.16.1.4", "-outform", "DER", "-out", "future-gentime.token.der"], dir);
     run(executable, ["cms", "-sign", "-binary", "-nodetach", "-cades", "-nosmimecap", "-in", "fractional-gentime.tstinfo.der", "-signer", "valid-tsa.pem", "-inkey", "valid-tsa.key", "-md", "sha256", "-econtent_type", "1.2.840.113549.1.9.16.1.4", "-outform", "DER", "-out", "fractional-gentime.token.der"], dir);
+    run(executable, ["cms", "-sign", "-binary", "-nodetach", "-cades", "-nosmimecap", "-in", "no-accuracy.tstinfo.der", "-signer", "valid-tsa.pem", "-inkey", "valid-tsa.key", "-md", "sha256", "-econtent_type", "1.2.840.113549.1.9.16.1.4", "-outform", "DER", "-out", "no-accuracy.token.der"], dir);
     run(executable, ["cms", "-sign", "-binary", "-nodetach", "-cades", "-nosmimecap", "-in", "valid.tstinfo.der", "-signer", "wrong-eku-tsa.pem", "-inkey", "wrong-eku-tsa.key", "-md", "sha256", "-econtent_type", "1.2.840.113549.1.9.16.1.4", "-outform", "DER", "-out", "wrong-eku.token.der"], dir);
     run(executable, ["cms", "-sign", "-binary", "-nodetach", "-cades", "-nosmimecap", "-in", "valid.tstinfo.der", "-signer", "valid-tsa.pem", "-inkey", "valid-tsa.key", "-md", "sha256", "-keyopt", "rsa_padding_mode:pss", "-keyopt", "rsa_mgf1_md:sha1", "-keyopt", "rsa_pss_saltlen:digest", "-econtent_type", "1.2.840.113549.1.9.16.1.4", "-outform", "DER", "-out", "pss-mgf1-sha1.token.der"], dir);
     const wrongEkuResponse = encSequence([encSequence([encInteger(0)]), readFileSync(join(dir, "wrong-eku.token.der"))]);
     const futureGenTimeResponse = encSequence([encSequence([encInteger(0)]), readFileSync(join(dir, "future-gentime.token.der"))]);
     const fractionalGenTimeResponse = encSequence([encSequence([encInteger(0)]), readFileSync(join(dir, "fractional-gentime.token.der"))]);
+    const noAccuracyResponse = encSequence([encSequence([encInteger(0)]), readFileSync(join(dir, "no-accuracy.token.der"))]);
     const pssMgf1Sha1Response = encSequence([encSequence([encInteger(0)]), readFileSync(join(dir, "pss-mgf1-sha1.token.der"))]);
     const validResponse = readFileSync(join(dir, "valid.tsr"));
     const badSignature = Buffer.from(validResponse);
@@ -253,23 +316,51 @@ export function createAuthenticatedTsaFixture(anchor) {
       policyOid: POLICY,
       otherPolicyOid: OTHER_POLICY,
       trustRoots: readFileSync(join(dir, "root.pem")),
+      trustedTrustRoots: readFileSync(join(dir, "trusted-root.pem")),
+      x509TrustRoots,
+      gapTrustRoots,
       wrongTrustRoots: readFileSync(join(dir, "wrong-root.pem")),
       crls: readFileSync(join(dir, "root.crl.pem")),
       staleCrls: readFileSync(join(dir, "stale.crl.pem")),
       signerCertificate: readFileSync(join(dir, "valid-tsa.pem")),
       valid: record(validResponse),
+      microAccuracy: record(readFileSync(join(dir, "micro-accuracy.tsr"))),
+      gapAccuracy: record(gapResponse),
+      gapCrls,
       otherPolicy: record(readFileSync(join(dir, "other-policy.tsr"))),
       expired: record(readFileSync(join(dir, "expired.tsr"))),
       future: record(readFileSync(join(dir, "future.tsr"))),
       futureGenTime: record(futureGenTimeResponse),
       futureGenTimeValue: farFuture.toISOString(),
       fractionalGenTime: record(fractionalGenTimeResponse),
+      noAccuracy: record(noAccuracyResponse),
       revoked: record(readFileSync(join(dir, "revoked.tsr"))),
       weak: record(readFileSync(join(dir, "weak.tsr"))),
       wrongEku: record(wrongEkuResponse),
       pssMgf1Sha1: record(pssMgf1Sha1Response),
       badSignature: record(badSignature),
       noCertificate: record(withoutEmbeddedCertificates(validResponse)),
+      verifyValidWithOpenSsl({ legacyX509Label = false } = {}) {
+        const genTimeMs = Date.parse(parseTimeStampResp(validResponse).genTime);
+        const attime = `${genTimeMs / 1000}`;
+        const digest = anchorHashDigest(anchor).toString("hex");
+        const rootFile = legacyX509Label ? "root-x509.pem" : "root.pem";
+        const datesResult = run(executable, ["x509", "-in", "root.pem", "-noout", "-dates"], dir);
+        const tsResult = run(executable, [
+          "ts", "-verify", "-in", "valid.tsr", "-digest", digest,
+          "-CAfile", rootFile, "-purpose", "timestampsign", "-attime", attime,
+          "-auth_level", "2", "-verify_depth", "8", "-x509_strict", "-check_ss_sig",
+          "-trusted_first", "-provider", "default", "-propquery", "provider=default",
+        ], dir);
+        const chainResult = run(executable, [
+          "verify", "-CAfile", rootFile, "-no-CApath", "-no-CAstore",
+          "-CRLfile", "root.crl.pem", "-crl_check_all", "-purpose", "timestampsign",
+          "-attime", attime, "-auth_level", "2", "-verify_depth", "8", "-x509_strict",
+          "-check_ss_sig", "-trusted_first", "-provider", "default", "-propquery",
+          "provider=default", "valid-tsa.pem",
+        ], dir);
+        return { rootDates: datesResult.stdout.trim(), tsStatus: tsResult.status, chainStatus: chainResult.status };
+      },
       stampFor(otherAnchor) {
         additionalStampNumber++;
         const requestName = `additional-${additionalStampNumber}.tsq`;

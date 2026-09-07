@@ -13,11 +13,39 @@ import {
   encContext,
   encGeneralizedTime,
   derDecode,
+  derElementBounds,
   readInteger,
   readIntegerBig,
   readOid,
   readGeneralizedTime,
 } from "../src/der.mjs";
+
+test("derElementBounds: shallow strict headers stay within their containing element", () => {
+  const bytes = Buffer.concat([encSequence([encInteger(1)]), encNull()]);
+  const outer = derElementBounds(bytes);
+  assert.deepEqual(outer, {
+    tagClass: 0,
+    constructed: true,
+    tagNumber: 16,
+    contentStart: 2,
+    contentEnd: 5,
+    nextOffset: 5,
+  });
+  assert.deepEqual(derElementBounds(bytes, outer.contentStart, outer.contentEnd), {
+    tagClass: 0,
+    constructed: false,
+    tagNumber: 2,
+    contentStart: 4,
+    contentEnd: 5,
+    nextOffset: 5,
+  });
+  for (const [offset, end] of [[-1, 1], [0.5, 1], [0, bytes.length + 1], [3, 2]]) {
+    assert.throws(() => derElementBounds(bytes, offset, end), DerError);
+  }
+  assert.throws(() => derElementBounds(Buffer.from([0x30, 0x03, 0x04, 0x02, 0x00]), 2, 5), DerError);
+  assert.throws(() => derElementBounds(Buffer.from([0x04, 0x81, 0x01, 0x00])), DerError);
+  assert.throws(() => derElementBounds(Buffer.from([0x1f, 0x00])), DerError);
+});
 
 /**
  * Ground-truth DER vector — hand-derived byte-by-byte (RFC 3161 §2.4.1 TimeStampReq over a
@@ -167,6 +195,54 @@ test("strict DER: non-minimal INTEGER (zero-length / redundant leading 0x00) is 
   // the LEGITIMATE sign-pad (0x00 before a high-bit byte) must still decode — value 128.
   assert.equal(readInteger(derDecode(Buffer.from([0x02, 0x02, 0x00, 0x80]))), 128);
   assert.equal(readInteger(derDecode(Buffer.from([0x02, 0x01, 0x00]))), 0); // single 0x00 is a valid zero
+});
+
+test("DER resource budget: node allowance is shared by all children and resets per decode", () => {
+  const threeNodes = Buffer.from([0x30, 0x04, 0x05, 0x00, 0x05, 0x00]);
+  assert.equal(derDecode(threeNodes, { maxNodes: 3 }).children.length, 2);
+  assert.throws(() => derDecode(threeNodes, { maxNodes: 2 }), { name: "DerError", code: "DER_RESOURCE_LIMIT" });
+  assert.equal(derDecode(threeNodes, { maxNodes: 3 }).children.length, 2);
+  // A node must be charged before examining an otherwise invalid child tag.
+  assert.throws(() => derDecode(Buffer.from([0x30, 0x02, 0x1f, 0x00]), { maxNodes: 1 }), { code: "DER_RESOURCE_LIMIT" });
+});
+
+test("DER resource budget: content reservation includes constructed ancestors and sibling copies", () => {
+  // Content copied: outer 8 + inner 3 + first INTEGER 1 + second INTEGER 1 = 13 bytes.
+  const nested = Buffer.from([0x30, 0x08, 0x30, 0x03, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02]);
+  assert.equal(readInteger(derDecode(nested, { maxDecodedBytes: 13 }).children[1]), 2);
+  assert.throws(() => derDecode(nested, { maxDecodedBytes: 12 }), { code: "DER_RESOURCE_LIMIT" });
+  // Reserve the parent's copy before walking any malformed descendants.
+  assert.throws(() => derDecode(Buffer.from([0x30, 0x02, 0x1f, 0x00]), { maxDecodedBytes: 1 }), { code: "DER_RESOURCE_LIMIT" });
+});
+
+test("DER resource budget: hard node ceiling applies with no caller options", () => {
+  const accepted = encSequence(Array.from({ length: 4095 }, () => encNull()));
+  assert.equal(derDecode(accepted).children.length, 4095);
+  const refused = encSequence(Array.from({ length: 4096 }, () => encNull()));
+  assert.throws(() => derDecode(refused), { code: "DER_RESOURCE_LIMIT" });
+});
+
+test("DER resource budget: caller options may only tighten hard ceilings without invoking accessors", () => {
+  for (const [name, ceiling] of [["maxNodes", 4096], ["maxDecodedBytes", 16 * 1024 * 1024]]) {
+    for (const value of [0, -1, 1.5, NaN, Infinity, ceiling + 1, "2"]) {
+      assert.throws(() => derDecode(encNull(), { [name]: value }), DerError);
+    }
+    let invoked = false;
+    const options = Object.defineProperty({}, name, { get() { invoked = true; return 1; } });
+    assert.throws(() => derDecode(encNull(), options), DerError);
+    assert.equal(invoked, false);
+    assert.equal(derDecode(encNull(), Object.create({ [name]: 0 })).tagNumber, 5);
+  }
+});
+
+test("DER resource budget: INTEGER, OID and time helpers bound work before scalar expansion", () => {
+  const integerNode = { tagClass: 0, constructed: false, tagNumber: 2, content: Buffer.alloc(128, 1) };
+  assert.equal(typeof readIntegerBig(integerNode), "bigint");
+  assert.throws(() => readIntegerBig({ ...integerNode, content: Buffer.alloc(129, 1) }), { code: "DER_RESOURCE_LIMIT" });
+  const oidNode = { tagClass: 0, constructed: false, tagNumber: 6, content: Buffer.alloc(256, 1) };
+  assert.equal(readOid(oidNode).split(".").length, 257);
+  assert.throws(() => readOid({ ...oidNode, content: Buffer.alloc(257, 1) }), { code: "DER_RESOURCE_LIMIT" });
+  assert.throws(() => readGeneralizedTime({ tagClass: 0, constructed: false, tagNumber: 24, content: Buffer.alloc(65, 0x30) }), { code: "DER_RESOURCE_LIMIT" });
 });
 
 // Best-effort independent cross-check against the system's own openssl, when present — genuinely

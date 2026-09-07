@@ -63,6 +63,194 @@ test("verifyStamp: a cryptographically signed trusted RFC 3161 token passes the 
   assert.equal(res.verification.backend, "openssl-3");
   assert.equal(res.verification.revocation.status, "GOOD");
   assert.match(res.genTime, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(res.accuracy, { seconds: 1, millis: 0, micros: 0, totalMicroseconds: "1000000" });
+  const genTimeMs = Date.parse(res.genTime);
+  assert.deepEqual(res.timeBounds, {
+    accuracyKnown: true,
+    earliest: new Date(genTimeMs - 1000).toISOString().replace(".000Z", "Z"),
+    latest: new Date(genTimeMs + 1000).toISOString().replace(".000Z", "Z"),
+  });
+  assert.deepEqual(res.verification.revocation.checkedTimeBounds, res.timeBounds);
+});
+
+test("verifyStamp: an RFC 5280 UTCTime root beginning in 1950 remains valid for a current token", () => {
+  const historicalRootFixture = createAuthenticatedTsaFixture(authenticatedAnchor, {
+    rootDates: { start: "19500101000000Z", end: "20491231235959Z" },
+  });
+  try {
+    const direct = historicalRootFixture.verifyValidWithOpenSsl();
+    assert.match(direct.rootDates, /notBefore=Jan\s+1 00:00:00 1950 GMT/);
+    assert.match(direct.rootDates, /notAfter=Dec 31 23:59:59 2049 GMT/);
+    assert.equal(direct.tsStatus, 0);
+    assert.equal(direct.chainStatus, 0);
+    const historicalPolicy = {
+      opensslExecutable: historicalRootFixture.executable,
+      trustRoots: historicalRootFixture.trustRoots,
+      allowedPolicyOids: [historicalRootFixture.policyOid],
+      revocation: { mode: "crl-check-all", crls: historicalRootFixture.crls },
+      clock: { now: new Date().toISOString(), maxFutureSkewMs: 300000 },
+    };
+    const res = verifyStamp(authenticatedAnchor, historicalRootFixture.valid, historicalPolicy);
+    assert.equal(
+      res.ok,
+      true,
+      `direct OpenSSL accepted ts=${direct.tsStatus}/chain=${direct.chainStatus}; verifyStamp returned ${res.code}: ${res.reason}`,
+    );
+    const preEpochClock = verifyStamp(authenticatedAnchor, historicalRootFixture.valid, {
+      ...historicalPolicy,
+      clock: { now: "1969-12-31T23:59:59Z", maxFutureSkewMs: 300000 },
+    });
+    assert.equal(preEpochClock.code, "CLOCK_POLICY_INVALID");
+  } finally {
+    historicalRootFixture.cleanup();
+  }
+});
+
+test("verifyStamp: OpenSSL legacy X509 CERTIFICATE trust-root labels remain compatible", () => {
+  const direct = fixture.verifyValidWithOpenSsl({ legacyX509Label: true });
+  assert.equal(direct.tsStatus, 0);
+  assert.equal(direct.chainStatus, 0);
+  const res = verifyStamp(authenticatedAnchor, fixture.valid, {
+    ...policy,
+    trustRoots: fixture.x509TrustRoots,
+  });
+  assert.equal(
+    res.ok,
+    true,
+    `direct OpenSSL accepted ts=${direct.tsStatus}/chain=${direct.chainStatus}; verifyStamp returned ${res.code}: ${res.reason}`,
+  );
+});
+
+test("verifyStamp: omitted Accuracy remains usable but exposes unknown bounds", () => {
+  const res = verifyStamp(authenticatedAnchor, fixture.noAccuracy, policy);
+  assert.equal(res.ok, true, res.reason);
+  assert.equal(res.accuracy, null);
+  assert.deepEqual(res.timeBounds, { accuracyKnown: false, earliest: null, latest: null });
+});
+
+test("verifyStamp: authenticated millisecond and microsecond Accuracy produces exact bounds", () => {
+  const res = verifyStamp(authenticatedAnchor, fixture.microAccuracy, policy);
+  assert.equal(res.ok, true, res.reason);
+  assert.deepEqual(res.accuracy, { seconds: 1, millis: 500, micros: 100, totalMicroseconds: "1500100" });
+  const genTimeMs = Date.parse(res.genTime);
+  const earliestSecond = new Date(genTimeMs - 2000).toISOString().slice(0, 19);
+  const latestSecond = new Date(genTimeMs + 1000).toISOString().slice(0, 19);
+  assert.deepEqual(res.timeBounds, {
+    accuracyKnown: true,
+    earliest: `${earliestSecond}.4999Z`,
+    latest: `${latestSecond}.5001Z`,
+  });
+});
+
+test("verifyStamp: emitted sub-millisecond upper bound is an exact accepted clock boundary", () => {
+  const observed = verifyStamp(authenticatedAnchor, fixture.microAccuracy, policy);
+  assert.equal(observed.ok, true, observed.reason);
+  assert.match(observed.timeBounds.latest, /\.5001Z$/);
+
+  const atBoundary = verifyStamp(authenticatedAnchor, fixture.microAccuracy, {
+    ...policy,
+    clock: { now: observed.timeBounds.latest, maxFutureSkewMs: 0 },
+  });
+  assert.equal(atBoundary.ok, true, atBoundary.reason);
+
+  const immediatelyBefore = observed.timeBounds.latest.replace(/\.5001Z$/, ".500099Z");
+  const beforeBoundary = verifyStamp(authenticatedAnchor, fixture.microAccuracy, {
+    ...policy,
+    clock: { now: immediatelyBefore, maxFutureSkewMs: 0 },
+  });
+  assert.equal(beforeBoundary.ok, false);
+  assert.equal(beforeBoundary.code, "GENTIME_IN_FUTURE");
+});
+
+test("verifyStamp: signed Accuracy upper bound, not genTime alone, controls future admission", () => {
+  const observed = inspectStamp(authenticatedAnchor, fixture.valid);
+  const res = verifyStamp(authenticatedAnchor, fixture.valid, {
+    ...policy,
+    clock: { now: observed.genTime, maxFutureSkewMs: 0 },
+  });
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "GENTIME_IN_FUTURE");
+});
+
+test("verifyStamp: signed nonzero Accuracy spends a distinct upper endpoint chain/CRL check", () => {
+  const shortBudget = createVerificationResourceBudget(30000, 5);
+  const limited = verifyStamp(authenticatedAnchor, fixture.valid, policy, shortBudget);
+  assert.equal(limited.ok, false);
+  assert.equal(limited.code, "VERIFICATION_RESOURCE_LIMIT");
+  const completeBudget = createVerificationResourceBudget(30000, 6);
+  const verified = verifyStamp(authenticatedAnchor, fixture.valid, policy, completeBudget);
+  assert.equal(verified.ok, true, verified.reason);
+});
+
+test("verifyStamp: disjoint CRLs cannot hide an interior gap inside signed Accuracy", () => {
+  const res = verifyStamp(authenticatedAnchor, fixture.gapAccuracy, {
+    ...policy,
+    revocation: { mode: "crl-check-all", crls: fixture.gapCrls },
+  });
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "REVOCATION_EVIDENCE_UNAVAILABLE");
+});
+
+test("verifyStamp: exact whole-interval PEM candidates survive mixed bundles and trusted AUX", () => {
+  const roots = Buffer.concat([
+    fixture.gapTrustRoots,
+    fixture.gapCrls,
+    fixture.trustedTrustRoots,
+  ]);
+  const crls = Buffer.concat([
+    fixture.staleCrls,
+    fixture.signerCertificate,
+    fixture.crls,
+  ]);
+  const untrustedCertificates = Buffer.concat([
+    fixture.gapCrls,
+    fixture.signerCertificate,
+  ]);
+  const res = verifyStamp(authenticatedAnchor, fixture.gapAccuracy, {
+    ...policy,
+    trustRoots: roots,
+    revocation: { mode: "crl-check-all", crls },
+    untrustedCertificates,
+  });
+  assert.equal(res.ok, true, res.reason);
+  assert.equal(res.authenticated, true);
+});
+
+test("verifyStamp: disjoint trust certificates cannot cover separate Accuracy instants", () => {
+  const res = verifyStamp(authenticatedAnchor, fixture.gapAccuracy, {
+    ...policy,
+    trustRoots: fixture.gapTrustRoots,
+  });
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "TRUST_CHAIN_INVALID");
+});
+
+test("verifyStamp: malformed interval material and PEM block exhaustion fail closed", () => {
+  const malformedCrl = Buffer.from("-----BEGIN X509 CRL-----\nAAAA\n-----END X509 CRL-----\n");
+  const malformed = verifyStamp(authenticatedAnchor, fixture.gapAccuracy, {
+    ...policy,
+    revocation: { mode: "crl-check-all", crls: Buffer.concat([fixture.crls, malformedCrl]) },
+  });
+  assert.equal(malformed.ok, false);
+  assert.equal(malformed.code, "REVOCATION_EVIDENCE_INVALID");
+
+  const excessiveRoots = Buffer.concat(Array.from({ length: 4097 }, () => fixture.trustRoots));
+  const exhausted = verifyStamp(authenticatedAnchor, fixture.gapAccuracy, {
+    ...policy,
+    trustRoots: excessiveRoots,
+  });
+  assert.equal(exhausted.ok, false);
+  assert.equal(exhausted.code, "VERIFICATION_RESOURCE_LIMIT");
+});
+
+test("verifyStamp: DER node exhaustion maps to resource limit before policy or OpenSSL", () => {
+  const overNodeLimit = encSequence(Array.from({ length: 4096 }, () => encNull()));
+  assert.ok(overNodeLimit.length < 9 * 1024, "regression vector stays small");
+  const record = { tsr: overNodeLimit.toString("base64") };
+  assert.equal(inspectStamp(authenticatedAnchor, record).code, "VERIFICATION_RESOURCE_LIMIT");
+  const res = verifyStamp(authenticatedAnchor, record);
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "VERIFICATION_RESOURCE_LIMIT");
 });
 
 test("verifyStamp: a caller cannot forge the CLI's opaque resource-budget capability", () => {
@@ -122,7 +310,7 @@ test("resource budget registry: discarded capability tokens are not strongly ret
     discardedTotal: 2048,
     retainedLive: 32,
     retainedTotal: 32,
-  });
+  }, "discarded resource capabilities must not be strongly retained after GC");
 });
 
 test("resource budget registry: captured WeakMap operations resist same-realm poisoning", () => {
@@ -156,7 +344,7 @@ test("resource budget registry: captured WeakMap operations resist same-realm po
         throw new Error("live WeakMap.prototype.set invoked");
       },
     });
-    token = createVerificationResourceBudget(30000, 5);
+    token = createVerificationResourceBudget(30000, 6);
     authenticated = verifyStamp(authenticatedAnchor, fixture.valid, policy, token);
     forged = verifyStamp(authenticatedAnchor, fixture.valid, policy, {});
   } finally {

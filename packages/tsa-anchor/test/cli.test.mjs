@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { buildAnchor, buildCheckpoint, buildReceipt, generateKeyPair, sha256Prefixed } from "noa-receipt";
 import { anchorHash } from "../src/anchor-hash.mjs";
+import { createVerificationResourceBudget, verifyStamp } from "../src/verify.mjs";
 import { startMockTsa } from "./mock-tsa-server.mjs";
 import { createAuthenticatedTsaFixture, createCountingOpenSsl } from "./openssl-tsa-fixture.mjs";
 
@@ -211,7 +212,7 @@ test("CLI verify resource bound: duplicates preserve result order but each uniqu
     ]);
 
     assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.equal(wrapper.count(), 2 * 5, "two unique anchors must invoke only two five-process verification sequences");
+    assert.equal(wrapper.count(), 2 * 6, "two unique anchors must invoke only two six-process verification sequences");
     const output = JSON.parse(result.stdout);
     assert.equal(output.results.length, anchors.length);
     assert.deepEqual(
@@ -224,7 +225,7 @@ test("CLI verify resource bound: duplicates preserve result order but each uniqu
   }
 });
 
-test("CLI verify resource bound: twenty identical anchors still invoke one five-process verification", async () => {
+test("CLI verify resource bound: twenty identical anchors still invoke one six-process verification", async () => {
   const dir = mkdtempSync(join(tmpdir(), "noa-tsa-cli-dedup-one-"));
   try {
     const anchors = Array.from({ length: 20 }, () => AUTHENTICATED_ANCHOR);
@@ -236,7 +237,7 @@ test("CLI verify resource bound: twenty identical anchors still invoke one five-
     ]);
 
     assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.equal(wrapper.count(), 5);
+    assert.equal(wrapper.count(), 6);
     const output = JSON.parse(result.stdout);
     assert.equal(output.results.length, 20);
     assert.equal(output.mismatches, 0);
@@ -245,7 +246,7 @@ test("CLI verify resource bound: twenty identical anchors still invoke one five-
   }
 });
 
-test("CLI verify resource bound: sixteen unique authenticated anchors pass within exactly eighty process credits", async () => {
+test("CLI verify resource bound: sixteen unique authenticated anchors pass within exactly ninety-six process credits", async () => {
   const dir = mkdtempSync(join(tmpdir(), "noa-tsa-cli-limit-pass-"));
   try {
     const set = getBoundedAuthenticatedSet();
@@ -259,7 +260,7 @@ test("CLI verify resource bound: sixteen unique authenticated anchors pass withi
     ]);
 
     assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.equal(wrapper.count(), 16 * 5);
+    assert.equal(wrapper.count(), 16 * 6);
     const output = JSON.parse(result.stdout);
     assert.equal(output.results.length, 16);
     assert.equal(output.mismatches, 0);
@@ -303,13 +304,40 @@ test("CLI verify resource bound: aggregate deadline exhaustion stops every remai
     ]);
 
     assert.equal(result.status, 7, `aggregate deadline exhaustion must use resource-limit exit 7: ${result.stdout}${result.stderr}`);
-    assert.equal(wrapper.count(), 1, "deadline exhaustion in the first unique anchor must prevent every later process start");
+    // The aggregate budget includes stamp inspection and workspace preparation, so it may expire before
+    // the first process starts. Once the first wrapper stalls, no further process may start.
+    assert.ok(wrapper.count() <= 1, "deadline exhaustion in the first unique anchor must prevent every later process start");
     const output = JSON.parse(result.stdout);
     assert.equal(output.code, "VERIFICATION_RESOURCE_LIMIT");
     assert.equal(output.resourceLimited, true);
     assert.equal(output.results[0].code, "VERIFICATION_RESOURCE_LIMIT");
     assert.equal(output.results[1].code, "VERIFICATION_RESOURCE_LIMIT");
     assert.match(output.results[1].reason, /not attempted/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("verification resource bound: an already expired capability starts no OpenSSL process", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "noa-tsa-expired-capability-"));
+  try {
+    const wrapper = countingOpenSsl(dir);
+    const policy = {
+      opensslExecutable: wrapper.executable,
+      trustRoots: tsaFixture.trustRoots,
+      allowedPolicyOids: [tsaFixture.policyOid],
+      revocation: { mode: "crl-check-all", crls: tsaFixture.crls },
+      clock: { now: new Date().toISOString(), maxFutureSkewMs: 300000 },
+    };
+    const budget = createVerificationResourceBudget(100, 1);
+    assert.notEqual(budget, null);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const result = verifyStamp(AUTHENTICATED_ANCHOR, tsaFixture.valid, policy, budget);
+    assert.equal(result.ok, false);
+    assert.equal(result.authenticated, false);
+    assert.equal(result.code, "VERIFICATION_RESOURCE_LIMIT", result.reason);
+    assert.equal(wrapper.count(), 0, "an expired capability must refuse before the first process starts");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -359,7 +387,7 @@ test("CLI monitor resource bound: twenty duplicate branches preserve output but 
         5,
         `duplicate monitor verification must preserve substantive exit 5 for ${command}`,
       );
-      assert.equal(wrapper.count(), 5, `${command}: duplicate branches must share one five-process verification`);
+      assert.equal(wrapper.count(), 6, `${command}: duplicate branches must share one six-process verification`);
       const output = JSON.parse(result.stdout);
       assert.equal(output.findings[0].branches.length, 16, "the existing branch-output cap and order must be preserved");
       assert.deepEqual(
@@ -373,7 +401,7 @@ test("CLI monitor resource bound: twenty duplicate branches preserve output but 
   }
 });
 
-test("CLI monitor resource bound: sixteen unique stamped anchors consume exactly eighty process credits", async () => {
+test("CLI monitor resource bound: sixteen unique stamped anchors consume exactly ninety-six process credits", async () => {
   const dir = mkdtempSync(join(tmpdir(), "noa-tsa-cli-monitor-limit-pass-"));
   try {
     const monitorSet = getMonitorAuthenticatedSet();
@@ -391,7 +419,7 @@ test("CLI monitor resource bound: sixteen unique stamped anchors consume exactly
     ]);
 
     assert.equal(result.status, 5, result.stdout + result.stderr);
-    assert.equal(wrapper.count(), 16 * 5);
+    assert.equal(wrapper.count(), 16 * 6);
     const output = JSON.parse(result.stdout);
     assert.equal(output.resourceLimited, false);
     assert.equal(output.findings[0].branches.length, 16);
@@ -427,7 +455,7 @@ test("CLI monitor resource bound: seventeen unique anchors are refused before Op
       assert.equal(output.code, "VERIFICATION_RESOURCE_LIMIT");
       assert.equal(output.resourceLimited, true);
       assert.equal(output.uniqueAnchors, 17);
-      assert.equal(output.limits.maxOpenSslProcesses, 80);
+      assert.equal(output.limits.maxOpenSslProcesses, 96);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -461,7 +489,7 @@ test("CLI monitor resource bound: aggregate deadline stops later unique branches
         7,
         `aggregate deadline exhaustion must use resource-limit exit 7 for ${command}: ${result.stdout}${result.stderr}`,
       );
-      assert.equal(wrapper.count(), 1, `${command}: no later unique branch may start after deadline exhaustion`);
+      assert.ok(wrapper.count() <= 1, `${command}: no later unique branch may start after deadline exhaustion`);
       const output = JSON.parse(result.stdout);
       assert.equal(output.code, "VERIFICATION_RESOURCE_LIMIT");
       assert.equal(output.resourceLimited, true);

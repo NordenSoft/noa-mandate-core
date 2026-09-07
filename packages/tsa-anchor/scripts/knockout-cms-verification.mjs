@@ -31,7 +31,7 @@ const mutants = [
     replacement: "    if (true) {",
     testFile: "cli.test.mjs",
     testPattern: "^CLI verify resource bound: duplicates preserve result order",
-    expectedFailure: "two unique anchors must invoke only two five-process verification sequences",
+    expectedFailure: "two unique anchors must invoke only two six-process verification sequences",
   },
   {
     name: "unique-anchor-preflight",
