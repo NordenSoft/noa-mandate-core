@@ -43,6 +43,7 @@ const monotonicNowNs = nodeHrtime.bigint;
 const NativeDate = Date;
 const dateToISOString = Date.prototype.toISOString;
 const reflectApply = Reflect.apply;
+const DER_ERROR_PROTOTYPE = DerError.prototype;
 const {
   arrayLength,
   arrayPush,
@@ -179,6 +180,13 @@ function resourceFailure(reason) {
   return failure("VERIFICATION_RESOURCE_LIMIT", reason);
 }
 
+function isDerResourceError(error) {
+  if (typeof error !== "object" || error === null || isProxy(error)) return false;
+  if (getPrototypeOf(error) !== DER_ERROR_PROTOTYPE) return false;
+  const code = getOwnPropertyDescriptor(error, "code");
+  return code !== undefined && hasOwn(code, "value") && code.value === "DER_RESOURCE_LIMIT";
+}
+
 function structuralFailure(code, reason) {
   return { valid: false, code, reason };
 }
@@ -247,7 +255,7 @@ function structurallyInspect(anchor, stampRecord) {
   try {
     parsed = parseTimeStampResp(raw);
   } catch (error) {
-    if (error instanceof DerError && error.code === "DER_RESOURCE_LIMIT") {
+    if (isDerResourceError(error)) {
       return structuralFailure("VERIFICATION_RESOURCE_LIMIT", "TimeStampResp exceeded the DER parsing resource limit");
     }
     return structuralFailure("MALFORMED", "malformed TimeStampResp");
@@ -815,7 +823,7 @@ function filterIntervalMaterial(bytes, kind, lowerSeconds, upperSeconds, invalid
       endsBeforeUpper,
     };
   } catch (error) {
-    if (error instanceof DerError && error.code === "DER_RESOURCE_LIMIT") {
+    if (isDerResourceError(error)) {
       return { valid: false, result: resourceFailure(`${label} exceeded the PEM/DER parsing resource limit`) };
     }
     return { valid: false, result: failure(invalidCode, `${label} is not valid bounded PEM/DER material`) };

@@ -7,7 +7,7 @@ import { createVerificationResourceBudget, inspectStamp, verifyStamp } from "../
 import * as packageApi from "noa-tsa-anchor";
 import { anchorHashDigest } from "../src/anchor-hash.mjs";
 import { SHA256_OID } from "../src/tsq.mjs";
-import { derDecode, encInteger, encOid, encNull, encOctetString, encSequence, encSet, encContext, encGeneralizedTime, readOid } from "../src/der.mjs";
+import { DerError, derDecode, encInteger, encOid, encNull, encOctetString, encSequence, encSet, encContext, encGeneralizedTime, readOid } from "../src/der.mjs";
 import { startMockTsa } from "./mock-tsa-server.mjs";
 import { createAuthenticatedTsaFixture } from "./openssl-tsa-fixture.mjs";
 
@@ -251,6 +251,22 @@ test("verifyStamp: DER node exhaustion maps to resource limit before policy or O
   const res = verifyStamp(authenticatedAnchor, record);
   assert.equal(res.ok, false);
   assert.equal(res.code, "VERIFICATION_RESOURCE_LIMIT");
+
+  let hasInstanceCalls = 0;
+  Object.defineProperty(DerError, Symbol.hasInstance, {
+    configurable: true,
+    value() {
+      hasInstanceCalls++;
+      return false;
+    },
+  });
+  try {
+    assert.equal(inspectStamp(authenticatedAnchor, record).code, "VERIFICATION_RESOURCE_LIMIT");
+    assert.equal(verifyStamp(authenticatedAnchor, record).code, "VERIFICATION_RESOURCE_LIMIT");
+  } finally {
+    Reflect.deleteProperty(DerError, Symbol.hasInstance);
+  }
+  assert.equal(hasInstanceCalls, 0, "DER resource classification must not dispatch through Symbol.hasInstance");
 });
 
 test("verifyStamp: a caller cannot forge the CLI's opaque resource-budget capability", () => {

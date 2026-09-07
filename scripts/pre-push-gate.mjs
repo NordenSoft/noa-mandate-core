@@ -47,6 +47,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -108,6 +109,39 @@ function cleanupPrepushScratch() {
   rmSync(resolved, { recursive: true, force: true });
 }
 process.once("exit", cleanupPrepushScratch);
+
+/** Retain failed child output locally; console rendering remains opaque. */
+function retainedFailureDiagnostic(value, parentDirectory = PREPUSH_TEMP_ROOT, writeDiagnostic = writeFileSync) {
+  const withheld = opaqueDiagnostic(value);
+  let directory;
+  try {
+    const parent = realpathSync(parentDirectory);
+    for (const forbidden of [ROOT, PREPUSH_SCRATCH]) {
+      if (parent === forbidden || parent.startsWith(`${forbidden}${sep}`)) {
+        throw new Error("diagnostic parent must be outside repository and child scratch");
+      }
+    }
+    directory = mkdtempSync(join(parent, "noa-prepush-diagnostic-"));
+    chmodSync(directory, 0o700);
+    const path = join(directory, "diagnostic.log");
+    const bytes = Buffer.from(value, "utf8");
+    writeDiagnostic(path, bytes, { flag: "wx", mode: 0o600 });
+    return {
+      directory,
+      path,
+      message: `${withheld}; retained locally at ${JSON.stringify(path)}`,
+    };
+  } catch (error) {
+    // Preserve any partial bytes for diagnosis, but never report them as a complete retained output.
+    const partialLocation = directory === undefined
+      ? ""
+      : `; incomplete diagnostic may remain in ${JSON.stringify(directory)}`;
+    return {
+      directory,
+      message: `${withheld}; LOCAL_DIAGNOSTIC_RETENTION_FAILED; ${opaqueDiagnostic(error?.message)}${partialLocation}`,
+    };
+  }
+}
 
 export function buildPrepushChildEnvironment({ scratchRoot, source = process.env } = {}) {
   const root = resolve(String(scratchRoot ?? ""));
@@ -175,14 +209,34 @@ const red = (s) => `[31m${s}[0m`;
 const green = (s) => `[32m${s}[0m`;
 const yellow = (s) => `[33m${s}[0m`;
 
+// Keep the existing bounded capture budget; an overflow is incomplete evidence, never a full log.
+const PREPUSH_CAPTURE_MAX_BUFFER_BYTES = 1024 * 1024;
 function run(cmd, args, cwd) {
   const r = spawnSync(cmd, args, {
     cwd,
     encoding: "utf8",
     env: PREPUSH_CHILD_ENV,
     shell: false,
+    maxBuffer: PREPUSH_CAPTURE_MAX_BUFFER_BYTES,
   });
-  return { code: r.status ?? 1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  const captureComplete = r.error === undefined && r.signal === null;
+  return {
+    code: captureComplete ? r.status ?? 1 : 1,
+    out: `${r.stdout ?? ""}${r.stderr ?? ""}`,
+    captureComplete,
+    captureProblem: captureComplete ? null
+      : `error=${opaqueDiagnostic(r.error?.message)}; signal=${JSON.stringify(r.signal ?? null)}`,
+  };
+}
+
+function retainedRunFailureDiagnostic(observed) {
+  const retained = retainedFailureDiagnostic(observed.out);
+  return {
+    ...retained,
+    message: observed.captureComplete === false
+      ? `CAPTURE_INCOMPLETE (${observed.captureProblem}); ${retained.message}`
+      : retained.message,
+  };
 }
 
 /** node:test prints `# fail N` / `ℹ fail N` (and the same for `cancelled`). Parsed rather than
@@ -199,6 +253,9 @@ function summaryCount(output, key) {
  * a non-zero exit while cancelled tests still mean the suite did not complete.
  */
 export function classifySuite(run, allowedFailures) {
+  if (run.captureComplete === false) {
+    return { verdict: SETUP_FAILED, detail: "child output capture was incomplete; retained bytes are partial evidence" };
+  }
   const fails = summaryCount(run.out, "fail");
   const cancelled = summaryCount(run.out, "cancelled");
 
@@ -716,6 +773,87 @@ if (process.argv.includes("--selftest")) {
     && /utf8Bytes=\d+, sha256=[0-9a-f]{64}/.test(withheldDiagnostic);
   if (!diagnosticOk) bad++;
   console.error(`  ${diagnosticOk ? green("✔") : red("✖")} ${"opaque failure diagnostics".padEnd(46)} byte count and digest only`);
+  const retainedDiagnostics = [];
+  try {
+    const outputCanary = `${diagnosticCanary}\n\u001b[31mUTF-8: \u00e9\u0000\n`;
+    const first = retainedFailureDiagnostic(outputCanary);
+    const second = retainedFailureDiagnostic("second diagnostic");
+    retainedDiagnostics.push(first, second);
+    const privateBytesOk = typeof first.path === "string" && typeof second.path === "string"
+      && first.directory !== second.directory
+      && readFileSync(first.path).equals(Buffer.from(outputCanary, "utf8"))
+      && readFileSync(second.path, "utf8") === "second diagnostic"
+      && (lstatSync(first.directory).mode & 0o777) === 0o700
+      && (lstatSync(first.path).mode & 0o777) === 0o600
+      && !first.message.includes(diagnosticCanary)
+      && first.message.startsWith(opaqueDiagnostic(outputCanary));
+    if (!privateBytesOk) bad++;
+    console.error(`  ${privateBytesOk ? green("✔") : red("✖")} ${"private failure output retained without overwrite".padEnd(46)} exact UTF-8 bytes, owner-only modes, opaque console`);
+
+    const failedRetention = retainedFailureDiagnostic(outputCanary, first.path);
+    const failureOk = failedRetention.path === undefined
+      && failedRetention.message.includes("LOCAL_DIAGNOSTIC_RETENTION_FAILED")
+      && !failedRetention.message.includes(diagnosticCanary);
+    if (!failureOk) bad++;
+    console.error(`  ${failureOk ? green("✔") : red("✖")} ${"diagnostic write failure remains visible".padEnd(46)} raw diagnostic is not printed`);
+
+    const partial = retainedFailureDiagnostic(outputCanary, PREPUSH_TEMP_ROOT, (path, bytes, options) => {
+      writeFileSync(path, bytes.subarray(0, 7), options);
+      throw new Error("synthetic write failure after partial output");
+    });
+    retainedDiagnostics.push(partial);
+    const partialPath = join(partial.directory, "diagnostic.log");
+    const partialOk = partial.path === undefined
+      && partial.message.includes("LOCAL_DIAGNOSTIC_RETENTION_FAILED")
+      && partial.message.includes(`incomplete diagnostic may remain in ${JSON.stringify(partial.directory)}`)
+      && !partial.message.includes(diagnosticCanary)
+      && readFileSync(partialPath).equals(Buffer.from(outputCanary, "utf8").subarray(0, 7))
+      && (lstatSync(partial.directory).mode & 0o777) === 0o700
+      && (lstatSync(partialPath).mode & 0o777) === 0o600;
+    if (!partialOk) bad++;
+    console.error(`  ${partialOk ? green("✔") : red("✖")} ${"partial failed write has explicit private custody".padEnd(46)} incomplete bytes preserved without a success claim`);
+
+    const completeCapture = run(process.execPath, ["-e", "process.stdout.write('bounded failure'); process.exitCode = 1"], ROOT);
+    const completeDiagnostic = retainedRunFailureDiagnostic(completeCapture);
+    retainedDiagnostics.push(completeDiagnostic);
+    const completeCaptureOk = completeCapture.captureComplete === true && completeCapture.code === 1
+      && readFileSync(completeDiagnostic.path, "utf8") === "bounded failure"
+      && !completeDiagnostic.message.includes("CAPTURE_INCOMPLETE");
+    if (!completeCaptureOk) bad++;
+    console.error(`  ${completeCaptureOk ? green("✔") : red("✖")} ${"complete failed child capture retains exact output".padEnd(46)} real child exit and bytes observed`);
+
+    const overflowCapture = run(process.execPath, ["-e",
+      "process.stdout.write('# fail 1\\n# cancelled 0\\n' + 'x'.repeat(2 * 1024 * 1024)); process.exitCode = 1"], ROOT);
+    const overflowDiagnostic = retainedRunFailureDiagnostic(overflowCapture);
+    retainedDiagnostics.push(overflowDiagnostic);
+    const overflowOk = overflowCapture.captureComplete === false && overflowCapture.code !== 0
+      && classifySuite(overflowCapture, 1).verdict === SETUP_FAILED
+      && overflowDiagnostic.message.includes("CAPTURE_INCOMPLETE")
+      && readFileSync(overflowDiagnostic.path).equals(Buffer.from(overflowCapture.out, "utf8"));
+    if (!overflowOk) bad++;
+    console.error(`  ${overflowOk ? green("✔") : red("✖")} ${"capture overflow cannot pass an allowed failure baseline".padEnd(46)} partial captured bytes are explicitly labelled`);
+
+    const forbiddenParentsOk = [ROOT, PREPUSH_SCRATCH].every(parent => {
+      const refused = retainedFailureDiagnostic(outputCanary, parent);
+      return refused.path === undefined && refused.directory === undefined
+        && refused.message.includes("LOCAL_DIAGNOSTIC_RETENTION_FAILED");
+    });
+    if (!forbiddenParentsOk) bad++;
+    console.error(`  ${forbiddenParentsOk ? green("✔") : red("✖")} ${"repository and child scratch diagnostic parents refused".padEnd(46)} evidence remains outside measured source`);
+
+    cleanupPrepushScratch();
+    const survivesCleanup = !existsSync(PREPUSH_SCRATCH)
+      && readFileSync(first.path).equals(Buffer.from(outputCanary, "utf8"));
+    if (!survivesCleanup) bad++;
+    console.error(`  ${survivesCleanup ? green("✔") : red("✖")} ${"failure output survives child scratch cleanup".padEnd(46)} retained bytes remain readable`);
+  } catch (error) {
+    bad++;
+    console.error(`  ${red("✖")} diagnostic retention selftest ${opaqueDiagnostic(error?.message)}`);
+  } finally {
+    for (const retained of retainedDiagnostics) {
+      if (retained.directory) rmSync(retained.directory, { recursive: true, force: true });
+    }
+  }
   console.error(bad === 0 ? green(bold("\n  SELFTEST PASS\n")) : red(bold(`\n  SELFTEST FAIL — ${bad} case(s)\n`)));
   process.exit(bad === 0 ? 0 : 1);
 }
@@ -879,7 +1017,7 @@ for (const [name, cmd, args, cwd] of [
   const r = run(cmd, args, cwd);
   if (r.code !== 0) {
     record(name, RED, `exit ${r.code}`);
-    console.error(`\n  failed command ${opaqueDiagnostic(r.out)}\n`);
+    console.error(`\n  failed command ${retainedRunFailureDiagnostic(r).message}\n`);
     finish(RED, `cd ${cwd.replace(`${ROOT}/`, "") || "."} && ${cmd} ${args.join(" ")}`);
   }
   record(name, GREEN);
@@ -893,7 +1031,7 @@ const verdict = classifySuite(gateRun, gateBase.allowedFailures);
 
 record("gate tests", verdict.verdict, verdict.detail);
 if (verdict.verdict !== GREEN) {
-  console.error(`\n  baselined suite ${opaqueDiagnostic(gateRun.out)}\n`);
+  console.error(`\n  baselined suite ${retainedRunFailureDiagnostic(gateRun).message}\n`);
   finish(verdict.verdict, "cd packages/gate && npm test");
 }
 

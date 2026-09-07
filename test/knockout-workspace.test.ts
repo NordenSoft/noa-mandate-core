@@ -12005,7 +12005,19 @@ test("Phase 2 supervisor refuses a retained mutant changed by a delayed same-gro
   }
 });
 
-function fixtureBoundaryGatePrelude(): string[] {
+function fixtureBoundaryGatePrelude({ optional = false } = {}): string[] {
+  if (optional) return [
+    "// TEST ONLY: support both ordinary gate runs and the real worker's one-shot bootstrap transport.",
+    "import crypto from 'node:crypto';",
+    "import { BOUNDARY_KNOCKOUT_BOOTSTRAP_ENV } from './lib/boundary-bootstrap.mjs';",
+    "import { BOUNDARY_CANDIDATE_TIER_A_GATE_EXPECTATION } from './lib/boundary-gate-provenance.mjs';",
+    "import { emitGateEvidence, emitProvenanceBoundGateEvidence } from './lib/gate-event-contract.mjs';",
+    "const bootstrapDescriptor = process.env[BOUNDARY_KNOCKOUT_BOOTSTRAP_ENV];",
+    "if (bootstrapDescriptor !== undefined && bootstrapDescriptor !== '0') throw new Error('invalid fixture bootstrap descriptor');",
+    "const bootstrap = bootstrapDescriptor === undefined ? null : JSON.parse(fs.readFileSync(0, 'utf8'));",
+    "if (bootstrap !== null && bootstrap.protocol !== 'noa-boundary-knockout-bootstrap/1') throw new Error('invalid fixture bootstrap');",
+    "const { protocol, ...provenance } = BOUNDARY_CANDIDATE_TIER_A_GATE_EXPECTATION;",
+  ];
   return [
     "// TEST ONLY: exercise the real worker's one-shot bootstrap transport in a disposable gate.",
     "import crypto from 'node:crypto';",
@@ -12018,6 +12030,231 @@ function fixtureBoundaryGatePrelude(): string[] {
     "const { protocol, ...provenance } = BOUNDARY_CANDIDATE_TIER_A_GATE_EXPECTATION;",
   ];
 }
+
+type MixedGateSweepCase = {
+  expectedPlainFinding?: { rule: string; subject: string };
+  forceInvalidProvenanceProtocol?: boolean;
+  order: readonly ["plain", "provenance"] | readonly ["provenance", "plain"];
+};
+
+async function runMixedGateSweepCase({
+  expectedPlainFinding = { rule: "PLAIN_CONTROL_DISABLED", subject: "plain control" },
+  forceInvalidProvenanceProtocol = false,
+  order,
+}: MixedGateSweepCase): Promise<void> {
+  const fixture = minimalCaptureFixture(`phase2-mixed-provenance-${order.join("-")}`);
+  const plainEntry = {
+    id: "mixed-plain-control",
+    control: "plain fixture control must be load-bearing",
+    file: "plain-control.mjs",
+    find: "export const plainControlEnabled = true;",
+    replace: "export const plainControlEnabled = false;",
+    kind: "gate",
+    gateId: "mixed-provenance-gate",
+    expectedGateFindings: [expectedPlainFinding],
+    suite: [".", "node", ["scripts/lint-boundary.mjs"]],
+  };
+  const provenanceEntry = {
+    id: "mixed-provenance-control",
+    control: "provenance fixture control must be load-bearing",
+    file: "provenance-control.mjs",
+    find: "export const provenanceControlEnabled = true;",
+    replace: "export const provenanceControlEnabled = false;",
+    kind: "gate",
+    gateId: "mixed-provenance-gate",
+    expectedGateFindings: [{ rule: "PROVENANCE_CONTROL_DISABLED", subject: "provenance control" }],
+    expectedGateProvenance: knockoutRunner.BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION,
+    suite: [".", "node", ["scripts/lint-boundary.mjs"]],
+  };
+  const entries = { plain: plainEntry, provenance: provenanceEntry };
+  const selected = order.map((name) => entries[name]);
+  try {
+    installPhase2RunnerFixture(fixture.source, "install mixed-provenance runner closure");
+    fs.writeFileSync(
+      path.join(fixture.source, "plain-control.mjs"),
+      "export const plainControlEnabled = true;\n",
+      { mode: 0o600 },
+    );
+    fs.writeFileSync(
+      path.join(fixture.source, "provenance-control.mjs"),
+      "export const provenanceControlEnabled = true;\n",
+      { mode: 0o600 },
+    );
+    fs.writeFileSync(
+      path.join(fixture.source, "scripts", "lint-boundary.mjs"),
+      [
+        "import fs from 'node:fs';",
+        "import { plainControlEnabled } from '../plain-control.mjs';",
+        "import { provenanceControlEnabled } from '../provenance-control.mjs';",
+        ...fixtureBoundaryGatePrelude({ optional: true }),
+        "const findings = [];",
+        "if (!plainControlEnabled) findings.push({ rule: 'PLAIN_CONTROL_DISABLED', subject: 'plain control', detail: 'plain control disabled' });",
+        "if (!provenanceControlEnabled) findings.push({ rule: 'PROVENANCE_CONTROL_DISABLED', subject: 'provenance control', detail: 'provenance control disabled' });",
+        "const manifestDigest = crypto.createHash('sha256')",
+        "  .update(fs.readFileSync('plain-control.mjs')).update('\\0')",
+        "  .update(fs.readFileSync('provenance-control.mjs')).digest('hex');",
+        `if (bootstrap === null || ${JSON.stringify(forceInvalidProvenanceProtocol)}) {`,
+        "  emitGateEvidence('mixed-provenance-gate', findings);",
+        "} else {",
+        "  emitProvenanceBoundGateEvidence('mixed-provenance-gate', findings, {",
+        "    ...provenance, subject: bootstrap.candidateSubject, controlManifestDigest: manifestDigest,",
+        "  });",
+        "}",
+        "process.exitCode = findings.length === 0 ? 0 : 1;",
+        "",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+    installFixtureKnockoutRegistry(fixture.source, [plainEntry, provenanceEntry]);
+    git(fixture.source, ["add", "--all"]);
+    git(fixture.source, ["commit", "-q", "-m", "add mixed-provenance gate fixture"]);
+
+    const candidateSubject = {
+      archiveSha256: sha256File(path.join(fixture.source, "scripts", "lint-boundary.mjs")),
+      commit: git(fixture.source, ["rev-parse", "HEAD"]).trim(),
+      repository: "fixture/mixed-provenance-candidate",
+      tree: git(fixture.source, ["rev-parse", "HEAD^{tree}"]).trim(),
+    };
+    const statusBefore = git(fixture.source, ["status", "--porcelain=v1", "-z"]);
+    const indexBefore = sha256File(path.join(fixture.source, ".git", "index"));
+    const controlsBefore = new Map([
+      [plainEntry.file, sha256File(path.join(fixture.source, plainEntry.file))],
+      [provenanceEntry.file, sha256File(path.join(fixture.source, provenanceEntry.file))],
+    ]);
+    let sweep: Awaited<ReturnType<typeof knockoutRunner.runIsolatedKnockoutSweep>>;
+    try {
+      sweep = await knockoutRunner.runIsolatedKnockoutSweep({
+        candidateSubject,
+        captureTimeoutMs: workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS,
+        custodyRoot: fixture.custody,
+        maxRetainedArms: 4,
+        maxRetainedBytes: 768 * 1024 * 1024,
+        rawDependenciesByEntry: new Map(selected.map((entry) => [entry.id, {}])),
+        registry: [plainEntry, provenanceEntry],
+        root: fixture.source,
+        selected,
+        suiteTimeoutMs: 60_000,
+        workerTimeoutMs: workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS,
+      });
+    } catch (error) {
+      for (const [file, digest] of controlsBefore) {
+        assert.equal(sha256File(path.join(fixture.source, file)), digest);
+      }
+      assert.equal(sha256File(path.join(fixture.source, ".git", "index")), indexBefore);
+      assert.equal(git(fixture.source, ["status", "--porcelain=v1", "-z"]), statusBefore);
+      const terminals = regularFilesBelow(fixture.custody)
+        .filter((file) => path.basename(file) === "arm-terminal.json")
+        .map((file) => JSON.parse(fs.readFileSync(file, "utf8")) as {
+          role: string;
+          status: string;
+          workerResult: { accepted: boolean };
+        });
+      assert.equal(terminals.length, 3);
+      assert.equal(terminals.filter((terminal) => terminal.status === "REFUSED").length, 0);
+      assert.equal(terminals.filter((terminal) => terminal.status === "COMPLETE").length, 3);
+      assert.ok(terminals.every((terminal) => terminal.workerResult.accepted === true));
+      if (error instanceof Error) {
+        error.message = `${error.message}; fixture source/index and pre-spawn three-terminal lifecycle remained preserved`;
+      }
+      throw error;
+    }
+
+    assert.equal(sweep.status, "COMPLETE");
+    assert.equal(sweep.closeEvidence.sourceRelease.status, "RELEASED");
+    assert.equal(sweep.baselines.length, 1);
+    assert.equal(sweep.mutants.length, 2);
+    assert.deepEqual(sweep.results.map((result) => result.id), selected.map((entry) => entry.id));
+    const plainResult = sweep.results.find((result) => result.id === plainEntry.id)! as
+      (typeof sweep.results)[number] & {
+        newGateFindings: Array<{ detail: string; rule: string; subject: string }>;
+      };
+    const provenanceResult = sweep.results.find((result) => result.id === provenanceEntry.id)! as
+      (typeof sweep.results)[number] & {
+        newGateFindings: Array<{ detail: string; rule: string; subject: string }>;
+      };
+    assert.equal(
+      plainResult.verdict,
+      expectedPlainFinding.rule === "PLAIN_CONTROL_DISABLED"
+        ? "DETECTOR_TRIGGERED"
+        : "DETECTOR_DID_NOT_TRIGGER",
+    );
+    assert.equal(
+      provenanceResult.verdict,
+      forceInvalidProvenanceProtocol ? "INVALID_TEST" : "DETECTOR_TRIGGERED",
+    );
+    assert.deepEqual(plainResult.newGateFindings, [{
+      detail: "plain control disabled",
+      rule: "PLAIN_CONTROL_DISABLED",
+      subject: "plain control",
+    }]);
+    assert.deepEqual(provenanceResult.newGateFindings, forceInvalidProvenanceProtocol ? [] : [{
+      detail: "provenance control disabled",
+      rule: "PROVENANCE_CONTROL_DISABLED",
+      subject: "provenance control",
+    }]);
+    if (!forceInvalidProvenanceProtocol) {
+      const provenanceEvidence = provenanceResult as typeof provenanceResult & {
+        baselineGateProvenance: { subject: unknown };
+        mutatedGateProvenance: { subject: unknown };
+      };
+      assert.deepEqual(provenanceEvidence.baselineGateProvenance.subject, candidateSubject);
+      assert.deepEqual(provenanceEvidence.mutatedGateProvenance.subject, candidateSubject);
+    }
+    for (const [file, digest] of controlsBefore) {
+      assert.equal(sha256File(path.join(fixture.source, file)), digest);
+    }
+    assert.equal(sha256File(path.join(fixture.source, ".git", "index")), indexBefore);
+    assert.equal(git(fixture.source, ["status", "--porcelain=v1", "-z"]), statusBefore);
+    const terminals = regularFilesBelow(fixture.custody)
+      .filter((file) => path.basename(file) === "arm-terminal.json")
+      .map((file) => ({
+        sha256: sha256File(file),
+        terminal: JSON.parse(fs.readFileSync(file, "utf8")) as {
+          predecessorTerminalSha256: string | null;
+          role: string;
+          status: string;
+          workerResult: { accepted: boolean };
+        },
+      }));
+    assert.equal(terminals.length, 4);
+    const orderedRoles = [];
+    let next = terminals.find(({ terminal }) => terminal.predecessorTerminalSha256 === null);
+    while (next !== undefined) {
+      orderedRoles.push(next.terminal.role);
+      const predecessor = next.sha256;
+      next = terminals.find(({ terminal }) => terminal.predecessorTerminalSha256 === predecessor);
+    }
+    assert.deepEqual(orderedRoles, ["SELFTEST", "BASELINE", "MUTANT", "MUTANT"]);
+    assert.ok(terminals.every(({ terminal }) =>
+      terminal.status === "COMPLETE" && terminal.workerResult.accepted === true));
+  } finally {
+    removeFixturePath(fixture.source);
+    removeFixturePath(fixture.custody);
+  }
+}
+
+for (const order of [
+  ["plain", "provenance"],
+  ["provenance", "plain"],
+] as const) {
+  test(`Phase 2 reuses one mixed legacy/provenance baseline (${order.join(" first, ")} second)`, async () => {
+    await runMixedGateSweepCase({ order });
+  });
+}
+
+test("Phase 2 mixed baseline gives no detection credit for a mismatched authored finding", async () => {
+  await runMixedGateSweepCase({
+    expectedPlainFinding: { rule: "PLAIN_CONTROL_BLOCKED", subject: "plain control" },
+    order: ["plain", "provenance"],
+  });
+});
+
+test("Phase 2 mixed baseline gives no provenance-bound detection credit for a legacy protocol", async () => {
+  await runMixedGateSweepCase({
+    forceInvalidProvenanceProtocol: true,
+    order: ["plain", "provenance"],
+  });
+});
 
 const crossPhaseScenarios = [
   { id: "baseline-result", phase: "mutant" },

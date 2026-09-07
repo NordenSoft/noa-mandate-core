@@ -6761,7 +6761,12 @@ export async function runIsolatedKnockoutSweep({
 
   for (const entry of selectedEntries) {
     const baselineKeySha256 = baselineKeyFor(entry);
-    if (!baselineDefinitionByKey.has(baselineKeySha256)) {
+    const representative = baselineDefinitionByKey.get(baselineKeySha256);
+    if (
+      representative === undefined ||
+      (representative.expectedGateProvenance === undefined
+        && entry.expectedGateProvenance !== undefined)
+    ) {
       baselineDefinitionByKey.set(baselineKeySha256, entry);
     }
   }
@@ -6863,7 +6868,7 @@ export async function runIsolatedKnockoutSweep({
         operation: KNOCKOUT_WORKER_OPERATIONS.OBSERVE_KNOCKOUT_BASELINE,
         request: {
           baselineKeySha256,
-          ...(entry.expectedGateProvenance === undefined
+          ...(!boundarySubjectRequired
             ? {}
             : { candidateSubject: boundCandidateSubject }),
           dependencies: rawDependenciesFor(entry),
@@ -6931,7 +6936,7 @@ export async function runIsolatedKnockoutSweep({
           baseline: baseline.wire,
           baselineResultSha256: baseline.resultSha256,
           baselineTerminalSha256: baseline.terminalSha256,
-          ...(entry.expectedGateProvenance === undefined
+          ...(!boundarySubjectRequired
             ? {}
             : { candidateSubject: boundCandidateSubject }),
           dependencies: rawDependenciesFor(entry),
@@ -6985,7 +6990,7 @@ export async function runIsolatedKnockoutSweep({
             baseline: baseline.wire,
             baselineResultSha256: baseline.resultSha256,
             baselineTerminalSha256: baseline.terminalSha256,
-            ...(entry.expectedGateProvenance === undefined
+            ...(!boundarySubjectRequired
               ? {}
               : { candidateSubject: boundCandidateSubject }),
             dependencies: rawDependenciesFor(entry),
