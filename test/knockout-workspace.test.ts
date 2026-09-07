@@ -307,6 +307,16 @@ const workspace = await import(
     kind: string;
     suite: unknown[];
   }) => string;
+  knockoutBaselineWireFromObservation: (
+    baselineKeySha256: string,
+    observation: Record<string, unknown>,
+    options: { workspaceRoot: string },
+  ) => Record<string, unknown>;
+  knockoutResultWireFromEvidence: (options: {
+    baselineKeySha256: string;
+    entryId: string;
+    result: Record<string, unknown>;
+  }) => Record<string, unknown>;
   knockoutWorkerSubjectSha256: (subject: WorkerSubject) => string;
   captureAndSealCandidate: (options: {
     commandTimeoutMs?: number;
@@ -472,6 +482,7 @@ const workspace = await import(
 const knockoutRunner = await import(
   pathToFileURL(path.join(repositoryRoot, "scripts/lib/knockout-runner.mjs")).href
 ) as {
+  BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION: Record<string, unknown>;
   assertKnockoutMigrationBarrier: (root: string) => true;
   createBuildStateGuard: (options: {
     cacheDir?: string;
@@ -499,6 +510,7 @@ const knockoutRunner = await import(
     closeEvidence: { sourceRelease: { status: string } };
     mutants: Array<{ entryId: string; workspaceRoot: string }>;
     results: Array<{
+      detail?: string | null;
       id: string;
       restored: boolean;
       verdict: string;
@@ -11543,6 +11555,169 @@ test("Phase 2 CLI invalid selection and argument grammar stay hard and start no 
   assert.equal(git(repositoryRoot, ["status", "--porcelain=v1", "-z"]), statusBefore);
 });
 
+test("Phase 2 layered subject budget preserves full wires and the original metadata ceiling", async (t) => {
+  const entry = {
+    id: "subject-budget-fixture",
+    control: "test-only result transport accounting",
+    file: "control.mjs",
+    find: "enabled = true",
+    replace: "enabled = false",
+    kind: "tests",
+    suite: [".", "npm", ["test"]],
+  };
+  const baselineKeySha256 = workspace.knockoutBaselineKeySha256({
+    dependencies: {}, kind: entry.kind, suite: entry.suite,
+  });
+  const baselineWire = (count: number, nameLength = 100, prefix = "fixture") => {
+    const names = Array.from({ length: count }, (_, i) => `${prefix}-${i}-${"x".repeat(nameLength)}`);
+    return workspace.knockoutBaselineWireFromObservation(baselineKeySha256, {
+      armTerminalProtocolComplete: false, armTerminalProtocolError: null, armTerminalSummary: null,
+      exit: 1, failing: new Set(names),
+      failureEvents: names.map((name, i) => ({
+        name, file: path.join(repositoryRoot, "test", `budget-fixture-${i}.ts`), line: i + 1, column: 1,
+      })),
+      fileFailureCount: 0, findings: 0, gate: null, gateFindings: [], gateProtocol: null,
+      gateProtocolComplete: false, gateProtocolError: null, gateProvenance: null,
+      protocolComplete: true, protocolError: null, signal: null, testCount: count, timedOut: false,
+    }, { workspaceRoot: repositoryRoot });
+  };
+  const mutantWire = (detailLength: number) => workspace.knockoutResultWireFromEvidence({
+    baselineKeySha256,
+    entryId: entry.id,
+    result: {
+      ...entry, suite: ".", verdict: "INVALID_TEST", restored: true,
+      workspaceDisposition: "RETAINED_UNMODIFIED_ARM", detail: "x".repeat(detailLength),
+    },
+  });
+  const largeBaseline = baselineWire(200);
+  assert.ok(workspace.canonicalJsonBytes(largeBaseline).length > 32 * 1024);
+  assert.ok(workspace.canonicalJsonBytes(largeBaseline).length < 512 * 1024);
+  const request = {
+    baseline: largeBaseline, baselineResultSha256: "1".repeat(64),
+    baselineTerminalSha256: "2".repeat(64), dependencies: {}, entry, pairedEntry: null,
+    registrySha256: "3".repeat(64), suiteTimeoutMs: 60_000,
+  };
+  const subject = (value: Record<string, unknown>, postcheck = false) => workspace.createKnockoutWorkerSubject({
+    operation: postcheck
+      ? workspace.KNOCKOUT_WORKER_OPERATIONS.OBSERVE_KNOCKOUT_POSTCHECK
+      : workspace.KNOCKOUT_WORKER_OPERATIONS.RUN_KNOCKOUT,
+    request: value,
+    workerSha256: "4".repeat(64),
+  });
+  const exceeds = (limitBytes: number) => (error: WorkspaceError) => {
+    const details = (error as unknown as { details?: { limitBytes: number; observedBytes: number } }).details;
+    return error.code === workspaceErrorCode("RESOURCE_LIMIT_EXCEEDED")
+      && details?.limitBytes === limitBytes && details.observedBytes > limitBytes;
+  };
+
+  await t.test("a large baseline remains complete and changes the full subject digest", () => {
+    const accepted = subject(request);
+    assert.deepEqual(accepted.request.baseline, largeBaseline);
+    assert.equal(workspace.knockoutWorkerSubjectSha256(accepted), armWorkerSubjectSha256(accepted));
+    const different = subject({ ...request, baseline: baselineWire(200, 100, "another") });
+    assert.notEqual(workspace.knockoutWorkerSubjectSha256(accepted), workspace.knockoutWorkerSubjectSha256(different));
+  });
+  await t.test("metadata is admitted exactly at 32 KiB and refused one byte above", () => {
+    const projected = armWorkerSubject("4".repeat(64), workspace.KNOCKOUT_WORKER_OPERATIONS.RUN_KNOCKOUT, {
+      ...request, baseline: null, entry: { ...entry, control: "" },
+    });
+    const padding = 32 * 1024 - workspace.canonicalJsonBytes(projected).length;
+    assert.ok(padding > 0);
+    subject({ ...request, entry: { ...entry, control: "x".repeat(padding) } });
+    assert.throws(() => subject({ ...request, entry: { ...entry, control: "x".repeat(padding + 1) } }), exceeds(32 * 1024));
+  });
+  await t.test("POSTCHECK carries both independently bounded wires above 64 KiB", () => {
+    const mutant = mutantWire(40 * 1024);
+    const accepted = subject({
+      ...request, mutant, mutantResultSha256: "5".repeat(64), mutantTerminalSha256: "6".repeat(64),
+    }, true);
+    assert.ok(workspace.canonicalJsonBytes(accepted).length > 64 * 1024);
+    assert.deepEqual(accepted.request.baseline, largeBaseline);
+    assert.deepEqual(accepted.request.mutant, mutant);
+    assert.equal(workspace.knockoutWorkerSubjectSha256(accepted), armWorkerSubjectSha256(accepted));
+  });
+  await t.test("an individual baseline above the unchanged 512 KiB result ceiling is refused", () => {
+    const oversized = baselineWire(1, 270_000);
+    assert.ok(workspace.canonicalJsonBytes(oversized).length > 512 * 1024);
+    assert.throws(() => subject({ ...request, baseline: oversized }), exceeds(512 * 1024));
+  });
+  await t.test("an individual mutant above the unchanged 512 KiB result ceiling is refused", () => {
+    const oversized = mutantWire(512 * 1024);
+    assert.ok(workspace.canonicalJsonBytes(oversized).length > 512 * 1024);
+    assert.throws(() => subject({
+      ...request, mutant: oversized, mutantResultSha256: "5".repeat(64), mutantTerminalSha256: "6".repeat(64),
+    }, true), exceeds(512 * 1024));
+  });
+});
+
+test("Phase 2 large baseline wire crosses FD 3 intact and keeps an invalid gate fail-closed", async () => {
+  const fixture = minimalCaptureFixture("phase2-large-baseline");
+  const detail = "test-only baseline diagnostic ".repeat(3000);
+  const entry = {
+    id: "large-baseline-control", control: "large evidence must not erase baseline refusal",
+    file: "control.mjs", find: "export const controlEnabled = true;",
+    replace: "export const controlEnabled = false;", kind: "gate", gateId: "large-baseline-gate",
+    expectedGateFindings: [{ rule: "CONTROL_DISABLED", subject: "control" }],
+    suite: [".", "node", ["large-baseline-gate.mjs"]],
+  };
+  try {
+    installPhase2RunnerFixture(fixture.source, "install large-baseline runner closure");
+    fs.writeFileSync(path.join(fixture.source, "control.mjs"), "export const controlEnabled = true;\n", { mode: 0o600 });
+    fs.writeFileSync(path.join(fixture.source, "large-baseline-gate.mjs"), [
+      "import { emitGateEvidence } from './scripts/lib/gate-event-contract.mjs';",
+      `emitGateEvidence('large-baseline-gate', [{ rule: 'BASELINE_INVALID', subject: 'test fixture', detail: ${JSON.stringify(detail)} }]);`,
+      "process.exitCode = 1;",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    installFixtureKnockoutRegistry(fixture.source, [entry]);
+    git(fixture.source, ["add", "--all"]);
+    git(fixture.source, ["commit", "-q", "-m", "add test-only large baseline diagnostic"]);
+    const controlBefore = sha256File(path.join(fixture.source, "control.mjs"));
+    const indexBefore = sha256File(path.join(fixture.source, ".git", "index"));
+    const progress: Array<Record<string, unknown>> = [];
+    const sweep = await knockoutRunner.runIsolatedKnockoutSweep({
+      captureTimeoutMs: workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS,
+      custodyRoot: fixture.custody, maxRetainedArms: 3, maxRetainedBytes: 512 * 1024 * 1024,
+      onProgress: (event: Record<string, unknown>) => progress.push(event),
+      rawDependenciesByEntry: new Map([[entry.id, {}]]), registry: [entry], root: fixture.source,
+      selected: [entry], suiteTimeoutMs: 60_000,
+      workerTimeoutMs: workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS,
+    });
+    assert.equal(sweep.status, "COMPLETE");
+    assert.equal(sweep.closeEvidence.sourceRelease.status, "RELEASED");
+    assert.equal(sweep.baselines.length, 1);
+    assert.equal(sweep.mutants.length, 1);
+    assert.equal(sweep.results[0]?.verdict, "INVALID_TEST");
+    assert.equal(sweep.results[0]?.workspaceDisposition, "RETAINED_UNMODIFIED_ARM");
+    assert.deepEqual(progress, [{
+      completed: 1, detail: sweep.results[0]?.detail ?? null,
+      id: entry.id, suite: entry.suite, total: 1, verdict: "INVALID_TEST",
+    }]);
+    assert.match(String(progress[0]?.detail), /baseline/i);
+    const baseline = sweep.baselines[0]!;
+    const published = JSON.parse(fs.readFileSync(path.join(baseline.workspaceRoot, "..", "evidence", "worker-result.bin"), "utf8"));
+    assert.ok(workspace.canonicalJsonBytes(published.observation.baseline).length > 64 * 1024);
+    assert.equal(published.observation.baseline.observation.gateFindings[0].detail, detail);
+    const terminals = regularFilesBelow(fixture.custody)
+      .filter((file) => path.basename(file) === "arm-terminal.json")
+      .map((file) => ({ hash: sha256File(file), terminal: JSON.parse(fs.readFileSync(file, "utf8")) }));
+    assert.equal(terminals.length, 3);
+    const selftest = terminals.find(({ terminal }) => terminal.role === "SELFTEST")!;
+    const baselineTerminal = terminals.find(({ terminal }) => terminal.role === "BASELINE")!;
+    const mutantTerminal = terminals.find(({ terminal }) => terminal.role === "MUTANT")!;
+    assert.equal(selftest.terminal.predecessorTerminalSha256, null);
+    assert.equal(baselineTerminal.terminal.predecessorTerminalSha256, selftest.hash);
+    assert.equal(mutantTerminal.terminal.predecessorTerminalSha256, baselineTerminal.hash);
+    assert.ok(terminals.every(({ terminal }) => terminal.status === "COMPLETE" && terminal.workerResult.accepted === true));
+    assert.equal(sha256File(path.join(fixture.source, "control.mjs")), controlBefore);
+    assert.equal(sha256File(path.join(fixture.source, ".git", "index")), indexBefore);
+    assert.equal(git(fixture.source, ["status", "--porcelain=v1", "-z"]), "");
+  } finally {
+    removeFixturePath(fixture.source);
+    removeFixturePath(fixture.custody);
+  }
+});
+
 test("Phase 2 isolated runner executes one real baseline and mutant in separate retained arms without source writes", async () => {
   const fixture = minimalCaptureFixture("phase2-runner-integration");
   const entry = {
@@ -11830,15 +12005,35 @@ test("Phase 2 supervisor refuses a retained mutant changed by a delayed same-gro
   }
 });
 
-test("Phase 2 refuses forged cross-phase result, wire, and predecessor references before worker spawn", async () => {
-  const scenarios = [
-    { id: "baseline-result", phase: "mutant" },
-    { id: "mutant-wire", phase: "postcheck" },
-    { id: "mutant-predecessor", phase: "postcheck" },
-  ] as const;
+function fixtureBoundaryGatePrelude(): string[] {
+  return [
+    "// TEST ONLY: exercise the real worker's one-shot bootstrap transport in a disposable gate.",
+    "import crypto from 'node:crypto';",
+    "import { BOUNDARY_KNOCKOUT_BOOTSTRAP_ENV } from './lib/boundary-bootstrap.mjs';",
+    "import { BOUNDARY_CANDIDATE_TIER_A_GATE_EXPECTATION } from './lib/boundary-gate-provenance.mjs';",
+    "import { emitProvenanceBoundGateEvidence } from './lib/gate-event-contract.mjs';",
+    "if (process.env[BOUNDARY_KNOCKOUT_BOOTSTRAP_ENV] !== '0') throw new Error('missing fixture bootstrap');",
+    "const bootstrap = JSON.parse(fs.readFileSync(0, 'utf8'));",
+    "if (bootstrap.protocol !== 'noa-boundary-knockout-bootstrap/1') throw new Error('invalid fixture bootstrap');",
+    "const { protocol, ...provenance } = BOUNDARY_CANDIDATE_TIER_A_GATE_EXPECTATION;",
+  ];
+}
 
-  for (const scenario of scenarios) {
+const crossPhaseScenarios = [
+  { id: "baseline-result", phase: "mutant" },
+  { id: "mutant-wire", phase: "postcheck" },
+  { id: "mutant-predecessor", phase: "postcheck" },
+  { id: "candidate-mutant-value", phase: "mutant" },
+  { id: "candidate-mutant-absent", phase: "mutant" },
+  { id: "candidate-postcheck-value", phase: "postcheck" },
+  { id: "candidate-postcheck-absent", phase: "postcheck" },
+] as const;
+
+for (const scenario of crossPhaseScenarios) {
+  test(`Phase 2 refuses forged cross-phase references before worker spawn (${scenario.id})`, async () => {
     const fixture = minimalCaptureFixture(`phase2-cross-phase-${scenario.id}`);
+    const bindsCandidate = scenario.id.startsWith("candidate-");
+    const gateScript = bindsCandidate ? "scripts/lint-boundary.mjs" : "cross-phase-gate.mjs";
     const entry = {
       id: `cross-phase-${scenario.id}`,
       control: "cross-phase evidence must come from the immediate retained predecessor",
@@ -11848,7 +12043,10 @@ test("Phase 2 refuses forged cross-phase result, wire, and predecessor reference
       kind: "gate",
       gateId: "cross-phase-gate",
       expectedGateFindings: [{ rule: "CONTROL_DISABLED", subject: "control" }],
-      suite: [".", "node", ["cross-phase-gate.mjs"]],
+      ...(bindsCandidate ? {
+        expectedGateProvenance: knockoutRunner.BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION,
+      } : {}),
+      suite: [".", "node", [gateScript]],
     };
     let captured: Capture | null = null;
     let cooperativeLease: CooperativeSourceLease | null = null;
@@ -11861,13 +12059,21 @@ test("Phase 2 refuses forged cross-phase result, wire, and predecessor reference
         { mode: 0o600 },
       );
       fs.writeFileSync(
-        path.join(fixture.source, "cross-phase-gate.mjs"),
+        path.join(fixture.source, gateScript),
         [
           "import fs from 'node:fs';",
-          "import { controlEnabled } from './control.mjs';",
+          `import { controlEnabled } from '${bindsCandidate ? ".." : "."}/control.mjs';`,
+          ...(bindsCandidate ? fixtureBoundaryGatePrelude() : []),
           "if (!controlEnabled) fs.writeFileSync('mutant-ran.txt', 'spawned\\n');",
           "const findings = controlEnabled ? [] : [{ rule: 'CONTROL_DISABLED', subject: 'control', detail: 'disabled' }];",
-          "console.log(JSON.stringify({ protocol: 'noa-gate-runner/1', event: 'complete', gate: 'cross-phase-gate', findings }));",
+          ...(bindsCandidate ? [
+            "emitProvenanceBoundGateEvidence('cross-phase-gate', findings, {",
+            "  ...provenance, subject: bootstrap.candidateSubject,",
+            "  controlManifestDigest: crypto.createHash('sha256').update(fs.readFileSync('control.mjs')).digest('hex'),",
+            "});",
+          ] : [
+            "console.log(JSON.stringify({ protocol: 'noa-gate-runner/1', event: 'complete', gate: 'cross-phase-gate', findings }));",
+          ]),
           "process.exitCode = findings.length === 0 ? 0 : 1;",
           "",
         ].join("\n"),
@@ -11884,6 +12090,13 @@ test("Phase 2 refuses forged cross-phase result, wire, and predecessor reference
         .update(workspace.canonicalJsonBytes([entry]))
         .digest("hex");
       const dependencies = {};
+      const candidateSubject = {
+        archiveSha256: workerSha256,
+        commit: git(fixture.source, ["rev-parse", "HEAD"]).trim(),
+        repository: "fixture/cross-phase-candidate",
+        tree: git(fixture.source, ["rev-parse", "HEAD^{tree}"]).trim(),
+      };
+      const otherCandidateSubject = { ...candidateSubject, archiveSha256: "f".repeat(64) };
       const baselineKeySha256 = workspace.knockoutBaselineKeySha256({
         dependencies,
         kind: entry.kind,
@@ -11919,6 +12132,7 @@ test("Phase 2 refuses forged cross-phase result, wire, and predecessor reference
         operation: workspace.KNOCKOUT_WORKER_OPERATIONS.OBSERVE_KNOCKOUT_BASELINE,
         request: {
           baselineKeySha256,
+          ...(bindsCandidate ? { candidateSubject } : {}),
           dependencies,
           entryId: entry.id,
           kind: entry.kind,
@@ -11937,6 +12151,10 @@ test("Phase 2 refuses forged cross-phase result, wire, and predecessor reference
 
       const mutantRequest = {
         baseline: baselineWire,
+        ...(bindsCandidate && scenario.id !== "candidate-mutant-absent"
+          ? { candidateSubject: scenario.id === "candidate-mutant-value"
+            ? otherCandidateSubject : candidateSubject }
+          : {}),
         baselineResultSha256: scenario.id === "baseline-result"
           ? "f".repeat(64)
           : baselineCompleted.resultPublication.sha256,
@@ -11977,17 +12195,23 @@ test("Phase 2 refuses forged cross-phase result, wire, and predecessor reference
             .update(workspace.canonicalJsonBytes(evidence))
             .digest("hex");
         }
+        const postcheckRequest: Record<string, unknown> = {
+          ...mutantRequest,
+          baselineResultSha256: baselineCompleted.resultPublication.sha256,
+          mutant: requestedMutant,
+          mutantResultSha256: mutantCompleted.resultPublication.sha256,
+          mutantTerminalSha256: scenario.id === "mutant-predecessor"
+            ? baselineCompleted.terminalPublication.sha256
+            : mutantCompleted.terminalPublication.sha256,
+        };
+        if (scenario.id === "candidate-postcheck-value") {
+          postcheckRequest.candidateSubject = otherCandidateSubject;
+        } else if (scenario.id === "candidate-postcheck-absent") {
+          delete postcheckRequest.candidateSubject;
+        }
         const postcheckSubject = workspace.createKnockoutWorkerSubject({
           operation: workspace.KNOCKOUT_WORKER_OPERATIONS.OBSERVE_KNOCKOUT_POSTCHECK,
-          request: {
-            ...mutantRequest,
-            baselineResultSha256: baselineCompleted.resultPublication.sha256,
-            mutant: requestedMutant,
-            mutantResultSha256: mutantCompleted.resultPublication.sha256,
-            mutantTerminalSha256: scenario.id === "mutant-predecessor"
-              ? baselineCompleted.terminalPublication.sha256
-              : mutantCompleted.terminalPublication.sha256,
-          },
+          request: postcheckRequest,
           workerSha256,
         });
         const refused = startArm(`${scenario.id}-postcheck`, "POSTCHECK", postcheckSubject);
@@ -12015,10 +12239,10 @@ test("Phase 2 refuses forged cross-phase result, wire, and predecessor reference
       removeFixturePath(fixture.source);
       removeFixturePath(fixture.custody);
     }
-  }
-});
+  });
+}
 
-test("Phase 2 setup-integrity credit waits for a fresh pristine POSTCHECK arm", async () => {
+test("Phase 2 setup-integrity credit waits for a fresh pristine POSTCHECK arm with one exact candidate", async () => {
   const fixture = minimalCaptureFixture("phase2-runner-postcheck");
   const baselineCasePlanSha256 = "a".repeat(64);
   const mutatedCasePlanSha256 = "b".repeat(64);
@@ -12033,6 +12257,7 @@ test("Phase 2 setup-integrity credit waits for a fresh pristine POSTCHECK arm", 
     kind: "gate",
     gateId: "fixture-setup-gate",
     expectedGateFindings: [{ rule: "SELFTEST", subject: "fixture setup plan" }],
+    expectedGateProvenance: knockoutRunner.BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION,
     expectedSetupIntegrity: {
       baselineCaseCount: 1,
       baselineCasePlanSha256,
@@ -12044,7 +12269,7 @@ test("Phase 2 setup-integrity credit waits for a fresh pristine POSTCHECK arm", 
       terminalProtocol: "noa-boundary-arm-terminal/1",
       terminalStatus: "SETUP_FAILED",
     },
-    suite: [".", "node", ["fixture-setup-gate.mjs"]],
+    suite: [".", "node", ["scripts/lint-boundary.mjs"]],
   };
   try {
     installPhase2RunnerFixture(fixture.source, "install setup-integrity runner closure");
@@ -12054,10 +12279,11 @@ test("Phase 2 setup-integrity credit waits for a fresh pristine POSTCHECK arm", 
       { mode: 0o600 },
     );
     fs.writeFileSync(
-      path.join(fixture.source, "fixture-setup-gate.mjs"),
+      path.join(fixture.source, "scripts", "lint-boundary.mjs"),
       [
-        "import { caseId } from './control.mjs';",
-        "import { emitGateEvidence } from './scripts/lib/gate-event-contract.mjs';",
+        "import fs from 'node:fs';",
+        "import { caseId } from '../control.mjs';",
+        ...fixtureBoundaryGatePrelude(),
         `const baseline = ${JSON.stringify(from)};`,
         `const baselineDigest = ${JSON.stringify(baselineCasePlanSha256)};`,
         `const mutantDigest = ${JSON.stringify(mutatedCasePlanSha256)};`,
@@ -12075,7 +12301,10 @@ test("Phase 2 setup-integrity credit waits for a fresh pristine POSTCHECK arm", 
         "  diagnosticPlannedCaseCount: 1, duplicateCaseCount: 0, missingCaseIds: [],",
         "  reviewedCasePlanSha256: baselineDigest, unexpectedCaseCount: 0,",
         "});",
-        "emitGateEvidence('fixture-setup-gate', mutated ? [{ rule: 'SELFTEST', subject: 'fixture setup plan', detail }] : []);",
+        "emitProvenanceBoundGateEvidence('fixture-setup-gate', mutated ? [{ rule: 'SELFTEST', subject: 'fixture setup plan', detail }] : [], {",
+        "  ...provenance, subject: bootstrap.candidateSubject,",
+        "  controlManifestDigest: crypto.createHash('sha256').update(fs.readFileSync('control.mjs')).digest('hex'),",
+        "});",
         "process.exitCode = mutated ? 2 : 0;",
         "",
       ].join("\n"),
@@ -12085,10 +12314,17 @@ test("Phase 2 setup-integrity credit waits for a fresh pristine POSTCHECK arm", 
     git(fixture.source, ["add", "--all"]);
     git(fixture.source, ["commit", "-q", "-m", "add isolated setup-integrity fixture"]);
 
+    const candidateSubject = {
+      archiveSha256: sha256File(path.join(fixture.source, "control.mjs")),
+      commit: git(fixture.source, ["rev-parse", "HEAD"]).trim(),
+      repository: "fixture/setup-integrity-candidate",
+      tree: git(fixture.source, ["rev-parse", "HEAD^{tree}"]).trim(),
+    };
     const statusBefore = git(fixture.source, ["status", "--porcelain=v1", "-z"]);
     const indexBefore = sha256File(path.join(fixture.source, ".git", "index"));
     const controlBefore = sha256File(path.join(fixture.source, "control.mjs"));
     const sweep = await knockoutRunner.runIsolatedKnockoutSweep({
+      candidateSubject,
       captureTimeoutMs: workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS,
       custodyRoot: fixture.custody,
       maxRetainedArms: 4,
@@ -12106,6 +12342,14 @@ test("Phase 2 setup-integrity credit waits for a fresh pristine POSTCHECK arm", 
     assert.ok(result !== undefined);
     assert.ok(mutant !== undefined);
     assert.equal(result.verdict, "DETECTOR_TRIGGERED");
+    const evidence = result as unknown as {
+      baselineGateProvenance: { subject: unknown };
+      mutatedGateProvenance: { subject: unknown };
+      postRestoreGateProvenance: { subject: unknown };
+    };
+    for (const observed of [
+      evidence.baselineGateProvenance, evidence.mutatedGateProvenance, evidence.postRestoreGateProvenance,
+    ]) assert.deepEqual(observed.subject, candidateSubject);
     assert.equal(result.restored, false);
     assert.equal(result.workspaceDisposition, "RETAINED_DISPOSABLE_MUTANT");
     assert.equal((result as { postRestoreBaselineVerified?: unknown }).postRestoreBaselineVerified, true);

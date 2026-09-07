@@ -716,7 +716,13 @@ const KNOCKOUTS = [
     file: "scripts/lib/boundary-bootstrap.mjs",
     find: '  "scripts/lib/publish-artifact-executor.mjs",',
     replace: "  // knockout: omit immutable publish-artifact executor from reviewed controls",
-    kind: "tests",
+    kind: "gate",
+    gateId: "boundary-selftest",
+    expectedGateProvenance: BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION,
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "authenticated carrier closures include the immutable publish-artifact executor",
+    }],
     suite: [".", "node", ["scripts/lint-boundary.mjs", "--selftest", "--knockout-json"]],
   },
   {
@@ -900,7 +906,7 @@ const KNOCKOUTS = [
     find: 'export function buildBoundaryPrePushArgs({ destination, remoteGitDir, root, remote }) {\n  return Object.freeze([\n    join(root, "scripts", "lint-boundary.mjs"),\n    "--explain",\n    "--knockout-json",\n    "--tier", "a",',
     replace: 'export function buildBoundaryPrePushArgs({ destination, remoteGitDir, root, remote }) {\n  return Object.freeze([\n    join(root, "scripts", "lint-boundary.mjs"),\n    "--explain",\n    "--knockout-json",\n    "--tier", "ab",',
     kind: "tests",
-    suite: [".", "node", ["scripts/pre-push-gate.mjs", "--selftest"]],
+    suite: [".", "node", ["--test", "scripts/pre-push-gate.selftest.mjs"]],
   },
   {
     id: "boundary-bootstrap-binds-exact-lock-digest",
@@ -4553,8 +4559,12 @@ if (DIRECT_ENTRY) {
       captureTimeoutMs: ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS.captureTimeoutMs,
       maxRetainedArms: KNOCKOUT_WORKSPACE_ARM_LIMITS.maxRetainedArms,
       maxRetainedBytes: KNOCKOUT_WORKSPACE_ARM_LIMITS.maxRetainedBytes,
-      onProgress: ({ completed, id, total, verdict }) => {
+      onProgress: ({ completed, detail, id, suite, total, verdict }) => {
         process.stdout.write(`  progress ${shardLabel}${completed}/${total} ${verdict} ${id}\n`);
+        // Preserve the completed control's diagnostic even if a later arm or the job times out.
+        process.stdout.write(`  progress-detail ${JSON.stringify({
+          completed, detail, id, shard: SHARD, suite, total, verdict,
+        })}\n`);
       },
       rawDependenciesByEntry,
       registry: KNOCKOUTS,

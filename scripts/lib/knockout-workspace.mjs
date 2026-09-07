@@ -181,9 +181,13 @@ const ARM_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const ARM_EVIDENCE_RESERVE_BYTES = 4 * MIB;
 const COOPERATIVE_SOURCE_LEASE_DEFAULT_HANDSHAKE_MS = 5_000;
 const COOPERATIVE_SOURCE_LEASE_MAX_CONTROL_BYTES = 64 * 1024;
-const MAX_WORKER_SUBJECT_BYTES = 32 * 1024;
-const MAX_WORKER_CAPABILITY_BYTES = 64 * 1024;
+const MAX_WORKER_SUBJECT_METADATA_BYTES = 32 * 1024;
+const MAX_WORKER_CAPABILITY_METADATA_BYTES = 64 * 1024;
 const MAX_WORKER_RESULT_BYTES = 512 * 1024;
+// POSTCHECK carries both previously admitted result wires. Their transport allowance must not
+// consume the original metadata budgets or relax either individual result's fixed ceiling.
+const MAX_WORKER_SUBJECT_BYTES = MAX_WORKER_SUBJECT_METADATA_BYTES + 2 * MAX_WORKER_RESULT_BYTES;
+const MAX_WORKER_CAPABILITY_BYTES = MAX_WORKER_CAPABILITY_METADATA_BYTES + 2 * MAX_WORKER_RESULT_BYTES;
 const MAX_WORKER_DIAGNOSTIC_BYTES = 512 * 1024;
 export const KNOCKOUT_WORKER_RELATIVE_PATH = "scripts/lib/knockout-workspace-worker.mjs";
 const ARM_WORKER_RELATIVE_PATH = KNOCKOUT_WORKER_RELATIVE_PATH;
@@ -1567,6 +1571,34 @@ function validateWorkerSubjectValue(value, expectedSha256 = null) {
   if (relativePath !== subject.worker.path) {
     fail(KNOCKOUT_WORKSPACE_ERROR_CODES.CAPABILITY_INVALID, "worker subject executable path is not canonical");
   }
+  const evidenceFields = subject.operation === KNOCKOUT_WORKER_OPERATIONS.RUN_KNOCKOUT
+    ? ["baseline"]
+    : subject.operation === KNOCKOUT_WORKER_OPERATIONS.OBSERVE_KNOCKOUT_POSTCHECK
+      ? ["baseline", "mutant"]
+      : [];
+  const metadataRequest = { ...subject.request };
+  for (const field of evidenceFields) {
+    const wireBytes = canonicalJsonBytes(subject.request[field]);
+    if (wireBytes.length > MAX_WORKER_RESULT_BYTES) {
+      fail(
+        KNOCKOUT_WORKSPACE_ERROR_CODES.RESOURCE_LIMIT_EXCEEDED,
+        `worker subject ${field} wire exceeds the fixed result byte limit`,
+        { limitBytes: MAX_WORKER_RESULT_BYTES, observedBytes: wireBytes.length },
+      );
+    }
+    metadataRequest[field] = null;
+  }
+  // This projection is for size accounting only. Authority and evidence still bind the complete
+  // unprojected subject below, including every byte of both retained result wires.
+  const metadataSubject = Object.freeze({ ...subject, request: Object.freeze(metadataRequest) });
+  const metadataBytes = canonicalJsonBytes(metadataSubject);
+  if (metadataBytes.length > MAX_WORKER_SUBJECT_METADATA_BYTES) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.RESOURCE_LIMIT_EXCEEDED,
+      "worker subject metadata exceeds its fixed byte limit",
+      { limitBytes: MAX_WORKER_SUBJECT_METADATA_BYTES, observedBytes: metadataBytes.length },
+    );
+  }
   const bytes = canonicalJsonBytes(subject);
   if (bytes.length > MAX_WORKER_SUBJECT_BYTES) {
     fail(
@@ -1583,7 +1615,7 @@ function validateWorkerSubjectValue(value, expectedSha256 = null) {
       { expected: expectedSha256, observed: subjectSha256 },
     );
   }
-  return Object.freeze({ bytes, subject, subjectSha256, workerRelativePath: relativePath });
+  return Object.freeze({ bytes, metadataSubject, subject, subjectSha256, workerRelativePath: relativePath });
 }
 
 function workerInitialWorkspaceSummary(census) {
@@ -1657,6 +1689,14 @@ function validateWorkerCapabilityBytes(bytes) {
     fail(KNOCKOUT_WORKSPACE_ERROR_CODES.CAPABILITY_INVALID, "worker capability arm topology is malformed");
   }
   const subject = validateWorkerSubjectValue(capability.subject, capability.subjectSha256);
+  const metadataBytes = canonicalJsonBytes({ ...capability, subject: subject.metadataSubject });
+  if (metadataBytes.length > MAX_WORKER_CAPABILITY_METADATA_BYTES) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.RESOURCE_LIMIT_EXCEEDED,
+      "worker capability metadata exceeds its fixed byte limit",
+      { limitBytes: MAX_WORKER_CAPABILITY_METADATA_BYTES, observedBytes: metadataBytes.length },
+    );
+  }
   const limits = normalizeCaptureLimits(capability.limits);
   const unsigned = { ...capability };
   delete unsigned.workerCapabilitySha256;
@@ -15155,7 +15195,7 @@ function validateWorkerEvidenceReferences(
     operation !== KNOCKOUT_WORKER_OPERATIONS.RUN_KNOCKOUT &&
     operation !== KNOCKOUT_WORKER_OPERATIONS.OBSERVE_KNOCKOUT_POSTCHECK
   ) return;
-  completedReferencedWorkerRecord(custodyState, {
+  const baselineRecord = completedReferencedWorkerRecord(custodyState, {
     expectedOperation: KNOCKOUT_WORKER_OPERATIONS.OBSERVE_KNOCKOUT_BASELINE,
     expectedRole: "BASELINE",
     operationBudget,
@@ -15164,6 +15204,20 @@ function validateWorkerEvidenceReferences(
     wire: request.baseline,
     wireField: "baseline",
   });
+  const baselineRequest = baselineRecord.workerCapability?.subject?.request;
+  const candidateSubjectKeys = Object.hasOwn(request, "candidateSubject")
+    ? ["candidateSubject"] : [];
+  if (
+    baselineRequest === null || typeof baselineRequest !== "object" || Array.isArray(baselineRequest) ||
+    Object.hasOwn(baselineRequest, "candidateSubject") !== Object.hasOwn(request, "candidateSubject") ||
+    candidateSubjectKeys.some((key) =>
+      !canonicalJsonBytes(baselineRequest[key]).equals(canonicalJsonBytes(request[key])))
+  ) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.CAPABILITY_INVALID,
+      "worker request does not preserve the exact baseline candidate subject",
+    );
+  }
   if (operation !== KNOCKOUT_WORKER_OPERATIONS.OBSERVE_KNOCKOUT_POSTCHECK) return;
   if (request.mutantTerminalSha256 !== predecessorTerminalSha256) {
     fail(
@@ -15187,10 +15241,11 @@ function validateWorkerEvidenceReferences(
   const mutantRequest = mutantRecord.workerCapability?.subject?.request;
   const sharedRequestKeys = [
     "baseline", "baselineResultSha256", "baselineTerminalSha256", "dependencies", "entry",
-    "pairedEntry", "registrySha256", "suiteTimeoutMs",
+    "pairedEntry", "registrySha256", "suiteTimeoutMs", ...candidateSubjectKeys,
   ];
   if (
     mutantRequest === null || typeof mutantRequest !== "object" || Array.isArray(mutantRequest) ||
+    Object.hasOwn(mutantRequest, "candidateSubject") !== Object.hasOwn(request, "candidateSubject") ||
     sharedRequestKeys.some((key) =>
       !canonicalJsonBytes(mutantRequest[key]).equals(canonicalJsonBytes(request[key])))
   ) {

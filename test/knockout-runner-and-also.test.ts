@@ -237,6 +237,41 @@ test("a missing andAlso id errors loudly before a suite can run", () => {
   );
 });
 
+test("direct node test entries reject invalid evidence commands at registry load", () => {
+  const [entry] = registry();
+  for (const command of ["node", process.execPath]) {
+    for (const args of [
+      ["suite.mjs", "--selftest"],
+      ["--test", "--test", "suite.mjs"],
+      ["--test", "--test-reporter=tap", "suite.mjs"],
+    ]) {
+      assert.throws(
+        () => validateKnockoutRegistry([{
+          ...entry, andAlso: undefined, suite: [".", command, args],
+        }]),
+        /invalid knockout entry "primary": direct test command:/,
+        JSON.stringify({ command, args }),
+      );
+    }
+  }
+});
+
+test("direct node test registry admission preserves supported source-map and TypeScript arguments", () => {
+  const [entry] = registry();
+  for (const command of ["node", process.execPath]) {
+    for (const args of [
+      ["--test", "suite.mjs"],
+      ["--enable-source-maps", "--test", "suite.mjs"],
+      ["--import", "tsx", "--test", "suite.ts"],
+      ["--enable-source-maps", "--import", "tsx", "--test", "suite.ts"],
+    ]) {
+      assert.equal(validateKnockoutRegistry([{
+        ...entry, andAlso: undefined, suite: [".", command, args],
+      }]).size, 1);
+    }
+  }
+});
+
 test("required values and nested also edits use closed schemas too", () => {
   const [entry, companion] = registry();
   assert.throws(

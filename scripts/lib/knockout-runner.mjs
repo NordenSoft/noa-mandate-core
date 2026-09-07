@@ -372,6 +372,18 @@ export function validateKnockoutRegistry(registry) {
           `got ${JSON.stringify(entry.kind)}`,
       );
     }
+    if (entry.kind === "tests" && (
+      entry.suite[1] === "node" || path.resolve(entry.suite[1]) === path.resolve(process.execPath)
+    )) {
+      try { assertDirectTestArgs(entry.suite[2]); }
+      catch (error) {
+        throw new Error(
+          `invalid knockout entry ${JSON.stringify(entry.id)}: direct test command: ` +
+            (error instanceof Error ? error.message : String(error)),
+          { cause: error },
+        );
+      }
+    }
     if (entry.companionFile !== undefined && (
       typeof entry.companionFile !== "string" || entry.companionFile.length === 0
     )) {
@@ -6876,7 +6888,7 @@ export async function runIsolatedKnockoutSweep({
         throw isolatedSweepFailure("BASELINE_MISSING", `no baseline exists for ${entry.id}`);
       }
       if (baseline.observation.timedOut) {
-        results.push(Object.freeze({
+        const result = Object.freeze({
           control: entry.control,
           detail: "the suite's CLEAN baseline timed out, so no mutation result from it can mean anything",
           file: entry.file,
@@ -6884,10 +6896,13 @@ export async function runIsolatedKnockoutSweep({
           restored: true,
           suite: entry.suite[0],
           verdict: VERDICT.INVALID_TEST,
-        }));
+        });
+        results.push(result);
         onProgress?.(Object.freeze({
           completed: index + 1,
+          detail: result.detail,
           id: entry.id,
+          suite: entry.suite,
           total: selectedEntries.length,
           verdict: VERDICT.INVALID_TEST,
         }));
@@ -7000,7 +7015,9 @@ export async function runIsolatedKnockoutSweep({
       results.push(result);
       onProgress?.(Object.freeze({
         completed: index + 1,
+        detail: result.detail ?? null,
         id: entry.id,
+        suite: entry.suite,
         total: selectedEntries.length,
         verdict: result.verdict,
       }));

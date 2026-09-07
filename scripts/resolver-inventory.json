@@ -1457,6 +1457,7 @@
     "test/policy/compliance.test.ts": "root kernel tests: string-keyring consumers",
     "test/roundtrip.test.ts": "root kernel tests: string-keyring consumers",
     "test/security/bytes-boundary.test.ts": "root kernel tests: string-keyring consumers",
+    "test/security/entry-point-coverage.test.ts": "root kernel C2 entry-point coverage test: passes the encoded empty object as verifyHistoricalChain's keyring option so the first argument reaches the bytes boundary, and probes resolveVerificationKey directly. It constructs no KeyEntry or anchored resolver; this is a root-kernel test consumer/probe.",
     "test/security/intrinsic-poisoning.test.ts": "root kernel tests: string-keyring consumers",
     "test/security/r4-iterator-regressions.test.ts": "root kernel tests: string-keyring consumers",
     "test/security/r7-exploits/c01_buffer.mjs": "root kernel tests: string-keyring consumers",

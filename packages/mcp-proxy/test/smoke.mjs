@@ -1983,7 +1983,8 @@ async function main() {
   });
   ok(
     "(x) a lifecycle entry missing retiredAt is refused",
-    malformedLifecycleResultX.ok === false && /must contain exactly publicKey \+ retiredAt/.test(malformedLifecycleResultX.reason ?? ""),
+    malformedLifecycleResultX.ok === false
+      && malformedLifecycleResultX.reason === `lifecycle entry for signing key ${JSON.stringify(kpXb.kid)} must contain publicKey + retiredAt and only the optional validFrom`,
   );
 
   const originalFreezeX = Object.freeze;
