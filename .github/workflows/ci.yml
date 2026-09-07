@@ -679,15 +679,13 @@ jobs:
     # still runs on both legs. A knockout mutates SOURCE and re-runs a suite, so a second Node
     # version re-answers a question nobody asked; the sweep is measured once, on 22, as before.
     #
-    # MEASURED AGAIN, run 32970658593 at b6b3489: the 8-way split put 26 controls in shard 6/8.
-    # The first 16 were DETECTOR_TRIGGERED, but the job hit its 60-minute ceiling before 17/26, so
-    # ten experiments were cancelled rather than measured. The containment selftest is intentionally
-    # part of every arm and now makes those controls roughly three minutes each. Sixteen legs split
-    # that exact contiguous heavy slice into 13 + 13 while still deriving every id from the registry;
-    # that observed 13-control prefix plus setup took about 47 minutes; the 16-way split projects
-    # the same worst contiguous slice inside the existing per-job budget.
+    # Run 34087458630 at 6ba13d3: fourteen of these sixteen legs reached the 60-minute ceiling.
+    # Each leg's observed setup, first result and later intervals project up to 156 minutes;
+    # adding one existing 20-minute worker envelope fits inside a 180-minute job allowance.
+    # Keep the sixteen-way partition, every registry control and all per-arm deadlines unchanged.
+    # This estimate comes from partial progress; complete current-run results remain required.
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
     strategy:
       # fail-fast DEFAULTS TO TRUE, which would cancel every queued and in-progress sibling the
       # moment one shard reports a finding — turning one red control into however many controls the
