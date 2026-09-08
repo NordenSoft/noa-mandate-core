@@ -707,6 +707,8 @@ function proofIdsFor(entry) {
  * a `find` that stops matching means the control moved and this entry has rotted (which is itself
  * reported, so the registry cannot silently stop describing the code).
  */
+// Bootstrap controls select their existing portable detector inside the closed observer. The full
+// unfiltered bootstrap suite, including real tarball packing, remains a Node 22 host CI gate.
 const KNOCKOUTS = [
   {
     id: "boundary-reviewed-controls-carry-publish-artifact-executor",
@@ -753,7 +755,10 @@ const KNOCKOUTS = [
     find: '  "scripts/lib/knockout-test-observer.mjs",',
     replace: "  // knockout: omit the machine-evidence observer from reviewed control closure",
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^reviewed controls close every local worker and provenance-required boundary suite$",
+      "--test", "scripts/lib/boundary-bootstrap.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-reviewed-controls-close-transitive-sealed-workers",
@@ -764,7 +769,10 @@ const KNOCKOUTS = [
     find: '  "scripts/lib/proof-event-reporter.mjs",',
     replace: "  // knockout: omit the reporter sealed by the proof event contract",
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^reviewed controls close every local worker and provenance-required boundary suite$",
+      "--test", "scripts/lib/boundary-bootstrap.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-spool-cleanup-follows-canonical-evidence-version",
@@ -870,10 +878,13 @@ const KNOCKOUTS = [
       "The scanner obtains reviewed runtime authority only through the stdlib bootstrap after exact candidate, " +
       "manifest, lock, attestation, and runtime-byte verification; removing that call bypasses verification.",
     file: "scripts/lib/boundary-scan.mjs",
-    find: "const { authority: boundaryScannerAuthority } = await loadTrustedTypeScript();",
+    find: "const { authority: boundaryScannerAuthority, typescript: ts } = await loadTrustedTypeScript();",
     replace: "const { default: ts } = await import(\"typescript\");\nconst boundaryScannerAuthority = null;",
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^all parser-backed routes carry bootstrap and candidate bootstrap has no key discovery$",
+      "--test", "scripts/lib/boundary-bootstrap.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-candidate-tier-a-route-is-explicit",
@@ -884,7 +895,10 @@ const KNOCKOUTS = [
     find: "  if (candidateTierANonAuthority) {\n    armCandidateTierANonAuthorityBootstrap({ root: ROOT });",
     replace: "  if (false) {\n    armCandidateTierANonAuthorityBootstrap({ root: ROOT });",
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^isolated knockout bootstrap is direct-pipe-bound, remote-free, and fail-closed$",
+      "--test", "scripts/lib/boundary-bootstrap.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-candidate-tier-a-result-remains-non-authority",
@@ -895,7 +909,10 @@ const KNOCKOUTS = [
     find: '  "CANDIDATE_TIER_A_RESULT_IS_NOT_N_MINUS_1_TIER_B_OR_RELEASE_AUTHORITY";',
     replace: '  "CANDIDATE_TIER_A_RELEASE_AUTHORITY";',
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^all parser-backed routes carry bootstrap and candidate bootstrap has no key discovery$",
+      "--test", "scripts/lib/boundary-bootstrap.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-prepush-command-selects-tier-a",
@@ -917,7 +934,10 @@ const KNOCKOUTS = [
     find: "  if (!exactHex(sha256(lockBytes), attestation.lock.sha256)) {",
     replace: "  if (false) {",
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^lock, attestation, parser-byte, and parser-symlink drift fail before parser top level$",
+      "--test", "scripts/lib/boundary-bootstrap.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-bootstrap-binds-parser-runtime-bytes",
@@ -928,7 +948,10 @@ const KNOCKOUTS = [
     find: "    if (bytes.length !== file.byteLength || !exactHex(sha256(bytes), file.sha256)) {",
     replace: "    if (false) {",
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^lock, attestation, parser-byte, and parser-symlink drift fail before parser top level$",
+      "--test", "scripts/lib/boundary-bootstrap.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-candidate-bootstrap-refuses-key-discovery",
@@ -939,7 +962,10 @@ const KNOCKOUTS = [
     find: 'import { spawnSync } from "node:child_process";',
     replace: 'import { spawnSync } from "node:child_process";\nimport { homedir } from "node:os";',
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^all parser-backed routes carry bootstrap and candidate bootstrap has no key discovery$",
+      "--test", "scripts/lib/boundary-bootstrap.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-historical-registry-remains-exact-seven",
@@ -950,7 +976,10 @@ const KNOCKOUTS = [
     find: '  "scripts/lint-boundary.mjs",\n  "scripts/pre-push-gate.mjs",\n]);\n\nexport const REVIEWED_CONTROL_PATHS',
     replace: '  "scripts/lint-boundary.mjs",\n  // knockout: historical pre-push gate omitted\n]);\n\nexport const REVIEWED_CONTROL_PATHS',
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^all parser-backed routes carry bootstrap and candidate bootstrap has no key discovery$",
+      "--test", "scripts/lib/boundary-bootstrap.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-authority-closure-carries-prepush-baseline",
@@ -961,7 +990,10 @@ const KNOCKOUTS = [
     find: '  "scripts/prepush-baseline.json",',
     replace: "  // knockout: omit exact pre-push baseline",
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^all parser-backed routes carry bootstrap and candidate bootstrap has no key discovery$",
+      "--test", "scripts/lib/boundary-bootstrap.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-authority-closure-carries-tier-a-workflow",
@@ -972,7 +1004,10 @@ const KNOCKOUTS = [
     find: '  ".github/workflows/boundary.yml",',
     replace: "  // knockout: omit credential-free Tier-A workflow",
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^all parser-backed routes carry bootstrap and candidate bootstrap has no key discovery$",
+      "--test", "scripts/lib/boundary-bootstrap.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-authority-closure-carries-committed-hook",
@@ -983,7 +1018,10 @@ const KNOCKOUTS = [
     find: '  "scripts/hooks/pre-push",',
     replace: "  // knockout: omit committed pre-push hook",
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^all parser-backed routes carry bootstrap and candidate bootstrap has no key discovery$",
+      "--test", "scripts/lib/boundary-bootstrap.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-authority-closure-carries-knockout-runner",
@@ -994,7 +1032,10 @@ const KNOCKOUTS = [
     find: '  "scripts/lib/knockout-runner.mjs",',
     replace: "  // knockout: omit exact knockout runner",
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^all parser-backed routes carry bootstrap and candidate bootstrap has no key discovery$",
+      "--test", "scripts/lib/boundary-bootstrap.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-authority-closure-carries-publish-selftest",
@@ -1005,7 +1046,10 @@ const KNOCKOUTS = [
     find: '  "scripts/stage-publish-artifacts.selftest.mjs",',
     replace: "  // knockout: omit exact publish-artifact selftest",
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^all parser-backed routes carry bootstrap and candidate bootstrap has no key discovery$",
+      "--test", "scripts/lib/boundary-bootstrap.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-recovery-pre-effect-receipt-precedes-delete",
@@ -2402,7 +2446,7 @@ const KNOCKOUTS = [
     gateId: "knockout-selftest",
     expectedGateFindings: [{
       rule: "SELFTEST",
-      subject: "contained gate children bind their writable private scratch root",
+      subject: "contained gate children bind their writable isolated scratch root",
     }],
     suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
   },
@@ -2772,10 +2816,10 @@ const KNOCKOUTS = [
   },
   {
     id: "k4-gate-evidence-only-terminal-step-counts",
-    control: "L4 evidence integrity — only the DESIGNATED terminal step of a decomposed gate script may supply the gate record. The catch that handles a non-zero exit cannot see which step threw; assigning its stdout unconditionally let a preparation step print a terminal record, exit 1, and be read back as a complete protocol with an identity and findings for a terminal step that never executed.",
+    control: "L4 evidence integrity — only the DESIGNATED terminal step of a decomposed gate script may supply the gate record. Each direct child returns its stdout, stderr, and exit status; assigning preparation output to the machine-evidence fields before handling a non-zero status would credit a forged terminal record for a terminal step that never executed.",
     file: "scripts/lib/knockout-runner.mjs",
-    find: "    machineOutput = executingTerminalGateStep ? String(e.stdout ?? \"\") : \"\";",
-    replace: "    machineOutput = String(e.stdout ?? \"\");",
+    find: "        if (isEvidence) {\n          machineOutput = stepOutput;\n          machineDiagnostics = stepDiagnostics;\n        }",
+    replace: "        machineOutput = stepOutput;\n        machineDiagnostics = stepDiagnostics;",
     kind: "gate",
     gateId: "knockout-selftest",
     expectedGateFindings: [{

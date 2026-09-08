@@ -404,6 +404,33 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
+      - name: Full boundary bootstrap and host packer integration
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 22 }}
+        # Knockout observers select portable authored tests inside their closed containers. Keep
+        # the complete unfiltered suite here, where the real pinned packer has Docker access.
+        env:
+          NODE_OPTIONS: ""
+          NODE_REPL_EXTERNAL_MODULE: ""
+          npm_config_node_options: ""
+          npm_config_script_shell: ""
+          npm_config_shell: ""
+          BASH_ENV: ""
+          ENV: ""
+          SHELLOPTS: ""
+          DYLD_INSERT_LIBRARIES: ""
+          DYLD_LIBRARY_PATH: "/nonexistent"
+          DYLD_FRAMEWORK_PATH: "/nonexistent"
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: "/nonexistent"
+          LD_AUDIT: ""
+        run: |
+          /usr/bin/env -u NODE_OPTIONS -u NODE_REPL_EXTERNAL_MODULE -u npm_config_node_options -u npm_config_script_shell -u npm_config_shell -u BASH_ENV -u ENV -u SHELLOPTS -u DYLD_INSERT_LIBRARIES -u DYLD_LIBRARY_PATH -u DYLD_FRAMEWORK_PATH -u LD_PRELOAD -u LD_LIBRARY_PATH -u LD_AUDIT node scripts/lib/knockout-runner.mjs --launch-evidence node --input-type=module --eval '
+            import { execFileSync } from "node:child_process";
+            import { fixedDockerExecutable } from "./scripts/lib/knockout-runner.mjs";
+            import { NODE_IMAGE } from "./scripts/lib/publish-artifact-staging.mjs";
+            execFileSync(fixedDockerExecutable(), ["pull", NODE_IMAGE], { stdio: "inherit" });
+            execFileSync(process.execPath, ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"], { stdio: "inherit" });
+          '
       - name: Proof-runner reporter contract selftest (supported Node matrix)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # Machine evidence may not depend on Node's version/TTY-selected default reporter. This

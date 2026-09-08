@@ -867,9 +867,11 @@ test("isolated knockout bootstrap is direct-pipe-bound, remote-free, and fail-cl
     const scannerSelftestPath = join(root, "scripts", "lib", "boundary-scan.selftest.mjs");
     const nested = spawnSync(process.execPath, ["--input-type=module", "--eval", [
       `import { spawn, spawnSync } from "node:child_process";`,
+      `import { fstatSync, readFileSync } from "node:fs";`,
       `import { armCandidateTierANonAuthorityBootstrap, BOUNDARY_KNOCKOUT_BOOTSTRAP_ENV, prepareNestedBoundaryScannerSelftestBootstrap } from ${JSON.stringify(bootstrapUrl)};`,
       `armCandidateTierANonAuthorityBootstrap({ root: ${JSON.stringify(root)} });`,
       `const { boundaryScannerAuthority } = await import(${JSON.stringify(scannerUrl)});`,
+      `const stdinReservation = { characterDevice: fstatSync(0).isCharacterDevice(), remainingBytes: readFileSync(0).length };`,
       `const nestedBootstrapIssuer = prepareNestedBoundaryScannerSelftestBootstrap(boundaryScannerAuthority);`,
       `let reuseCode = null;`,
       `try { prepareNestedBoundaryScannerSelftestBootstrap(boundaryScannerAuthority); } catch (error) { reuseCode = error?.code ?? null; }`,
@@ -893,7 +895,7 @@ test("isolated knockout bootstrap is direct-pipe-bound, remote-free, and fail-cl
       `child.stdin.end(nestedBootstrap);`,
       `const replayChild = spawnSync(process.execPath, [${JSON.stringify(scannerSelftestPath)}], { cwd: ${JSON.stringify(root)}, encoding: "utf8", env: childEnvironment, input: nestedBootstrap, shell: false });`,
       `const childStatus = await childClosed;`,
-      `process.stdout.write(JSON.stringify({ childStatus, childStderr: childStderr.slice(-1000), childSummary: childStdout.includes("151 caught, 62 let through, 19 rules armed"), fakeAuthorityRejected, nestedAudiencePid: nestedDocument.audiencePid, nestedSubject: nestedDocument.candidateSubject, replayStderr: String(replayChild.stderr ?? "").slice(-1000), replayStatus: replayChild.status, reuseCode }));`,
+      `process.stdout.write(JSON.stringify({ childStatus, childStderr: childStderr.slice(-1000), childSummary: childStdout.includes("151 caught, 62 let through, 19 rules armed"), fakeAuthorityRejected, nestedAudiencePid: nestedDocument.audiencePid, nestedSubject: nestedDocument.candidateSubject, replayStderr: String(replayChild.stderr ?? "").slice(-1000), replayStatus: replayChild.status, reuseCode, stdinReservation }));`,
     ].join("\n")], {
       cwd: root,
       encoding: "utf8",
@@ -903,6 +905,7 @@ test("isolated knockout bootstrap is direct-pipe-bound, remote-free, and fail-cl
     });
     assert.equal(nested.status, 0, `${nested.stdout}\n${nested.stderr}`);
     const nestedEvidence = JSON.parse(nested.stdout);
+    assert.deepEqual(nestedEvidence.stdinReservation, { characterDevice: true, remainingBytes: 0 });
     assert.equal(nestedEvidence.childStatus, 0, nestedEvidence.childStderr);
     assert.equal(nestedEvidence.childSummary, true);
     assert.equal(nestedEvidence.fakeAuthorityRejected, true);
@@ -1020,6 +1023,88 @@ test("isolated knockout bootstrap is direct-pipe-bound, remote-free, and fail-cl
     assert.doesNotMatch(wrongDescriptor.stdout, /BOUNDARY_BOOTSTRAP_AUTHORIZATION_FD_MISSING/);
   } finally {
     rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("isolated knockout bootstrap refuses indeterminate stdin closure or reservation without reusing descriptors", () => {
+  const bootstrapUrl = pathToFileURL(join(SOURCE_ROOT, "scripts", "lib", "boundary-bootstrap.mjs")).href;
+  const environment = { ...process.env, [BOUNDARY_KNOCKOUT_BOOTSTRAP_ENV]: "0" };
+  delete environment.NOA_BOUNDARY_AUTHORIZATION_FD;
+  delete environment.NOA_BOUNDARY_AUTHORIZATION_FILE;
+  for (const fault of ["close", "open", "occupied", "cleanup"]) {
+    const result = spawnSync(process.execPath, ["--input-type=module", "--eval", [
+      `import fs from "node:fs";`,
+      `import childProcess from "node:child_process";`,
+      `import { syncBuiltinESMExports } from "node:module";`,
+      `import { devNull } from "node:os";`,
+      `import { armCandidateTierANonAuthorityBootstrap, loadTrustedTypeScript } from ${JSON.stringify(bootstrapUrl)};`,
+      `const fault = ${JSON.stringify(fault)};`,
+      `const originalClose = fs.closeSync; const originalOpen = fs.openSync;`,
+      `const originalSpawn = childProcess.spawnSync;`,
+      `const closeCalls = []; const openCalls = []; const closeObservations = [];`,
+      `let reservedFd = null; let occupiedFd = null; let spawnCalls = 0; let code = null; let returnedAuthority = false;`,
+      `fs.closeSync = (fd) => {`,
+      `  if (fd === 0 || fd === reservedFd) {`,
+      `    closeCalls.push(fd);`,
+      `    if ((fault === "close" && fd === 0) || (fault === "cleanup" && fd === reservedFd)) throw new Error("injected close failure");`,
+      `  }`,
+      `  originalClose(fd);`,
+      // Observe the owned close synchronously: the async loader may later reuse the numeric FD.
+      `  if (fd === 0 || fd === reservedFd) {`,
+      `    let code = null; try { fs.fstatSync(fd); } catch (error) { code = error.code; }`,
+      `    closeObservations.push({ fd, code });`,
+      `  }`,
+      `  if (fd === 0 && (fault === "occupied" || fault === "cleanup")) occupiedFd = originalOpen(devNull, fs.constants.O_RDONLY);`,
+      `};`,
+      `fs.openSync = (path, flags, ...rest) => {`,
+      `  if (path !== devNull) return originalOpen(path, flags, ...rest);`,
+      `  openCalls.push({ path, flags });`,
+      `  if (fault === "open") throw new Error("injected open failure");`,
+      `  reservedFd = originalOpen(path, flags, ...rest);`,
+      `  return reservedFd;`,
+      `};`,
+      `childProcess.spawnSync = () => { spawnCalls += 1; throw new Error("bootstrap failure must precede child execution"); };`,
+      `syncBuiltinESMExports();`,
+      `armCandidateTierANonAuthorityBootstrap({ root: ${JSON.stringify(SOURCE_ROOT)} });`,
+      `try { await loadTrustedTypeScript({ root: ${JSON.stringify(SOURCE_ROOT)} }); returnedAuthority = true; }`,
+      `catch (error) { code = error.code ?? null; }`,
+      `fs.closeSync = originalClose; fs.openSync = originalOpen; childProcess.spawnSync = originalSpawn;`,
+      `syncBuiltinESMExports();`,
+      `const occupiedPreserved = occupiedFd === 0 && fs.fstatSync(0).isCharacterDevice();`,
+      `process.stdout.write(JSON.stringify({ code, closeCalls, closeObservations, openCalls, reservedFd, occupiedFd, occupiedPreserved, returnedAuthority, spawnCalls, markerConsumed: process.env.NOA_BOUNDARY_KNOCKOUT_CAPABILITY_FD === undefined, nullDevice: devNull, readOnly: fs.constants.O_RDONLY }));`,
+    ].join("\n")], {
+      cwd: SOURCE_ROOT,
+      encoding: "utf8",
+      env: environment,
+      // Cleanup failures must be terminal even before malformed bytes reach canonical parsing.
+      input: "{}\n",
+      shell: false,
+    });
+    assert.equal(result.error, undefined, fault);
+    assert.equal(result.signal, null, `${fault}: ${result.stderr}`);
+    assert.equal(result.status, 0, `${fault}: ${result.stdout}\n${result.stderr}`);
+    const observed = JSON.parse(result.stdout);
+    assert.equal(observed.code, fault === "close" || fault === "cleanup"
+      ? "BOUNDARY_BOOTSTRAP_DESCRIPTOR_CLOSE_FAILED"
+      : "BOUNDARY_BOOTSTRAP_STDIN_RESERVATION_FAILED", fault);
+    assert.equal(observed.returnedAuthority, false, fault);
+    assert.equal(observed.spawnCalls, 0, fault);
+    assert.equal(observed.markerConsumed, true, fault);
+    assert.deepEqual(observed.closeObservations, fault === "close" ? [] : [
+      { fd: 0, code: "EBADF" },
+      ...(fault === "occupied" ? [{ fd: observed.reservedFd, code: "EBADF" }] : []),
+    ], fault);
+    assert.deepEqual(observed.openCalls, fault === "close" ? []
+      : [{ path: observed.nullDevice, flags: observed.readOnly }], fault);
+    if (fault === "occupied" || fault === "cleanup") {
+      assert.equal(observed.occupiedFd, 0, fault);
+      assert.equal(observed.occupiedPreserved, true, fault);
+      assert.equal(observed.reservedFd > 2, true, fault);
+      assert.deepEqual(observed.closeCalls, [0, observed.reservedFd], fault);
+    } else {
+      assert.deepEqual(observed.closeCalls, [0], fault);
+      assert.equal(observed.reservedFd, null, fault);
+    }
   }
 });
 
@@ -1310,7 +1395,17 @@ test("all parser-backed routes carry bootstrap and candidate bootstrap has no ke
   );
   const lint = readFileSync(join(SOURCE_ROOT, "scripts", "lint-boundary.mjs"), "utf8");
   const rootPackage = JSON.parse(readFileSync(join(SOURCE_ROOT, "package.json"), "utf8"));
-  assert.doesNotMatch(bootstrap, /from\s+["']node:os["']/);
+  const bootstrapSource = ts.createSourceFile("boundary-bootstrap.mjs", bootstrap, ts.ScriptTarget.Latest, true);
+  const osImports = bootstrapSource.statements.filter((node) => ts.isImportDeclaration(node)
+    && ts.isStringLiteral(node.moduleSpecifier) && ["os", "node:os"].includes(node.moduleSpecifier.text));
+  assert.equal(osImports.length, 1);
+  assert.equal(osImports[0].moduleSpecifier.text, "node:os");
+  assert.equal(osImports[0].importClause?.name, undefined, "no default OS API may expose key discovery");
+  const osBindings = osImports[0].importClause?.namedBindings;
+  assert.equal(osBindings !== undefined && ts.isNamedImports(osBindings), true);
+  assert.deepEqual(osBindings.elements.map((binding) => ({
+    imported: (binding.propertyName ?? binding.name).text, local: binding.name.text,
+  })), [{ imported: "devNull", local: "devNull" }], "only the null-device constant is permitted");
   assert.doesNotMatch(bootstrap, /createHmac|\.noa-boundary|KEY_FILE|keyBytes/);
   assert.equal(BOUNDARY_AUTHORITY_CLASS_CANDIDATE_TIER_A, EXPECTED_CANDIDATE_AUTHORITY_CLASS);
   assert.equal(CANDIDATE_TIER_A_NON_AUTHORITY_NON_CLAIM, EXPECTED_CANDIDATE_NON_CLAIM);

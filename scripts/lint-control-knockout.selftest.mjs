@@ -316,6 +316,33 @@ check("the trusted npm-test grammar refuses shell composition and reporter subst
   } finally {
     fs.writeFileSync(manifestPath, original);
   }
+  const selector = "--test-name-pattern=^the guard is load-bearing$";
+  const selectedArgs = [selector, "--test", "suite.test.mjs"];
+  const [selectedStep] = trustedTestSteps(root, [".", "node", selectedArgs]);
+  assert.deepEqual(selectedStep, { cmd: process.execPath, args: selectedArgs, evidence: true });
+  for (const invalid of [
+    "the guard is load-bearing", "^$", "^the.*$", "^the.guard$", "^one|two$", "^(one)$",
+    "^[a-z]$", "^one{2}$", "^one+$", "^one?$", "^one\\s$", "^one\ntwo$",
+    `^${"a".repeat(201)}$`,
+  ]) {
+    assert.throws(() => trustedTestSteps(root, [".", "node", [
+      `--test-name-pattern=${invalid}`, "--test", "suite.test.mjs",
+    ]]), /unsupported option before --test/);
+  }
+  assert.throws(() => trustedTestSteps(root, [".", "node", [
+    selector, selector, "--test", "suite.test.mjs",
+  ]]), /unsupported option before --test/);
+  assert.throws(() => trustedTestSteps(root, [".", "node", [
+    "--test", selector, "suite.test.mjs",
+  ]]), /unsupported option after --test/);
+  assert.throws(() => trustedTestSteps(root, [".", "node", [
+    selector, "--test", "--test", "suite.test.mjs",
+  ]]), /exactly one --test/);
+  const selected = observeSuite(root, [".", "node", selectedArgs], 60_000, { kind: "tests" });
+  assert.equal(selected.exit, 0, selected.out);
+  assert.equal(selected.protocolComplete, true, selected.protocolError);
+  assert.equal(selected.testCount, 1);
+  assert.equal(selected.failing.size, 0);
 });
 
 check("contained TypeScript tests use the platform-neutral attested loader", () => {
@@ -648,12 +675,15 @@ function workflowSteps(file) {
     const line = lines[index];
     if (/^ {6}- /.test(line)) {
       if (current !== null) steps.push(current);
-      current = { line: index + 1, run: null, runLines: [], env: null };
+      current = { line: index + 1, name: /^ {6}- name: (.*)$/.exec(line)?.[1] ?? null,
+        condition: null, run: null, runLines: [], env: null };
     } else if (/^ {0,4}\S/.test(line) && current !== null) {
       steps.push(current);
       current = null;
     }
     if (current === null) continue;
+    const condition = /^ {8}if: (.*)$/.exec(line);
+    if (condition !== null) current.condition = condition[1];
     const run = /^ {8}run: (.*)$/.exec(line);
     if (run !== null) {
       current.run = run[1];
@@ -955,20 +985,60 @@ check("every evidence-bearing CI launch point sanitizes the exact refusal list",
   // mutant move one exact block onto an unrelated step, leaving every count intact, every `run:`
   // line still carrying the inner sanitizer, and an unprotected shell greenlit.
   const declaredEnv = evidenceLaunchEnv();
-  for (const [file, expectedSteps] of [[".github/workflows/ci.yml", 3]]) {
+  for (const [file, expectedSteps] of [[".github/workflows/ci.yml", 4]]) {
     const steps = workflowSteps(path.join(REPO, file));
-    const evidence = steps.filter((step) => typeof step.run === "string" && step.run.startsWith(`${sanitizer} `));
-    assert.equal(evidence.length, expectedSteps,
-      `${file}: expected exactly ${expectedSteps} evidence step(s), found ${evidence.length}`);
-    for (const step of evidence) {
-      assert.deepEqual(step.env, declaredEnv,
-        `${file}:${step.line}: this evidence step does not declare the exact derived neutralization as its OWN env`);
+    const hostStepName = "Full boundary bootstrap and host packer integration";
+    const hostRunLines = [
+      `${sanitizer} node --input-type=module --eval '`,
+      '  import { execFileSync } from "node:child_process";',
+      '  import { fixedDockerExecutable } from "./scripts/lib/knockout-runner.mjs";',
+      '  import { NODE_IMAGE } from "./scripts/lib/publish-artifact-staging.mjs";',
+      '  execFileSync(fixedDockerExecutable(), ["pull", NODE_IMAGE], { stdio: "inherit" });',
+      '  execFileSync(process.execPath, ["--test", "scripts/lib/boundary-bootstrap.selftest.mjs"], { stdio: "inherit" });',
+      "'",
+    ];
+    const assertLaunchSteps = (candidateSteps) => {
+      const evidence = candidateSteps.filter((step) => step.runLines[0]?.startsWith(`${sanitizer} `));
+      assert.equal(evidence.length, expectedSteps,
+        `${file}: expected exactly ${expectedSteps} evidence step(s), found ${evidence.length}`);
+      for (const step of evidence) {
+        assert.deepEqual(step.env, declaredEnv,
+          `${file}:${step.line}: this evidence step does not declare the exact derived neutralization as its OWN env`);
+      }
+      // No exact OR partial neutralization block may be parked on an unrelated step.
+      assert.deepEqual(misplacedNeutralizationKeys(candidateSteps, evidence, declaredEnv), [],
+        `${file}: evidence neutralization key(s) are declared on a step that launches no evidence`);
+      const hostSteps = candidateSteps.filter((step) => step.name === hostStepName);
+      assert.equal(hostSteps.length, 1, `${file}: the full host integration launch must occur exactly once`);
+      const [host] = hostSteps;
+      assert.equal(host.condition,
+        "${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 22 }}",
+        `${file}: the full host integration must run after the supported build`);
+      assert.equal(host.run, "|", `${file}: the host launch must retain its literal shell block`);
+      // Bind the entire block: protecting the first command alone would admit an unguarded sibling,
+      // and selecting a portable test here would silently remove the real Docker packer integration.
+      assert.deepEqual(host.runLines, hostRunLines,
+        `${file}: the full host suite and pinned image pull must share the guarded launch`);
+    };
+    assertLaunchSteps(steps);
+
+    for (const [label, mutate] of [
+      ["missing step env", (host) => { host.env = null; }],
+      ["missing launch guard", (host) => { host.runLines[0] = host.runLines[0].replace(`${sanitizer} `, ""); }],
+      ["missing full suite", (host) => { host.runLines.splice(5, 1); }],
+      ["missing pinned image pull", (host) => { host.runLines.splice(4, 1); }],
+      ["unguarded sibling", (host) => { host.runLines.push("node --test scripts/lib/boundary-bootstrap.selftest.mjs"); }],
+      ["disabled host integration", (host) => { host.condition = "false"; }],
+      ["misplaced step env", (host, candidateSteps) => {
+        candidateSteps.push({ line: 0, name: "Unrelated", run: "true", runLines: ["true"], env: host.env });
+        host.env = null;
+      }],
+    ]) {
+      const candidateSteps = structuredClone(steps);
+      mutate(candidateSteps.find((step) => step.name === hostStepName), candidateSteps);
+      assert.throws(() => assertLaunchSteps(candidateSteps), { name: "AssertionError" },
+        `${label} was admitted by the evidence launch census`);
     }
-    // …and no exact OR partial neutralization block may be parked somewhere harmless. Unrelated
-    // step environment is valid and outside this control's scope.
-    const misplaced = misplacedNeutralizationKeys(steps, evidence, declaredEnv);
-    assert.deepEqual(misplaced, [],
-      `${file}: evidence neutralization key(s) are declared on a step that launches no evidence`);
   }
 
   for (const [file, command, expected] of EXPECTED) {

@@ -19,6 +19,7 @@ import {
   readSync,
   realpathSync,
 } from "node:fs";
+import { devNull } from "node:os";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -406,6 +407,29 @@ function closeDescriptorOnce(fd, subject) {
   }
 }
 
+function reserveClosedStandardInput(subject) {
+  let reservedFd;
+  try {
+    reservedFd = openSync(devNull, fsConstants.O_RDONLY);
+  } catch {
+    fail(
+      "BOUNDARY_BOOTSTRAP_STDIN_RESERVATION_FAILED",
+      subject,
+      "the consumed pipe was closed but stdin could not be reserved with the platform null device",
+    );
+  }
+  if (reservedFd !== 0) {
+    closeDescriptorOnce(reservedFd, `${subject} null-device reservation`);
+    fail(
+      "BOUNDARY_BOOTSTRAP_STDIN_RESERVATION_FAILED",
+      subject,
+      "the platform null device did not reclaim exact stdin FD 0",
+    );
+  }
+  // Keep neutral FD 0 until process exit: a vacant standard descriptor can be reused by libuv
+  // child-process pipes and abort on Linux. The consumed bootstrap transport is already closed.
+}
+
 function stableReadFile(path, subject, {
   maxBytes = MAX_CONTROL_BYTES,
   mode = null,
@@ -581,7 +605,10 @@ function readIsolatedKnockoutBootstrapContext() {
       "the direct-child pipe could not be inspected or read",
     );
   } finally {
-    if (descriptorObserved) closeDescriptorOnce(0, "isolated knockout bootstrap channel");
+    if (descriptorObserved) {
+      closeDescriptorOnce(0, "isolated knockout bootstrap channel");
+      reserveClosedStandardInput("isolated knockout bootstrap channel");
+    }
   }
   const { doc } = canonicalDocument(bytes, "isolated knockout bootstrap context");
   const nestedScannerSelftest = doc !== null && typeof doc === "object" && !Array.isArray(doc)

@@ -4313,8 +4313,12 @@ function assertDirectTestArgs(args) {
     throw new Error("a test evidence step must carry exactly one --test option");
   }
   const prefix = args.slice(0, testIndex);
+  // A contained control may select one authored test by its complete literal name. No regex
+  // operators, escapes, alternate selectors, or reporter authority enter this prefix contract.
+  const exactNameSelector = prefix.length === 1
+    && /^--test-name-pattern=\^[A-Za-z0-9][A-Za-z0-9 ,:_-]{0,199}\$$/.test(prefix[0]);
   const allowedPrefix =
-    prefix.length === 0 ||
+    prefix.length === 0 || exactNameSelector ||
     (prefix.length === 1 && prefix[0] === "--enable-source-maps") ||
     (prefix.length === 2 && prefix[0] === "--import" && prefix[1] === "tsx") ||
     (
