@@ -1310,7 +1310,7 @@ check("the registry shards deterministically: exact union, no overlap, and every
   }
 
   // EXACT PARTITION at several totals, including 1 and a total that does not divide evenly.
-  for (const total of [1, 2, 4, 7, 8, 13, 16]) {
+  for (const total of [1, 2, 4, 7, 8, 13, 16, 32]) {
     const shards = [];
     for (let index = 0; index < total; index += 1) shards.push(partitionIntoShards(registry, index, total));
     const ids = shards.flat().map((entry) => entry.id);

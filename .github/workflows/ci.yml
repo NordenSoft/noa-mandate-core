@@ -706,11 +706,12 @@ jobs:
     # still runs on both legs. A knockout mutates SOURCE and re-runs a suite, so a second Node
     # version re-answers a question nobody asked; the sweep is measured once, on 22, as before.
     #
-    # Run 34087458630 at 6ba13d3: fourteen of these sixteen legs reached the 60-minute ceiling.
-    # Each leg's observed setup, first result and later intervals project up to 156 minutes;
-    # adding one existing 20-minute worker envelope fits inside a 180-minute job allowance.
-    # Keep the sixteen-way partition, every registry control and all per-arm deadlines unchanged.
-    # This estimate comes from partial progress; complete current-run results remain required.
+    # The earlier partial-progress estimate at 6ba13d3 projected a sixteen-way slice within
+    # 180 minutes. Run 34209974888 at d34bccf1 disproved that estimate: shard 0 reported
+    # 17 of 18 progress results before GitHub reported its three-hour execution limit.
+    # Divide the same registry into thirty-two slices so the expensive boundary suite no longer
+    # fills one eighteen-control job. Preserve every control, per-arm deadline and job limit;
+    # the additional setup/baseline work trades runner minutes for a bounded completion path.
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -725,7 +726,8 @@ jobs:
         # ranges the runner reads: `strategy.job-index` and `strategy.job-total` are the single
         # shard coordinate, derived by GitHub from the matrix it just created. Adding a control
         # changes nothing here; changing this list changes only how finely the registry is divided.
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

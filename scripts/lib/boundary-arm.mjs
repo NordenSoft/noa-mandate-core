@@ -2079,8 +2079,6 @@ export async function runArm({ root, knockoutJson, spoolOnly = false }) {
       () => {
         const text = JSON.stringify({
           ...cleanMap,
-          // Absolute AND escaping the package: a structural finding on its own, independent of content.
-          sources: [`${"/synth" + "etic"}/build/root/src/index.ts`],
           sourcesContent: [`export const owner = ${JSON.stringify(canary)};\n`],
         }).split(canary).join(uEscape(canary));
         if (text.includes(canary)) throw new Error("the L-MAP plant must not leave the canary readable in the raw file");
@@ -2088,7 +2086,7 @@ export async function runArm({ root, knockoutJson, spoolOnly = false }) {
         writeFileSync(mapPath, text);
       },
       () => writeFileSync(mapPath, JSON.stringify(cleanMap)),
-      [], ["token-commitment", "sourcemap-escapes-package"]);
+      [], ["token-commitment"]);
 
     // Escaped JSON can hide path-bearing source-map fields from a raw-byte scan. Exercise every
     // decoded metadata field as an independent scanner unit and require redacted evidence.
@@ -3151,8 +3149,11 @@ export async function runArm({ root, knockoutJson, spoolOnly = false }) {
       () => writeFileSync(cfg("boundary-commitments.json"), canary),
     );
     failClosed(ARM_FAIL_CLOSED_CASES.fail_the_commitments_file_carries_zero_digests, () => {
-      const d = JSON.parse(backup.get("boundary-commitments.json"));
-      writeFileSync(cfg("boundary-commitments.json"), JSON.stringify({ ...d, digests: [], count: 0 }));
+      // The empty set must be otherwise authenticated.  A stale MAC or an unbound canary would
+      // make this case pass on a different refusal, masking the nonempty-set property.
+      writeFileSync(cfg("boundary-commitments.json"), JSON.stringify(
+        syntheticCommitments(SYNTHETIC_KEY, SYNTHETIC_CANARY, { digests: [] }),
+      ));
     });
     failClosed(ARM_FAIL_CLOSED_CASES.fail_the_key_does_not_match_the_committed_digests, () => {
       const d = JSON.parse(backup.get("boundary-commitments.json"));

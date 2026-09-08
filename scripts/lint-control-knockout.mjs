@@ -735,8 +735,7 @@ const KNOCKOUTS = [
     file: "scripts/lib/boundary-arm.mjs",
     find: "const GATE_FILES = Object.freeze(reviewedControlGateFiles());",
     replace:
-      "const GATE_FILES = Object.freeze(reviewedControlGateFiles()" +
-      ".filter((entry) => entry !== \"lib/knockout-test-observer.mjs\"));",
+      "const GATE_FILES = Object.freeze([...reviewedControlGateFiles(), \"lib/verdict.mjs\"]);",
     kind: "gate",
     gateId: "boundary-selftest",
     expectedGateProvenance: BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION,
@@ -825,15 +824,15 @@ const KNOCKOUTS = [
       subject: "the arm executed its exact reviewed case plan once",
     }],
     expectedSetupIntegrity: {
-      baselineCaseCount: 249,
-      baselineCasePlanSha256: "2f9bb551b3be2bcace728b3340aa438504189fcf82dbe1faecbb6ee4617ee35d",
+      baselineCaseCount: 254,
+      baselineCasePlanSha256: "f9f32d81c09d933e1c900b46c5fec5dbbb8fe9d0e21aefb27fe83adb53fbb12a",
       exitCode: 2,
       idSubstitution: {
         from: "case.the-arm-terminal-supervisor-refuses-missing-duplicate-incomplete-failed-signaled-timed-out-and-late-0d29a4a2",
         to: "case.the-arm-terminal-supervisor-refuses-missing-duplicate-incomplete-failed-signaled-timed-out-and-late-0d29a4a3",
       },
-      mutatedCaseCount: 249,
-      mutatedCasePlanSha256: "548ea3be121c23528e1d3a5f3aa2b4b1bd6ea532f9097f95fce4e476ec3483ed",
+      mutatedCaseCount: 254,
+      mutatedCasePlanSha256: "656df1b5f3d54226d9081714186b0228d23a5bb96189c41ef361cdab77bd0e18",
       stableError: "ARM_CASE_PLAN_DIGEST_MISMATCH",
       terminalProtocol: "noa-boundary-arm-terminal/1",
       terminalStatus: "SETUP_FAILED",
@@ -923,7 +922,10 @@ const KNOCKOUTS = [
     find: 'export function buildBoundaryPrePushArgs({ destination, remoteGitDir, root, remote }) {\n  return Object.freeze([\n    join(root, "scripts", "lint-boundary.mjs"),\n    "--explain",\n    "--knockout-json",\n    "--tier", "a",',
     replace: 'export function buildBoundaryPrePushArgs({ destination, remoteGitDir, root, remote }) {\n  return Object.freeze([\n    join(root, "scripts", "lint-boundary.mjs"),\n    "--explain",\n    "--knockout-json",\n    "--tier", "ab",',
     kind: "tests",
-    suite: [".", "node", ["--test", "scripts/pre-push-gate.selftest.mjs"]],
+    suite: [".", "node", [
+      "--test-name-pattern=^pre-push Tier-A argv selftest is portable and exact$",
+      "--test", "scripts/pre-push-gate.selftest.mjs",
+    ]],
   },
   {
     id: "boundary-bootstrap-binds-exact-lock-digest",
@@ -4402,14 +4404,14 @@ const KNOCKOUTS = [
   {
     id: "l12-map-sources-scanned",
     control:
-      "L12 L-MAP — `sourcesContent[]` is the ORIGINAL SOURCE, verbatim, inside the tarball, so it is " +
-      "scanned with the full rule set rather than treated as opaque map data. Measured today: zero " +
-      "sourcemaps are packed, which is exactly why this must be load-bearing BEFORE `sourceMap` or " +
+      "L12 L-MAP — decoded source-map string occurrences, including `sourcesContent[]`, are handed " +
+      "to the full scanner rather than treated as opaque map data. Measured today: zero sourcemaps " +
+      "are packed, which is exactly why this must be load-bearing BEFORE `sourceMap` or " +
       "`declarationMap` is switched on — the day it is, nobody will think to look. The mutation " +
-      "returns the map's structural findings but discards its embedded source.",
+      "discards every decoded string occurrence before that handoff.",
     file: "scripts/lib/boundary-scan.mjs",
-    find: "  const contents = Array.isArray(map?.sourcesContent)\n    ? map.sourcesContent.filter((c) => typeof c === \"string\")\n    : [];",
-    replace: "  const contents = [];",
+    find: "        contents.push(value);",
+    replace: "        // knockout: discard decoded source-map string occurrence",
     kind: "gate",
     gateId: "boundary-selftest",
     expectedGateProvenance: BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION,
@@ -4427,14 +4429,44 @@ const KNOCKOUTS = [
     id: "l12-missing-commitments-fails-closed",
     control:
       "L12 fail-closed — an unmeasurable token tier is exit 2, never a quiet tier-A-only pass. " +
-      "Missing commitments, a zero digest count, a count that disagrees with the array, or a key " +
-      "whose fingerprint does not match the committed keyId all refuse. The mutation makes the " +
-      "zero-count branch unreachable, so a commitments file with no digests would scan every file, " +
-      "match nothing, and report GREEN — a control printing green over an unmeasured class, which is " +
-      "the exact defect this whole gate was built after.",
+      "The nonempty authenticated commitment-set property has two overlapping predicates: generic " +
+      "empty-list rejection and canary membership. The mutation removes that one semantic property " +
+      "at both sites while preserving nonempty-list validation, so an otherwise authenticated empty " +
+      "set would scan every file, match nothing, and report GREEN.",
     file: "scripts/lint-boundary.mjs",
-    find: "doc.digests.length === 0",
-    replace: "false",
+    find: `  if (!Array.isArray(doc.digests) || doc.digests.length === 0 || doc.count !== doc.digests.length
+      || doc.digests.some((digest) => !HEX_64_RE.test(String(digest)))
+      || new Set(doc.digests).size !== doc.digests.length
+      || doc.digests.some((digest, index) => index > 0 && compareText(doc.digests[index - 1], digest) >= 0)) {
+    setupFailed("token tier unmeasured — the commitments are malformed, duplicated, unsorted, or empty", "every digest must be one unique sorted lowercase SHA-256 HMAC and count must match exactly", "run the reviewed refresh path");
+  }
+  if (!Number.isInteger(doc.excludedCount) || doc.excludedCount < 0
+      || !Array.isArray(doc.ngramSizes) || doc.ngramSizes.length === 0
+      || doc.ngramSizes.some((size) => !Number.isInteger(size) || size < 1 || size > 6)
+      || new Set(doc.ngramSizes).size !== doc.ngramSizes.length
+      || doc.ngramSizes.some((size, index) => index > 0 && doc.ngramSizes[index - 1] >= size)) {
+    setupFailed("the token commitments metadata is malformed", "excludedCount and the unique sorted 1..6 ngramSizes must be exact", "run the reviewed refresh path");
+  }
+  if (!HEX_64_RE.test(String(doc.canaryDigest)) || !doc.digests.includes(doc.canaryDigest)) {
+    setupFailed("the synthetic canary is not bound into the commitment set", "canaryDigest must be one exact member of digests", "rotate the canary only through the reviewed refresh path");
+  }`,
+    replace: `  if (!Array.isArray(doc.digests) || doc.count !== doc.digests.length
+      || doc.digests.some((digest) => !HEX_64_RE.test(String(digest)))
+      || new Set(doc.digests).size !== doc.digests.length
+      || doc.digests.some((digest, index) => index > 0 && compareText(doc.digests[index - 1], digest) >= 0)) {
+    setupFailed("token tier unmeasured — the commitments are malformed, duplicated, or unsorted", "every digest must be one unique sorted lowercase SHA-256 HMAC and count must match exactly", "run the reviewed refresh path");
+  }
+  if (!Number.isInteger(doc.excludedCount) || doc.excludedCount < 0
+      || !Array.isArray(doc.ngramSizes) || doc.ngramSizes.length === 0
+      || doc.ngramSizes.some((size) => !Number.isInteger(size) || size < 1 || size > 6)
+      || new Set(doc.ngramSizes).size !== doc.ngramSizes.length
+      || doc.ngramSizes.some((size, index) => index > 0 && doc.ngramSizes[index - 1] >= size)) {
+    setupFailed("the token commitments metadata is malformed", "excludedCount and the unique sorted 1..6 ngramSizes must be exact", "run the reviewed refresh path");
+  }
+  if (doc.digests.length > 0
+      && (!HEX_64_RE.test(String(doc.canaryDigest)) || !doc.digests.includes(doc.canaryDigest))) {
+    setupFailed("the synthetic canary is not bound into the commitment set", "canaryDigest must be one exact member of digests", "rotate the canary only through the reviewed refresh path");
+  }`,
     kind: "gate",
     gateId: "boundary-selftest",
     expectedGateProvenance: BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION,
@@ -4472,8 +4504,8 @@ const KNOCKOUTS = [
       "allowlist test with an empty-denylist test: structurally identical code, and it flags nothing " +
       "for ever. The arm plants an org-qualified reference the forge does not list.",
     file: "scripts/lib/boundary-scan.mjs",
-    find: "      if (known.has(repo)) continue;",
-    replace: "      if (![].includes(repo)) continue;",
+    find: "    if (known.has(repo)) continue;",
+    replace: "    if (![].includes(repo)) continue;",
     kind: "gate",
     gateId: "boundary-selftest",
     expectedGateProvenance: BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION,

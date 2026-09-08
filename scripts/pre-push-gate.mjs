@@ -83,6 +83,51 @@ export function opaqueDiagnostic(value) {
   return `diagnostic withheld (utf8Bytes=${bytes.length}, sha256=${createHash("sha256").update(bytes).digest("hex")})`;
 }
 
+const TIER_A_ARGV_SELFTEST_COMMAND = "--selftest-tier-a-argv";
+const TIER_A_ARGV_SELFTEST_ROOT = "/noa-prepush-selftest-root";
+const TIER_A_ARGV_SELFTEST_SCRATCH = "/noa-prepush-selftest-scratch";
+
+// This checks only the frozen local command contract.  It deliberately takes
+// synthetic paths so the targeted test can run before scratch/Git/bootstrap
+// setup; the full selftest below calls the same assertion with its real paths.
+function runTierAArgvSelftest({ root, scratchRoot }) {
+  const commandArgs = buildBoundaryPrePushArgs({
+    destination: "https://example.invalid/synthetic.git",
+    remoteGitDir: join(scratchRoot, "synthetic-destination.git"),
+    root,
+    remote: "synthetic-origin",
+  });
+  const exactCommandArgs = Object.freeze([
+    join(root, "scripts", "lint-boundary.mjs"),
+    "--explain",
+    "--knockout-json",
+    "--tier", "a",
+    "--lane", "L-PUSH,L-MSG,L-TAG",
+    "--refs-from-stdin",
+    "--pre-push-remote", "synthetic-origin",
+    "--pre-push-remote-git-dir", join(scratchRoot, "synthetic-destination.git"),
+    "--pre-push-url", "https://example.invalid/synthetic.git",
+    "--repo-visibility-source", "snapshot",
+    "--require-lane", "L-PUSH,L-MSG,L-TAG",
+  ]);
+  return Object.freeze({
+    ok: JSON.stringify(commandArgs) === JSON.stringify(exactCommandArgs)
+      && Object.isFrozen(commandArgs),
+  });
+}
+
+// A Git pre-push hook always supplies two arguments.  Dispatching only this
+// exact one-argument command prevents a real hook invocation from exiting via
+// the portable selftest path.
+if (process.argv.length === 3 && process.argv[2] === TIER_A_ARGV_SELFTEST_COMMAND) {
+  const { ok } = runTierAArgvSelftest({
+    root: TIER_A_ARGV_SELFTEST_ROOT,
+    scratchRoot: TIER_A_ARGV_SELFTEST_SCRATCH,
+  });
+  console.error(`${ok ? "SELFTEST PASS" : "SELFTEST FAIL"}: boundary pre-push exact Tier-A argv`);
+  process.exit(ok ? 0 : 1);
+}
+
 function createPrepushScratch() {
   try {
     const parent = realpathSync(tmpdir());
@@ -493,27 +538,10 @@ if (process.argv.includes("--selftest")) {
       run: { out: "the reporter crashed\n", code: 1 }, want: SETUP_FAILED },
   ];
   let bad = 0;
-  const commandArgs = buildBoundaryPrePushArgs({
-    destination: "https://example.invalid/synthetic.git",
-    remoteGitDir: join(PREPUSH_SCRATCH, "synthetic-destination.git"),
+  const { ok: commandOk } = runTierAArgvSelftest({
     root: ROOT,
-    remote: "synthetic-origin",
+    scratchRoot: PREPUSH_SCRATCH,
   });
-  const exactCommandArgs = [
-    join(ROOT, "scripts", "lint-boundary.mjs"),
-    "--explain",
-    "--knockout-json",
-    "--tier", "a",
-    "--lane", "L-PUSH,L-MSG,L-TAG",
-    "--refs-from-stdin",
-    "--pre-push-remote", "synthetic-origin",
-    "--pre-push-remote-git-dir", join(PREPUSH_SCRATCH, "synthetic-destination.git"),
-    "--pre-push-url", "https://example.invalid/synthetic.git",
-    "--repo-visibility-source", "snapshot",
-    "--require-lane", "L-PUSH,L-MSG,L-TAG",
-  ];
-  const commandOk = JSON.stringify(commandArgs) === JSON.stringify(exactCommandArgs)
-    && Object.isFrozen(commandArgs);
   if (!commandOk) bad++;
   console.error(`  ${commandOk ? green("✔") : red("✖")} ${"boundary pre-push exact Tier-A argv".padEnd(46)} closed builder contract`);
 
