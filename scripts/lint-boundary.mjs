@@ -881,7 +881,7 @@ function parseArgs(argv) {
   if (opts.refsFromStdin && opts.prePushRemote === null) {
     setupFailed(
       "pre-push ref mode is missing the hook's remote arguments",
-      "--refs-from-stdin requires --pre-push-remote so a new ref is compared with the actual destination instead of local --all",
+      "--refs-from-stdin requires --pre-push-remote to bind the hook destination; local refs never define outgoing scope",
       "invoke this through scripts/hooks/pre-push, or supply one exact configured remote",
     );
   }
@@ -3376,42 +3376,6 @@ function verifyPrePushDestination(ctx) {
   ctx.prePushDestinationVerified = true;
 }
 
-function destinationRefs(ctx) {
-  if (ctx.destinationRefs !== null) return ctx.destinationRefs;
-  verifyPrePushDestination(ctx);
-  // The destination may contain credentials. Keep this invocation local and expose only structural
-  // status; neither destination argv nor stderr may enter terminal or machine evidence.
-  const destinationArgs = ctx.opts.prePushRemoteGitDir === null
-    ? ["ls-remote", "--refs", ctx.opts.prePushUrl ?? ctx.opts.prePushRemote]
-    : ["--git-dir", ctx.opts.prePushRemoteGitDir, "ls-remote", "--refs", ctx.opts.prePushRemote];
-  const r = spawnSync(
-    "git", destinationArgs,
-    {
-      cwd: ctx.root, encoding: "utf8", shell: false, maxBuffer: 256 * 1024 * 1024,
-      timeout: PROVIDER_QUERY_TIMEOUT_MS, env: gitProcessEnvironment(),
-    },
-  );
-  if (r.error || r.status !== 0) {
-    setupFailed(
-      "the destination refs could not be enumerated",
-      `git ls-remote failed with exit ${r.status ?? "unknown"}; destination and stderr are omitted because they may contain credentials`,
-      "repair remote connectivity/authentication and retry the same push",
-    );
-  }
-  const byRef = new Map();
-  for (const [index, line] of String(r.stdout ?? "").split(/\r?\n/).filter(Boolean).entries()) {
-    const match = /^([0-9a-f]+)\t([^\s]+)$/.exec(line);
-    if (match === null || !validObjectId(match[1], ctx.objectIdLength)) {
-      setupFailed("the destination ref enumeration is malformed", `entry ${index} is not an exact object-id/ref pair`, null);
-    }
-    exactGitRef(ctx.root, match[2], "a destination ref");
-    if (byRef.has(match[2])) setupFailed("the destination ref enumeration contains a duplicate", "a destination ref appeared more than once", null);
-    byRef.set(match[2], match[1]);
-  }
-  ctx.destinationRefs = byRef;
-  return byRef;
-}
-
 /** Resolve the exact object sets this run is responsible for. */
 function resolveRanges(ctx) {
   if (ctx.opts.range !== null) {
@@ -3425,6 +3389,7 @@ function resolveRanges(ctx) {
     setupFailed("pre-push ref input is empty", "the hook supplied no ref lines, so no pushed object set can be proven", "retry through git with the committed pre-push hook");
   }
 
+  verifyPrePushDestination(ctx);
   const length = ctx.objectIdLength;
   const ranges = [];
   const destinations = new Set();
@@ -3487,11 +3452,10 @@ function commitsFor(ctx, descriptor) {
     // `rev-list --not <missing-tip>` aborts before scanning anything. Exclude only tips whose commit
     // ancestry this local object store can actually prove; omitting an unavailable/non-commit tip
     // can only BROADEN the set scanned, never hide an outgoing commit.
-    const candidateExclusions = !zeroObjectId(descriptor.remoteSha)
-      ? [descriptor.remoteSha]
-      : [...destinationRefs(ctx).entries()]
-        .filter(([ref]) => ref !== descriptor.remoteRef)
-        .map(([, sha]) => sha);
+    // For a new ref, scan its complete ancestry. Enumerating other remote refs is only an
+    // optimization and would require destination credentials inside this closed environment.
+    // Omitting every exclusion broadens coverage, including historical bytes scrubbed at the tip.
+    const candidateExclusions = !zeroObjectId(descriptor.remoteSha) ? [descriptor.remoteSha] : [];
     const exclusions = [...new Set(candidateExclusions)].filter((sha) =>
       capture("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd: ctx.root, tolerate: true }).code === 0);
     args = ["rev-list", descriptor.localSha, ...(exclusions.length > 0 ? ["--not", ...exclusions] : [])];
@@ -5396,7 +5360,7 @@ async function main() {
     visibilityEvidence: visibility.evidence,
     visibilityObservedAt: visibility.observedAt, tierB,
     unscanned: [], structuralFindings: [], sensitivePathReports: new Map(), unitKeys: new Map(), packed: null, ranges: null,
-    objectIdLength: objectIdLength(opts.root), refLineCount: 0, destinationRefs: null,
+    objectIdLength: objectIdLength(opts.root), refLineCount: 0,
     prePushDestinationVerified: false, commitSets: new Map(),
   };
   ctx.ranges = resolveRanges(ctx);

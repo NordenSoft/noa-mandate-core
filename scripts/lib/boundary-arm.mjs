@@ -164,8 +164,8 @@ const ARM_STATIC_CASES = Object.freeze({
   case_the_untouched_synthetic_repository_is_green_in_all_eight_lanes: defineArmCase("case.the-untouched-synthetic-repository-is-green-in-all-eight-lanes", "the untouched synthetic repository is GREEN in all eight lanes", ARM_FULL_ONLY),
   case_l_pack_never_executes_or_attempts_a_package_lifecycle_script: defineArmCase("case.l-pack-never-executes-or-attempts-a-package-lifecycle-script", "L-PACK never executes or attempts a package lifecycle script", ARM_FULL_ONLY),
   case_the_real_push_hook_selects_and_writes_only_its_isolated_arm_evi_0331903f: defineArmCase("case.the-real-push-hook-selects-and-writes-only-its-isolated-arm-evidence-spool", "the real-push hook selects and writes only its isolated arm evidence spool", ARM_FULL_ONLY),
-  case_pre_push_new_branch_destination_refs_are_used_and_an_older_blob_864a9483: defineArmCase("case.pre-push-new-branch-destination-refs-are-used-and-an-older-blob-version-is-found", "pre-push new branch: destination refs are used and an older blob version is FOUND", ARM_FULL_ONLY),
-  case_pre_push_new_branch_the_same_destination_derived_path_goes_clea_0d02024c: defineArmCase("case.pre-push-new-branch-the-same-destination-derived-path-goes-clean-without-the-plant", "pre-push new branch: the same destination-derived path goes CLEAN without the plant", ARM_FULL_ONLY),
+  case_pre_push_new_branch_destination_refs_are_used_and_an_older_blob_864a9483: defineArmCase("case.pre-push-new-branch-destination-refs-are-used-and-an-older-blob-version-is-found", "pre-push new branch: complete local ancestry includes an older blob version that is FOUND", ARM_FULL_ONLY),
+  case_pre_push_new_branch_the_same_destination_derived_path_goes_clea_0d02024c: defineArmCase("case.pre-push-new-branch-the-same-destination-derived-path-goes-clean-without-the-plant", "pre-push new branch: the same complete ancestry goes CLEAN without the plant", ARM_FULL_ONLY),
   case_pre_push_new_branch_ignores_unavailable_destination_tips_and_finds_older_blob: defineArmCase("case.pre-push-new-branch-ignores-unavailable-destination-tips-and-finds-older-blob", "pre-push new branch: unavailable disconnected destination tips broaden scanning and an older blob is FOUND", ARM_FULL_ONLY),
   case_pre_push_new_branch_with_unavailable_destination_tips_goes_clean: defineArmCase("case.pre-push-new-branch-with-unavailable-destination-tips-goes-clean", "pre-push new branch: unavailable disconnected destination tips still permit a fully scanned CLEAN result", ARM_FULL_ONLY),
   case_pre_push_existing_ref_with_unavailable_destination_tip_finds_older_blob: defineArmCase("case.pre-push-existing-ref-with-unavailable-destination-tip-finds-older-blob", "pre-push existing ref: an unavailable disconnected destination tip broadens scanning and an older blob is FOUND", ARM_FULL_ONLY),
@@ -2430,10 +2430,9 @@ export async function runArm({ root, knockoutJson, spoolOnly = false }) {
     }
 
     // ── 3a. real pre-push protocol, including the two cases local --all gets wrong ─────────────
-    // A new branch has an all-zero destination object. Its baseline must come from the actual
-    // destination refs, excluding the ref being created; local refs may contain unrelated objects
-    // and therefore cannot establish what the destination already has. The canary is in an older
-    // version of one path and scrubbed at the tip, proving L-PUSH reads every pushed version too.
+    // A new branch has an all-zero destination object. Scan its complete local ancestry: neither
+    // destination-read credentials nor unrelated local refs may narrow this set. The canary is in
+    // an older version of one path and scrubbed at the tip, proving L-PUSH reads every version too.
     {
       const remote = join(work, "arm-remote.git");
       git(work, ["init", "-q", "--bare", remote], true);

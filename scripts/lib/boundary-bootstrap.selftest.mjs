@@ -519,6 +519,50 @@ test("an unopened inherited authorization descriptor retains its stable invalid-
   assert.equal(result.stdout, "BOUNDARY_BOOTSTRAP_AUTHORIZATION_FD_INVALID");
 });
 
+test("pre-push first ref scans full ancestry without destination read credentials", () => {
+  const work = mkdtempSync(join(tmpdir(), "noa-boundary-first-ref-"));
+  try {
+    const { root } = buildWorkflowFixture(work);
+    // Freeze one synthetic root; unrelated local refs must never hide outgoing history.
+    const tree = git(root, ["rev-parse", "HEAD^{tree}"]);
+    const base = git(root, ["commit-tree", tree, "-m", "test: synthetic first-ref root"]);
+    git(root, ["update-ref", "refs/heads/main", base]);
+    const destination = join(work, "unavailable-private-destination.git");
+    const runPush = (sha, remote = destination, url = destination) => spawnSync(process.execPath, [
+      "scripts/lint-boundary.mjs", "--repo-visibility-source", "snapshot", "--tier", "a",
+      "--explain", "--lane", "L-PUSH,L-MSG,L-TAG", "--refs-from-stdin",
+      "--pre-push-remote", remote, "--pre-push-url", url,
+    ], {
+      cwd: root, encoding: "utf8", shell: false, timeout: 30_000,
+      input: `HEAD ${sha} refs/heads/new-core ${"0".repeat(sha.length)}\n`,
+      env: scrubbedReadOnlyGitEnvironment(), maxBuffer: 1024 * 1024,
+    });
+    const clean = runPush(base);
+    assert.ifError(clean.error);
+    assert.equal(clean.status, 0, clean.stderr);
+    const privateDirectory = join(root, ".pl" + "an");
+    mkdirSync(privateDirectory);
+    writeFileSync(join(privateDirectory, "synthetic-local.txt"), "Synthetic non-public planning fixture.\n");
+    git(root, ["add", "-A"]);
+    git(root, ["commit", "-q", "-m", "test: historical path plant"]);
+    rmSync(privateDirectory, { recursive: true });
+    git(root, ["add", "-A"]);
+    git(root, ["commit", "-q", "-m", "test: clean current tip"]);
+    const head = git(root, ["rev-parse", "HEAD"]);
+    git(root, ["branch", "already-local", head]);
+    const historical = runPush(head);
+    assert.ifError(historical.error);
+    assert.equal(historical.status, 1, historical.stderr);
+    assert.match(historical.stderr, /planning-dir/);
+    const mismatched = runPush(head, "origin", destination);
+    assert.ifError(mismatched.error);
+    assert.equal(mismatched.status, 2, mismatched.stderr);
+    assert.match(mismatched.stderr, /remote name and destination do not agree/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test("credential-free workflow command is exact Tier-A non-authority and writes no external evidence", () => {
   const work = mkdtempSync(join(tmpdir(), "noa-boundary-workflow-invocation-"));
   try {
