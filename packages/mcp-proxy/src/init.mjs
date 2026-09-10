@@ -387,7 +387,7 @@ release one call:
      forward it — approving does not itself re-execute anything.
 
 No claim here is "unforgeable" or "cannot be bypassed". Read NON-CLAIMS.md and THREAT-MODEL.md
-(https://github.com/NordenSoft/noa) before relying on this for anything that matters.
+(https://github.com/NordenSoft/noa-mandate-core) before relying on this for anything that matters.
 `;
 }
 

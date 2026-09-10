@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Use [GitHub private vulnerability reporting](https://github.com/NordenSoft/noa/security/advisories/new)
+Use [GitHub private vulnerability reporting](https://github.com/NordenSoft/noa-mandate-core/security/advisories/new)
 for encrypted, repository-scoped coordination. If GitHub reporting is unavailable, email
 **toratoraman@gmail.com** with details and a proof-of-concept if you have one. Please do not open a
 public issue for a security report. We aim to acknowledge within 72 hours. This is an early-access
@@ -93,7 +93,7 @@ exception is not a claim that the dependency is safe.
   authority actually live; the MCP proxy is designed to **fail-closed**. Unmanaged tools are
   outside the trust boundary — document which tools are governed.
 - Private-key custody is the operator's responsibility (use KMS/HSM in production). See
-  [docs/trust-root-checklist.md](https://github.com/NordenSoft/noa/blob/main/docs/trust-root-checklist.md) for the practical key-generation,
+  [docs/trust-root-checklist.md](https://github.com/NordenSoft/noa-mandate-core/blob/main/docs/trust-root-checklist.md) for the practical key-generation,
   keyring-distribution, checkpoint, and rotation checklist.
 
 ## Cryptography

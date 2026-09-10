@@ -350,7 +350,7 @@ This section is to be removed before publication as an RFC.
 A zero-runtime-dependency reference implementation (signer, offline verifier, deterministic
 CBOR, COSE_Sign1 profile, JCS canonicalizer, and conformance vectors) plus four additional
 language-specific verifier implementations is available under the Apache-2.0 license at
-<https://github.com/NordenSoft/noa>. The current runners establish cross-implementation verdict
+<https://github.com/NordenSoft/noa-mandate-core>. The current runners establish cross-implementation verdict
 parity for covered vectors through the documented comparison topology. Organizational independence,
 independent requirements analysis, and independent decision paths are not established.
 

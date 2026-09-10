@@ -1,7 +1,12 @@
-# NOA — Agent Action Receipt
+# NOA Mandate Core
 
-> The Apache-licensed NOA receipt kernel: protocol, reference implementations, and
-> conformance artifacts for independently built integrations.
+> The open-source core of NOA Mandate: Apache-licensed receipt protocols, reference
+> implementations, and conformance artifacts for independently built integrations.
+
+**NOA Mandate** is the parent brand. **NOA Mandate Core** is this open-source
+project; **NOA Mandate Enterprise** is the separately maintained commercial
+product. Enterprise services and customer data are outside this repository.
+Package names, CLI commands, and versioned protocol identifiers remain unchanged.
 
 **NOA Receipt is an open protocol for signed, independently verifiable receipts of AI-agent
 actions: before an agent does something real, a governance layer decides *allow · hold for a human ·
@@ -36,8 +41,8 @@ path through the proxy, so an agent that can reach the payments tool by another 
 inside this boundary (NC-6.6). Every one of those codes is a numbered, normative entry in
 [NON-CLAIMS.md](NON-CLAIMS.md).
 
-[![CI](https://github.com/NordenSoft/noa/actions/workflows/ci.yml/badge.svg)](https://github.com/NordenSoft/noa/actions/workflows/ci.yml)
-[![doc-truth](https://github.com/NordenSoft/noa/actions/workflows/doc-truth.yml/badge.svg)](https://github.com/NordenSoft/noa/actions/workflows/doc-truth.yml)
+[![CI](https://github.com/NordenSoft/noa-mandate-core/actions/workflows/ci.yml/badge.svg)](https://github.com/NordenSoft/noa-mandate-core/actions/workflows/ci.yml)
+[![doc-truth](https://github.com/NordenSoft/noa-mandate-core/actions/workflows/doc-truth.yml/badge.svg)](https://github.com/NordenSoft/noa-mandate-core/actions/workflows/doc-truth.yml)
 [![npm noa-receipt](https://img.shields.io/npm/v/noa-receipt?label=noa-receipt)](https://www.npmjs.com/package/noa-receipt)
 [![npm noa-mcp-adapter-core](https://img.shields.io/npm/v/noa-mcp-adapter-core?label=noa-mcp-adapter-core)](https://www.npmjs.com/package/noa-mcp-adapter-core)
 [![npm noa-mcp-proxy](https://img.shields.io/npm/v/noa-mcp-proxy?label=noa-mcp-proxy)](https://www.npmjs.com/package/noa-mcp-proxy)
@@ -258,7 +263,8 @@ Read [THREAT-MODEL.md](THREAT-MODEL.md) before you rely on any of this.
   profile (roadmap §1–§2).
 - Resolution of the documented protocol-quality gaps — canonical encoding, COSE companion behaviour,
   error taxonomy, key lifecycle, revocation and freshness (§3).
-- Standards engagement. An individual Internet-Draft `-00` exists; that is **not** working-group
+- Standards engagement. An individual Internet-Draft
+  [`draft-noa-scitt-ai-agent-receipt-01`](https://datatracker.ietf.org/doc/draft-noa-scitt-ai-agent-receipt/01/) exists; that is **not** working-group
   adoption, and this project does not call itself standardized (§4).
 - A controlled pilot with a real relying-party decision. Package downloads are distribution evidence,
   never adoption evidence (§5).
@@ -318,7 +324,7 @@ it was typed, and the doc-truth gate rejects one. CI is the live count.
 ## Security
 
 Report privately through
-[GitHub security advisories](https://github.com/NordenSoft/noa/security/advisories/new); the policy,
+[GitHub security advisories](https://github.com/NordenSoft/noa-mandate-core/security/advisories/new); the policy,
 the supported-version table and the disclosure expectations are in [SECURITY.md](SECURITY.md). The
 public threat classes, residual risks, and explicit limits are in
 [THREAT-MODEL.md](THREAT-MODEL.md) and [NON-CLAIMS.md](NON-CLAIMS.md).

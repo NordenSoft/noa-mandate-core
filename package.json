@@ -1,13 +1,13 @@
 {
   "name": "noa-receipt",
   "version": "0.8.0",
-  "description": "NOA Agent Action Receipt — open, offline-verifiable provenance for AI-agent actions.",
+  "description": "NOA Mandate Core — open, offline-verifiable receipts for AI-agent actions.",
   "license": "Apache-2.0",
   "type": "module",
   "homepage": "https://noatrust.com",
   "repository": {
     "type": "git",
-    "url": "https://github.com/NordenSoft/noa.git"
+    "url": "https://github.com/NordenSoft/noa-mandate-core.git"
   },
   "keywords": [
     "ai-agent",

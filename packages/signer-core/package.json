@@ -18,7 +18,7 @@
   "homepage": "https://noatrust.com",
   "repository": {
     "type": "git",
-    "url": "https://github.com/NordenSoft/noa.git",
+    "url": "https://github.com/NordenSoft/noa-mandate-core.git",
     "directory": "packages/signer-core"
   },
   "license": "Apache-2.0",
