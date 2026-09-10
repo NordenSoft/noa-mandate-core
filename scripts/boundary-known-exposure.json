@@ -1,5 +1,300 @@
 {
-  "note": "The L12 known-exposure ratchet carries only reviewed findings that are already published. Content findings bind to the exact unit bytes; path findings bind to a domain-separated hash of the exact canonical repository-relative path. This history begins with no carried findings. Every future entry must include why, remediation, and reviewedAt; malformed entries are refused by the gate.",
+  "note": "The L12 known-exposure ratchet carries only individually reviewed findings about an already published historical Core coordinate. Public evidence: https://www.ietf.org/archive/id/draft-noa-scitt-ai-agent-receipt-00.txt Appendix A. Content findings bind to exact unit bytes; path findings use the domain-separated exact canonical path hash. This is not a repository-visibility assertion or an exemption for new content. Every entry requires why, remediation, and reviewedAt; malformed entries are refused.",
   "keyFormat": "sha256(unit content):ruleId OR sha256(noa-boundary:path:v1\\0 + canonical repository-relative path):ruleId",
-  "entries": []
+  "entries": [
+    {
+      "key": "00cee79b7feabecf8d918edc0a84e6f1f8eb72d14d22867fb6199853623e0207:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "02c5d9d0d9df5264843d4656631bb0d7f45638fef3520e7feff662f12a36b5db:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "10e5d7ade5a7650348f85dac357c2db449d8329e2700ad0cf5ee8b3a1e0a921d:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "210f380230287af9cfd7458a032914e12593b0713ffaf251e9e070321211887c:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "23fb4c282a6b46290838875e2ad0c51682d2f3bfda9049cbb316cca105a1ca80:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "2b6836046cd95615be40ee2797206242ec8c96ac87cc7de77954277c8f208aa7:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "457d8d99ab2bf966561f932810228c0f979e8c9752b596142daddd13b9df4040:repo-not-public",
+      "count": 3,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "4d2b14b69c16f2046ac16aeb10b64fdb96d0b51881aca987d890976a142f7668:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "5187ae0c04ef7601a728d953a2d10c9c85d53e3a22e6aba66563bb563f2c2f48:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "556f724f6b2bd6862739ddfd33e6c96d64075931076083c5845f27d9b686ba18:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "5660bc07ce8bc4dc5d1ea7fb6b6ab6d14f31b0b1e6d7224dd913bc8610984cec:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "59e00114e68344ef54ee860a3485ef8218586d99e7d32a8e44eaa1de4c2c1050:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "5b49b726a4bae25aba29f1673aef502a4e801b9c707e3ef8eeb98696fa7be3d6:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "5da4ba7f4a933335370a3f1b06772bed0a6a430ead90cfe9d51f29b3f9871833:repo-not-public",
+      "count": 9,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "72c7f7f01e420ebf5f0dc51fc378c514ea1ff1ed8a6a78bc4edd0e28eabc63f8:privacy-adjacency",
+      "count": 1,
+      "why": "Reviewed historical private-vulnerability-reporting link to the already published Core coordinate; this sentence names no private product.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "72c7f7f01e420ebf5f0dc51fc378c514ea1ff1ed8a6a78bc4edd0e28eabc63f8:repo-not-public",
+      "count": 2,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "7473296488803a5aed9141b7548850a710840a33ee6856886637588b26cbc942:repo-not-public",
+      "count": 3,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "79b3c34b46f42ddfd15932a6588933aa5ad278d9190933c66ba18769a008f8a9:repo-not-public",
+      "count": 3,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "7b03ef8a26a2290c81e345325594eee0673e7e817ac5fc620076dac125a1cd15:repo-not-public",
+      "count": 4,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "7e14726dcdc9ca3ddf3381090594a9b55dfc9481f5ad524e6efe3c37237950d9:repo-not-public",
+      "count": 3,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "84534e9e0051769629063eec8b05b6f5f064f8c7aace90e7cb7fea68b2ade90e:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "8c6d85bac6fa4e9612e3d24158279437e055912b6f7da53fc31bad0fda9effc8:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "93b8c10325f606043eb17c4762edb24dfa40ea5624d29c1a9ee0d472140bb0f1:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "a5ab96c9edbbe6364b7535c4835475ee886c3fa967a0b29f50c242c81cd68d1c:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "a64d9e5d3d91cfaa2250696fab15f13bdd15052ced5ecb3930049c1ae01a91e9:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "a961d1599f6f57a5e4ebe17ba8881b11cb2f27715ac33d99843d19eff7e08ef3:repo-not-public",
+      "count": 3,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "ae5a3c9a6bf9a89002f3df132888bddbcd92025c646d4e22807b274599f637b6:repo-not-public",
+      "count": 3,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "b174cf2e37e727251e003abd11f0c5067ec3b3c38507aac03d287292c74aebba:repo-not-public",
+      "count": 3,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "bcdf1742e8c13625eed78d0e73a4c7af1258b62e75342ade87192bf1058fed55:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "c2ac7c16d673c57242726c17e52f2469901bfb6f96c68a4880162c7a74a1e3c9:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "ca41cbdf5e3e367d089a54d8b8fdd6aedb9e32427ee43d53bd2fc74a2c5884c6:repo-not-public",
+      "count": 3,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "cb20aa7a5694e09e53c7fcfe4302e99fa0c01a6aed24ca546c16b8875c41c520:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "cfdfe273a383c0a87bbec64d9c995565d41955b36fc2a181fc5dedfd1b071e49:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "d124c1a3a9de779077691049404d4bfe56568d32fed73680db05aff82c3884c5:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "e3e8342a7ddebb2c9def27c4c6fd19f9fd1679953b844e2f08f09feb537a9eeb:repo-not-public",
+      "count": 9,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "e922d0ed69d4b897b89d59d3f6ea0caae0a48f3b02419f4a0ac1e85b54f02e61:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "e92410a0ddb9e0b865a351bce161e558996ebc927e43dabadb9c240d6ace2e64:repo-not-public",
+      "count": 3,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "f5a1fb207ffd51dbf006abab8ee22aec19ebcbccba148bd98ecf8468c5f58ad9:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "fab3e927ab9c881cb17fd4b909d9317672aa330012413e526abaa89396710783:repo-not-public",
+      "count": 9,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "fd07977cbd66beca7735b14977b11c5086e4fde204d79e965392e8ba6db0e650:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "ff0960de10106342ce62bdf43e5702e20a6c348c773e1e46c2e503567ad68231:repo-not-public",
+      "count": 1,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    },
+    {
+      "key": "ff766be26a6f496ddeed9b037b0f424ba841d8ab26a12b0f7e3d90ea4d5ed138:repo-not-public",
+      "count": 3,
+      "why": "Reviewed immutable historical Core coordinate already published in the IETF draft-00 archive; only its exact coordinate finding is carried.",
+      "remediation": "Current product links use the new Core coordinate. Preserve archived draft bytes and immutable history; any changed content or higher count requires a separate review.",
+      "reviewedAt": "2026-09-10T19:11:19.000560+00:00"
+    }
+  ]
 }
