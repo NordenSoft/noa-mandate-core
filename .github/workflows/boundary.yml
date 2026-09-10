@@ -35,8 +35,43 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 0
+      # Checkout explicitly starts detached at the exact provider-selected SHA for both PR merge
+      # subjects and main pushes. The bootstrap correctly refuses a detached head, so attach that
+      # subject to one bounded local CI branch without changing its worktree, commit, or parent tuple.
+      - name: Attach the exact checkout subject to the bounded local CI branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          SUBJECT="$(git rev-parse HEAD)"
+          test "$SUBJECT" = "$GITHUB_SHA"
+          git rev-parse --verify "$GITHUB_SHA^{commit}" >/dev/null
+          PARENTS="$(git rev-list --parents -n 1 HEAD)"
+          # Match the existing CI checkout normalization before the closed bootstrap.
+          # Preserve trailing newlines so only checkout v7's single gc.auto=0 is removed.
+          checkout_gc_auto="$(git config --local --get-all gc.auto && printf .)"
+          test "$checkout_gc_auto" = $'0\n.'
+          git config --local --unset-all gc.auto
+          if git config --local --get-all gc.auto; then exit 1; else test "$?" -eq 1; fi
+          BRANCH="ci/boundary"
+          REF="refs/heads/$BRANCH"
+          if git config --local --get-all "branch.$BRANCH.remote" >/dev/null; then
+            echo "unexpected pre-existing local CI upstream remote" >&2
+            exit 1
+          fi
+          if git config --local --get-all "branch.$BRANCH.merge" >/dev/null; then
+            echo "unexpected pre-existing local CI upstream merge" >&2
+            exit 1
+          fi
+          git update-ref "$REF" "$SUBJECT" ""
+          git symbolic-ref HEAD "$REF"
+          git config --local "branch.$BRANCH.remote" origin
+          git config --local "branch.$BRANCH.merge" "$REF"
+          test "$(git symbolic-ref --quiet HEAD)" = "$REF"
+          test "$(git rev-parse HEAD)" = "$SUBJECT"
+          test "$(git rev-list --parents -n 1 HEAD)" = "$PARENTS"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.22.2
@@ -44,6 +79,14 @@ jobs:
       # The packed lane asks npm what would ship, and npm can only answer about files that exist.
       # `npm ci` runs the prepare hook, which builds dist/.
       - run: npm ci
+      - name: Acquire the exact boundary packer image (setup only; packer retains pull=never)
+        run: |
+          node --input-type=module --eval '
+            import { execFileSync } from "node:child_process";
+            import { fixedDockerExecutable } from "./scripts/lib/knockout-runner.mjs";
+            import { NODE_IMAGE } from "./scripts/lib/publish-artifact-staging.mjs";
+            execFileSync(fixedDockerExecutable(), ["pull", NODE_IMAGE], { stdio: "inherit" });
+          '
       - name: Derive the commit range this ref adds
         id: range
         shell: bash

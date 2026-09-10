@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 concurrency:
-  group: dependency-review-${{ github.ref }}
+  group: dependency-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions:
@@ -14,12 +14,141 @@ permissions:
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out the exact base tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .dependency-review/base
+          fetch-depth: 1
           persist-credentials: false
-      - name: Reject newly introduced high-severity vulnerable dependencies
-        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+      - name: Check out the exact pull-request tree from the base repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fail-on-severity: high
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+          path: .dependency-review/head
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out the pinned official OSV Scanner source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: google/osv-scanner
+          ref: c84fa4568f2526d0333e9a914ea8a0a5f74ad68b # v2.5.1
+          path: .dependency-review/osv-scanner
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.5
+          check-latest: false
+          cache: false
+      - name: Build the pinned official scanner and reporter
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$GITHUB_WORKSPACE/.dependency-review/base"
+          head="$GITHUB_WORKSPACE/.dependency-review/head"
+          tool="$GITHUB_WORKSPACE/.dependency-review/osv-scanner"
+          test "$(git -C "$base" rev-parse HEAD)" = "${{ github.event.pull_request.base.sha }}"
+          test "$(git -C "$head" rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          test "$(git -C "$tool" rev-parse HEAD)" = c84fa4568f2526d0333e9a914ea8a0a5f74ad68b
+          test "$(git -C "$tool" rev-parse 'HEAD^{tree}')" = 044b24b467c381fca9f582fe03472bc0f4fb8b4c
+          work="$(mktemp -d "$RUNNER_TEMP/noa-dependency-review.XXXXXX")"
+          chmod 700 "$work"
+          printf '%s\n' "DEPENDENCY_REVIEW_WORK=$work" >> "$GITHUB_ENV"
+          cd "$tool"
+          export GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0
+          go mod download
+          go mod verify
+          go build -trimpath -buildvcs=false \
+            -ldflags '-s -w -X github.com/google/osv-scanner/v2/cmd/osv-scanner/internal/cmd.commit=c84fa4568f2526d0333e9a914ea8a0a5f74ad68b -X github.com/google/osv-scanner/v2/cmd/osv-scanner/internal/cmd.date=2026-08-17T03:44:26Z' \
+            -o "$work/osv-scanner" ./cmd/osv-scanner
+          go build -trimpath -buildvcs=false \
+            -ldflags '-s -w -X main.commit=c84fa4568f2526d0333e9a914ea8a0a5f74ad68b -X main.date=2026-08-17T03:44:26Z' \
+            -o "$work/osv-reporter" ./cmd/osv-reporter
+          "$work/osv-scanner" --version | grep -F 'osv-scanner version: 2.5.1'
+          "$work/osv-reporter" --version | grep -F 'commit: c84fa4568f2526d0333e9a914ea8a0a5f74ad68b'
+      - name: Scan and validate both immutable source trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$DEPENDENCY_REVIEW_WORK"
+          printf '\n' > "$work/empty.toml"
+          scan_tree() {
+            local label="$1"
+            local tree="$2"
+            local output="$work/$label.json"
+            local exit_code
+            local expected="$work/$label.expected"
+            local observed="$work/$label.observed"
+            local links="$work/$label.links"
+            local inventory="$work/$label.inventory"
+            local resolved
+            local tree_real
+            if [ ! -d "$tree" ] || [ -L "$tree" ]; then
+              echo 'invalid scan root'
+              exit 1
+            fi
+            if ! tree_real="$(realpath -- "$tree" 2>/dev/null)"; then
+              echo 'scan root resolution failed'
+              exit 1
+            fi
+            if ! find -P "$tree" -type l -print0 > "$links"; then
+              echo 'symlink inventory failed'
+              exit 1
+            fi
+            if test -s "$links"; then
+              echo 'symlinked source paths are unsupported'
+              exit 1
+            fi
+            set +e
+            "$work/osv-scanner" scan source --recursive --format=json --all-packages \
+              --no-ignore --no-call-analysis=all --config="$work/empty.toml" \
+              --output-file="$output" "$tree"
+            exit_code=$?
+            set -e
+            case "$exit_code" in 0|1) ;; *) exit "$exit_code" ;; esac
+            jq -e 'type == "object" and (.results | type == "array") and all(.results[]; (.source | type == "object") and (.source.path | type == "string") and (.packages | type == "array"))' "$output" > /dev/null
+            if ! find -P "$tree" -type f \( \
+              -name apk-installed -o -name dpkg-status -o -name pubspec.lock -o -name pnpm-lock.yaml -o -name yarn.lock -o -name package-lock.json -o -name pom.xml -o -name buildscript-gradle.lockfile -o -name gradle.lockfile -o -name verification-metadata.xml -o -name poetry.lock -o -name Pipfile.lock -o -name pdm.lock -o -name pylock.toml -o -name requirements.txt -o -name uv.lock -o -name Cargo.lock -o -name composer.lock -o -name mix.lock -o -name renv.lock -o -name deps.json -o -name packages.config -o -name packages.lock.json -o -name conan.lock -o -name go.mod -o -name bun.lock -o -name Gemfile.lock -o -name gems.locked -o -name cabal.project.freeze -o -name stack.yaml.lock -o -name '*.csproj' \) -print0 > "$inventory"; then
+              echo 'dependency inventory failed'
+              exit 1
+            fi
+            if ! sort -z "$inventory" -o "$inventory"; then
+              echo 'dependency inventory sorting failed'
+              exit 1
+            fi
+            : > "$expected"
+            while IFS= read -r -d '' path; do
+              if [ "$(basename "$path")" = go.mod ] && ! grep -Eq '^[[:space:]]*require([[:space:]]|\()' "$path"; then
+                continue
+              fi
+              if ! resolved="$(realpath -- "$path" 2>/dev/null)"; then
+                echo 'dependency path resolution failed'
+                exit 1
+              fi
+              case "$resolved" in
+                "$tree_real"/*) ;;
+                *) echo 'dependency path escaped scan root'; exit 1 ;;
+              esac
+              printf '%s\0' "$resolved" >> "$expected"
+            done < "$inventory"
+            jq -j '.results[].source.path + "\u0000"' "$output" | sort -zu > "$observed"
+            sort -zu "$expected" -o "$expected"
+            test -s "$expected"
+            cmp -s "$expected" "$observed" || { echo 'scanner coverage was incomplete'; exit 1; }
+          }
+          scan_tree base "$GITHUB_WORKSPACE/.dependency-review/base"
+          scan_tree head "$GITHUB_WORKSPACE/.dependency-review/head"
+      - name: Reject every introduced OSV vulnerability
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DEPENDENCY_REVIEW_WORK/osv-reporter" \
+            --old "$DEPENDENCY_REVIEW_WORK/base.json" \
+            --new "$DEPENDENCY_REVIEW_WORK/head.json" \
+            --all-vulns --fail-on-vuln=true

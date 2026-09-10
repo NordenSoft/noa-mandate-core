@@ -519,6 +519,11 @@ const knockoutRunner = await import(
     status: string;
   }>;
 };
+const knockoutCli = await import(
+  pathToFileURL(path.join(repositoryRoot, "scripts", "lint-control-knockout.mjs")).href
+) as {
+  isolatedSweepFailureLines: (error: unknown) => readonly string[];
+};
 
 const TEST_TERMINAL_STATUSES = ["PASS", "FAIL", "REFUSED", "INDETERMINATE"];
 
@@ -1016,19 +1021,17 @@ function withSyntheticMacMetadata<T>(operation: () => T): {
         const childArgs = args[1];
         if (
           args[0] === "/usr/bin/perl" && Array.isArray(childArgs) &&
-          childArgs.includes("/usr/bin/python3") &&
-          (childArgs.includes("acl") || childArgs.includes("xattr"))
+          childArgs.includes("/usr/bin/python3") && childArgs.includes("both")
         ) {
           const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
           assert.ok(Array.isArray(stdio));
           const nodeFds = stdio.slice(4);
-          const declaredCount = Number(childArgs.at(-1));
+          const declaredCount = Number(childArgs.at(-3));
           assert.equal(declaredCount, nodeFds.length);
-          const mode = childArgs.includes("acl") ? "acl" : "xattr";
-          const records = nodeFds.map((fd, index) => {
+          const stats = nodeFds.map((fd) => {
             assert.equal(typeof fd, "number");
             const observed = fs.fstatSync(fd as number, { bigint: true });
-            const stat = {
+            return {
               ctimeNs: String(observed.ctimeNs),
               identity: `${observed.dev}:${observed.ino}`,
               mode: Number(observed.mode & 0o7777n),
@@ -1039,11 +1042,16 @@ function withSyntheticMacMetadata<T>(operation: () => T): {
                 ? "directory" : observed.isFile() ? "file" : "other",
               uid: Number(observed.uid),
             };
-            return mode === "acl"
-              ? { fd: index + 4, present: false, stat }
-              : { fd: index + 4, namesBase64: [], provenanceBase64: null, stat };
           });
-          const stdout = Buffer.from(JSON.stringify(records));
+          const stdout = Buffer.from(JSON.stringify({
+            acl: stats.map((stat, index) => ({ fd: index + 4, present: false, stat })),
+            xattr: stats.map((stat, index) => ({
+              fd: index + 4,
+              namesBase64: [],
+              provenanceBase64: null,
+              stat,
+            })),
+          }));
           const stderr = Buffer.alloc(0);
           helperCalls += 1;
           return {
@@ -2929,7 +2937,7 @@ sys.stdout.write(json.dumps(result, ensure_ascii=True, separators=(",", ":"), so
   const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
   assert.ok(spawnDescriptor !== undefined);
   const originalSpawnSync = childProcess.spawnSync;
-  const helperCalls = { acl: 0, xattr: 0 };
+  let helperCalls = 0;
   try {
     fs.mkdirSync(directory, { mode: 0o700 });
     for (let index = 0; index < 126; index++) {
@@ -3043,8 +3051,10 @@ sys.stdout.write(json.dumps(result, ensure_ascii=True, separators=(",", ":"), so
           args[0] === "/usr/bin/perl" && Array.isArray(childArgs) &&
           childArgs.includes("/usr/bin/python3")
         ) {
-          if (childArgs.includes("acl")) helperCalls.acl += 1;
-          if (childArgs.includes("xattr")) helperCalls.xattr += 1;
+          assert.equal(childArgs.includes("both"), true);
+          assert.equal(childArgs.includes("acl"), false);
+          assert.equal(childArgs.includes("xattr"), false);
+          helperCalls += 1;
         }
         return Reflect.apply(originalSpawnSync, childProcess, args);
       }) as typeof childProcess.spawnSync,
@@ -3057,7 +3067,7 @@ sys.stdout.write(json.dumps(result, ensure_ascii=True, separators=(",", ":"), so
     });
     assert.equal(census.nodeCount, 130);
     const expectedChunks = Math.ceil(census.nodeCount / 64);
-    assert.deepEqual(helperCalls, { acl: expectedChunks, xattr: expectedChunks });
+    assert.equal(helperCalls, expectedChunks);
     for (const node of census.nodes) {
       const expected = expectedProvenance.get(node.path);
       assert.ok(expected !== undefined, `oracle omitted ${JSON.stringify(node.path)}`);
@@ -3083,39 +3093,93 @@ test("macOS descriptor metadata helper errors and partial output fail closed", a
   const cases: Array<{
     expectedCode: string;
     label: string;
-    mode: "acl" | "xattr";
-    response: "api-error" | "duplicate" | "noncanonical" | "partial" | "wrong-fd";
+    phase: "acl" | "xattr";
+    stage?: "descriptor_changed" | "expected_descriptor_changed";
+    response: "api-error" | "duplicate" | "malformed-acl" | "noncanonical" |
+      "output-buffer" | "partial-envelope" | "partial-xattr" | "timeout" |
+      "unauthenticated-error" | "wrong-fd";
   }> = [
-    { expectedCode: "ACL_UNSUPPORTED", label: "ACL API error", mode: "acl", response: "api-error" },
     {
-      expectedCode: "XATTR_UNSUPPORTED",
-      label: "xattr API error",
-      mode: "xattr",
+      expectedCode: "ACL_UNSUPPORTED",
+      label: "authenticated ACL API error",
+      phase: "acl",
       response: "api-error",
     },
     {
       expectedCode: "XATTR_UNSUPPORTED",
-      label: "partial successful batch",
-      mode: "xattr",
-      response: "partial",
+      label: "authenticated xattr failure after accepted ACL phase",
+      phase: "xattr",
+      response: "api-error",
+    },
+    ...(["acl", "xattr"] as const).flatMap((phase) => [
+      {
+        expectedCode: phase === "acl" ? "ACL_UNSUPPORTED" : "XATTR_UNSUPPORTED",
+        label: `${phase} within-helper descriptor race retains original refusal taxonomy`,
+        phase,
+        response: "api-error" as const,
+        stage: "descriptor_changed" as const,
+      },
+      {
+        expectedCode: "SNAPSHOT_UNSTABLE",
+        label: `${phase} parent-bound descriptor mismatch retains snapshot taxonomy`,
+        phase,
+        response: "api-error" as const,
+        stage: "expected_descriptor_changed" as const,
+      },
+    ]),
+    {
+      expectedCode: "ACL_UNSUPPORTED",
+      label: "partial combined envelope",
+      phase: "acl",
+      response: "partial-envelope",
+    },
+    {
+      expectedCode: "ACL_UNSUPPORTED",
+      label: "malformed ACL section refuses before parent xattr parsing",
+      phase: "acl",
+      response: "malformed-acl",
+    },
+    {
+      expectedCode: "XATTR_UNSUPPORTED",
+      label: "partial xattr section after a complete ACL section",
+      phase: "xattr",
+      response: "partial-xattr",
     },
     {
       expectedCode: "XATTR_UNSUPPORTED",
       label: "duplicate attribute record",
-      mode: "xattr",
+      phase: "xattr",
       response: "duplicate",
     },
     {
-      expectedCode: "XATTR_UNSUPPORTED",
-      label: "noncanonical output framing",
-      mode: "xattr",
+      expectedCode: "ACL_UNSUPPORTED",
+      label: "noncanonical combined output framing",
+      phase: "acl",
       response: "noncanonical",
     },
     {
       expectedCode: "XATTR_UNSUPPORTED",
       label: "wrong descriptor ordinal",
-      mode: "xattr",
+      phase: "xattr",
       response: "wrong-fd",
+    },
+    {
+      expectedCode: "ACL_UNSUPPORTED",
+      label: "unauthenticated xattr diagnostic cannot select xattr taxonomy",
+      phase: "xattr",
+      response: "unauthenticated-error",
+    },
+    {
+      expectedCode: "OPERATION_DEADLINE_EXCEEDED",
+      label: "timeout takes precedence over an authenticated xattr marker",
+      phase: "xattr",
+      response: "timeout",
+    },
+    {
+      expectedCode: "RESOURCE_LIMIT_EXCEEDED",
+      label: "output buffer exhaustion takes precedence over an authenticated xattr marker",
+      phase: "xattr",
+      response: "output-buffer",
     },
   ];
   for (const fixtureCase of cases) {
@@ -3133,53 +3197,73 @@ test("macOS descriptor metadata helper errors and partial output fail closed", a
             const childArgs = args[1];
             if (
               injected === 0 && args[0] === "/usr/bin/perl" && Array.isArray(childArgs) &&
-              childArgs.includes("/usr/bin/python3") && childArgs.includes(fixtureCase.mode)
+              childArgs.includes("/usr/bin/python3") && childArgs.includes("both")
             ) {
               injected += 1;
-              let stdout = Buffer.alloc(0);
-              if (fixtureCase.response === "partial") stdout = Buffer.from("[]");
-              if (["duplicate", "noncanonical", "wrong-fd"].includes(fixtureCase.response)) {
-                const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
-                assert.ok(Array.isArray(stdio));
-                const records = stdio.slice(4).map((fd, index) => {
-                  assert.equal(typeof fd, "number");
-                  const observed = fs.fstatSync(fd as number, { bigint: true });
-                  return {
-                    fd: fixtureCase.response === "wrong-fd" && index === 0 ? 99 : index + 4,
-                    namesBase64: fixtureCase.response === "duplicate"
-                      ? [
-                          Buffer.from("com.apple.provenance").toString("base64"),
-                          Buffer.from("com.apple.provenance").toString("base64"),
-                        ]
-                      : [],
-                    provenanceBase64: fixtureCase.response === "duplicate" ? "" : null,
-                    stat: {
-                      ctimeNs: String(observed.ctimeNs),
-                      identity: `${observed.dev}:${observed.ino}`,
-                      mode: Number(observed.mode & 0o7777n),
-                      mtimeNs: String(observed.mtimeNs),
-                      nlink: Number(observed.nlink),
-                      size: Number(observed.size),
-                      type: observed.isSymbolicLink() ? "symlink" : observed.isDirectory()
-                        ? "directory" : observed.isFile() ? "file" : "other",
-                      uid: Number(observed.uid),
-                    },
-                  };
-                });
-                stdout = Buffer.from(
-                  `${fixtureCase.response === "noncanonical" ? " " : ""}${JSON.stringify(records)}`,
-                );
-              }
+              const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
+              assert.ok(Array.isArray(stdio));
+              const stats = stdio.slice(4).map((fd) => {
+                assert.equal(typeof fd, "number");
+                const observed = fs.fstatSync(fd as number, { bigint: true });
+                return {
+                  ctimeNs: String(observed.ctimeNs),
+                  identity: `${observed.dev}:${observed.ino}`,
+                  mode: Number(observed.mode & 0o7777n),
+                  mtimeNs: String(observed.mtimeNs),
+                  nlink: Number(observed.nlink),
+                  size: Number(observed.size),
+                  type: observed.isSymbolicLink() ? "symlink" : observed.isDirectory()
+                    ? "directory" : observed.isFile() ? "file" : "other",
+                  uid: Number(observed.uid),
+                };
+              });
+              const acl = stats.map((stat, index) => ({ fd: index + 4, present: false, stat }));
+              const xattr = stats.map((stat, index) => ({
+                fd: fixtureCase.response === "wrong-fd" && index === 0 ? 99 : index + 4,
+                namesBase64: fixtureCase.response === "duplicate"
+                  ? [
+                      Buffer.from("com.apple.provenance").toString("base64"),
+                      Buffer.from("com.apple.provenance").toString("base64"),
+                    ]
+                  : [],
+                provenanceBase64: fixtureCase.response === "duplicate" ? "" : null,
+                stat,
+              }));
+              let value: unknown = { acl, xattr };
+              if (fixtureCase.response === "partial-envelope") value = { acl };
+              if (fixtureCase.response === "malformed-acl") value = { acl: [], xattr };
+              if (fixtureCase.response === "partial-xattr") value = { acl, xattr: [] };
+              const processFailure = ["output-buffer", "timeout"].includes(fixtureCase.response);
+              const stdout = ["api-error", "unauthenticated-error"].includes(fixtureCase.response) ||
+                processFailure
+                ? Buffer.alloc(0)
+                : Buffer.from(
+                    `${fixtureCase.response === "noncanonical" ? " " : ""}${JSON.stringify(value)}`,
+                  );
+              const failureToken = String(childArgs.at(-1));
+              const markerToken = fixtureCase.response === "unauthenticated-error"
+                ? "0".repeat(64)
+                : failureToken;
               const stderr = Buffer.from(
-                fixtureCase.response === "api-error"
-                  ? "mac metadata helper refused injected errno=5\n"
+                ["api-error", "unauthenticated-error"].includes(fixtureCase.response) ||
+                  processFailure
+                  ? `NOA_MAC_METADATA_REFUSAL_V1 token=${markerToken} phase=${fixtureCase.phase} stage=${fixtureCase.stage ?? "injected"} errno=5\n`
                   : "",
               );
+              const error = processFailure
+                ? Object.assign(new Error("injected child-process failure"), {
+                    code: fixtureCase.response === "timeout" ? "ETIMEDOUT" : "ENOBUFS",
+                  })
+                : undefined;
               return {
+                ...(error === undefined ? {} : { error }),
                 pid: 123,
                 output: [null, stdout, stderr],
                 signal: null,
-                status: fixtureCase.response === "api-error" ? 70 : 0,
+                status: ["api-error", "unauthenticated-error"].includes(fixtureCase.response) ||
+                  processFailure
+                  ? 70
+                  : 0,
                 stderr,
                 stdout,
               };
@@ -9496,7 +9580,7 @@ test("capture reuses metadata evidence while each fresh arm is observed in fixed
   const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
   assert.ok(spawnDescriptor !== undefined);
   const originalSpawnSync = childProcess.spawnSync;
-  const metadataBatches: Array<{ anchor: string; mode: "acl" | "xattr"; nodes: string[] }> = [];
+  const metadataBatches: Array<{ anchor: string; nodes: string[] }> = [];
   const legacyTrackedAclAnchors: string[] = [];
   let captured: Capture | null = null;
   let cooperativeLease: CooperativeSourceLease | null = null;
@@ -9513,10 +9597,9 @@ test("capture reuses metadata evidence while each fresh arm is observed in fixed
             const directoryFd = Array.isArray(stdio) ? stdio[3] : null;
             if (typeof directoryFd === "number") {
               const stat = fs.fstatSync(directoryFd, { bigint: true });
-              const mode = childArgs.includes("acl") ? "acl" : "xattr";
+              assert.equal(childArgs.includes("both"), true);
               metadataBatches.push({
                 anchor: `${stat.dev}:${stat.ino}`,
-                mode,
                 nodes: stdio!.slice(4).map((fd) => {
                   assert.equal(typeof fd, "number");
                   const node = fs.fstatSync(fd as number, { bigint: true });
@@ -9558,23 +9641,22 @@ test("capture reuses metadata evidence while each fresh arm is observed in fixed
         `${sourceTracked.dev}:${sourceTracked.ino}`,
         `${destinationTracked.dev}:${destinationTracked.ino}`,
       ]);
-      const trackedAclAnchors = process.platform === "darwin"
+      const trackedMetadataAnchors = process.platform === "darwin"
         ? metadataBatches
-            .filter((batch) =>
-              batch.mode === "acl" && batch.nodes.some((identity) => trackedIdentities.has(identity)))
+            .filter((batch) => batch.nodes.some((identity) => trackedIdentities.has(identity)))
             .map((batch) => batch.anchor)
         : legacyTrackedAclAnchors;
       assert.deepEqual(
-        trackedAclAnchors.sort(),
+        trackedMetadataAnchors.sort(),
         [`${sourceStat.dev}:${sourceStat.ino}`, sealedCapture.workspaceIdentity].sort(),
         "source/destination ACL metadata must each be externally observed exactly once",
       );
       const destinationTrackedIdentity = `${destinationTracked.dev}:${destinationTracked.ino}`;
       const trackedObservationCount = () => process.platform === "darwin"
         ? metadataBatches.filter((batch) => batch.nodes.includes(destinationTrackedIdentity)).length
-        : legacyTrackedAclAnchors.length;
+        : legacyTrackedAclAnchors.filter((anchor) => anchor === sealedCapture.workspaceIdentity).length;
       const destinationTrackedCallsAfterCapture = trackedObservationCount();
-      assert.equal(destinationTrackedCallsAfterCapture, 2);
+      assert.equal(destinationTrackedCallsAfterCapture, 1);
       assert.doesNotThrow(() => workspace.verifySealedSeed(sealedCapture));
       assert.equal(
         trackedObservationCount(),
@@ -9602,20 +9684,20 @@ test("capture reuses metadata evidence while each fresh arm is observed in fixed
         const completeArmCensusBatches = metadataBatches.filter((batch) =>
           batch.anchor === armIdentity &&
           batch.nodes.length === sealedCapture.workspaceObservation.nodeCount);
-        assert.deepEqual(
-          completeArmCensusBatches.map((batch) => batch.mode).sort(),
-          ["acl", "xattr"],
-          "the fresh arm census did not batch all fixture nodes once per native API",
+        assert.equal(
+          completeArmCensusBatches.length,
+          1,
+          "the fresh arm census did not batch all fixture nodes in one native helper",
         );
         const armTracked = fs.lstatSync(path.join(arm.workspaceRoot, "tracked.txt"), {
           bigint: true,
         });
         const armTrackedBatches = metadataBatches.filter((batch) =>
           batch.nodes.includes(`${armTracked.dev}:${armTracked.ino}`));
-        assert.deepEqual(
-          armTrackedBatches.map((batch) => batch.mode).sort(),
-          ["acl", "xattr"],
-          "the fresh arm tracked file was not observed exactly once by each native API batch",
+        assert.equal(
+          armTrackedBatches.length,
+          1,
+          "the fresh arm tracked file was not observed exactly once by the native helper batch",
         );
         assert.equal(
           arm.seedObservationSha256,
@@ -9658,7 +9740,7 @@ test("Darwin directory cohorts batch more than 64 siblings across distinct depth
   const originalMkdir = fs.mkdirSync;
   const originalSpawn = childProcess.spawnSync;
   const copiedIdentities = new Set<string>();
-  const observedModes = new Map<string, Set<string>>();
+  const observedIdentities = new Set<string>();
   let copiedMetadataCalls = 0;
   let widestBatch = 0;
   let captured: Capture | null = null;
@@ -9679,9 +9761,9 @@ test("Darwin directory cohorts batch more than 64 siblings across distinct depth
     childProcess.spawnSync = ((...args: Parameters<typeof childProcess.spawnSync>) => {
       const childArgs = args[1];
       if (Array.isArray(childArgs) && childArgs.includes("/usr/bin/python3")) {
+        assert.equal(childArgs.includes("both"), true);
         const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
         if (Array.isArray(stdio) && stdio.length > 4) {
-          const mode = childArgs.includes("acl") ? "acl" : "xattr";
           const identities = stdio.slice(4).map((fd) => {
             assert.equal(typeof fd, "number");
             const stat = fs.fstatSync(fd as number, { bigint: true });
@@ -9692,11 +9774,7 @@ test("Darwin directory cohorts batch more than 64 siblings across distinct depth
           if (matching.length > 0) {
             copiedMetadataCalls += 1;
             widestBatch = Math.max(widestBatch, matching.length);
-            for (const identity of matching) {
-              const modes = observedModes.get(identity) ?? new Set<string>();
-              modes.add(mode);
-              observedModes.set(identity, modes);
-            }
+            for (const identity of matching) observedIdentities.add(identity);
           }
         }
       }
@@ -9712,7 +9790,7 @@ test("Darwin directory cohorts batch more than 64 siblings across distinct depth
     assert.ok(widestBatch > 1, "directory metadata was never batched");
     assert.ok(copiedMetadataCalls < copiedIdentities.size, "per-directory helper amplification remains");
     for (const identity of copiedIdentities) {
-      assert.deepEqual([...(observedModes.get(identity) ?? [])].sort(), ["acl", "xattr"]);
+      assert.equal(observedIdentities.has(identity), true);
     }
     for (let index = 0; index < 70; index += 1) {
       assert.equal(
@@ -11350,17 +11428,250 @@ test("Phase 2 CLI registry accessor is import-safe and leaves the source and ind
       [
         `const module = await import(${JSON.stringify(cliUrl)});`,
         "const snapshot = module.knockoutRegistrySnapshot();",
-        "process.stdout.write(JSON.stringify({ proofs: Object.keys(snapshot.proofInventory).length, registry: snapshot.registry.length }));",
+        "process.stdout.write(JSON.stringify({ diagnostic: typeof module.isolatedSweepFailureLines, proofs: Object.keys(snapshot.proofInventory).length, registry: snapshot.registry.length }));",
       ].join("\n"),
     ],
     { cwd: repositoryRoot, encoding: "utf8", timeout: 30_000 },
   );
   assert.equal(imported.status, 0, imported.stderr);
-  const summary = JSON.parse(imported.stdout) as { proofs: number; registry: number };
+  const summary = JSON.parse(imported.stdout) as {
+    diagnostic: string;
+    proofs: number;
+    registry: number;
+  };
+  assert.equal(summary.diagnostic, "function");
   assert.ok(summary.registry > 0);
   assert.ok(summary.proofs >= 0);
   assert.equal(sha256File(absoluteIndexPath), indexBefore);
   assert.equal(git(repositoryRoot, ["status", "--porcelain=v1", "-z"]), statusBefore);
+});
+
+test("Phase 2 SELFTEST_FAILED CLI diagnostic distinguishes timeout exit and gate protocol evidence", () => {
+  const sha256 = "a".repeat(64);
+  const custodyRoot = "/private/retained/sweep-fixture";
+  const cases = [
+    {
+      name: "timeout",
+      details: {
+        exit: null,
+        gate: null,
+        gateFindings: [],
+        gateProtocol: null,
+        gateProtocolError: "no completed gate event",
+        problem: "baseline gate observation did not complete before its timeout",
+        resultSha256: sha256,
+        signal: "SIGTERM",
+        terminalSha256: "b".repeat(64),
+        timedOut: true,
+      },
+    },
+    {
+      name: "exit",
+      details: {
+        exit: 2,
+        gate: "knockout-selftest",
+        gateFindings: [],
+        gateProtocol: "noa-gate-event/1",
+        gateProtocolError: null,
+        problem: "clean gate baseline must be exit 0 with zero findings; observed exit 2",
+        resultSha256: sha256,
+        signal: null,
+        terminalSha256: "b".repeat(64),
+        timedOut: false,
+      },
+    },
+    {
+      name: "gate finding",
+      details: {
+        exit: 1,
+        gate: "knockout-selftest",
+        gateFindings: [{
+          detail: "deliberate fixture finding",
+          rule: "SELFTEST",
+          subject: "fixture framework failure",
+        }],
+        gateProtocol: "noa-gate-event/1",
+        gateProtocolError: null,
+        problem: "clean gate baseline must be exit 0 with zero findings",
+        resultSha256: sha256,
+        signal: null,
+        terminalSha256: "b".repeat(64),
+        timedOut: false,
+      },
+    },
+  ];
+  for (const fixture of cases) {
+    const lines = knockoutCli.isolatedSweepFailureLines({
+      code: "SELFTEST_FAILED",
+      details: { ...fixture.details, custodyRoot },
+      message: `selftest ${fixture.name} fixture`,
+    });
+    assert.equal(lines[0], `\nSELFTEST_FAILED: selftest ${fixture.name} fixture`);
+    assert.equal(lines[2], `  retained custody: ${custodyRoot}`);
+    const prefix = "  selftest diagnostic: ";
+    assert.ok(lines[1]?.startsWith(prefix), lines.join("\n"));
+    const payloadText = lines[1]!.slice(prefix.length);
+    assert.deepEqual(JSON.parse(payloadText), fixture.details);
+    assert.equal(
+      workspace.canonicalJsonBytes(JSON.parse(payloadText)).toString("utf8").replace(/\n$/, ""),
+      payloadText,
+    );
+  }
+});
+
+test("Phase 2 SELFTEST_FAILED CLI diagnostic is closed to unknown fields and malformed details", () => {
+  const valid = {
+    exit: 1,
+    gate: "knockout-selftest",
+    gateFindings: [{
+      detail: "typed detail",
+      env: { TOKEN: "must-not-escape" },
+      raw: "must-not-escape",
+      rule: "SELFTEST",
+      source: "/private/source/path",
+      subject: "fixture",
+    }],
+    gateProtocol: "noa-gate-event/1",
+    gateProtocolError: null,
+    problem: "clean gate baseline failed",
+    env: { TOKEN: "must-not-escape" },
+    raw: "must-not-escape",
+    resultSha256: "c".repeat(64),
+    signal: null,
+    source: "/private/source/path",
+    stderr: "must-not-escape",
+    stdout: "must-not-escape",
+    terminalSha256: "d".repeat(64),
+    timedOut: false,
+  };
+  const lines = knockoutCli.isolatedSweepFailureLines({
+    code: "SELFTEST_FAILED",
+    details: valid,
+    message: "closed diagnostic fixture",
+  });
+  const diagnostic = lines[1]!;
+  const payload = JSON.parse(diagnostic.slice("  selftest diagnostic: ".length)) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(payload).sort(), [
+    "exit", "gate", "gateFindings", "gateProtocol", "gateProtocolError", "problem",
+    "resultSha256", "signal", "terminalSha256", "timedOut",
+  ]);
+  assert.deepEqual(payload.gateFindings, [{
+    detail: "typed detail",
+    rule: "SELFTEST",
+    subject: "fixture",
+  }]);
+  assert.doesNotMatch(diagnostic, /must-not-escape|private\/source/);
+
+  for (const details of [
+    null,
+    { exit: 1 },
+    { ...valid, gate: undefined },
+    { ...valid, exit: "1" },
+    { ...valid, gateFindings: [{ detail: "typed", rule: "SELFTEST" }] },
+    { ...valid, timedOut: "false" },
+  ]) {
+    const malformed = knockoutCli.isolatedSweepFailureLines({
+      code: "SELFTEST_FAILED",
+      details,
+      message: "malformed fixture",
+    });
+    assert.equal(malformed[1], "  selftest diagnostic unavailable: MALFORMED_DETAILS");
+  }
+  assert.deepEqual(
+    knockoutCli.isolatedSweepFailureLines({ code: "OTHER_FAILURE", message: "other" }),
+    ["\nOTHER_FAILURE: other"],
+  );
+});
+
+test("Phase 2 SELFTEST_FAILED CLI diagnostic preserves core metadata for admissible oversized details", () => {
+  const base = {
+    exit: 1 as number | null,
+    gate: "knockout-selftest",
+    gateFindings: [{ detail: "d".repeat(20_000), rule: "SELFTEST", subject: "fixture" }],
+    gateProtocol: "noa-gate-runner/1",
+    gateProtocolError: null,
+    problem: "clean gate baseline must be exit 0 with zero findings",
+    resultSha256: "e".repeat(64),
+    signal: null as string | null,
+    terminalSha256: "f".repeat(64),
+    timedOut: false,
+  };
+  const diagnostics: string[] = [];
+  for (const details of [base, {
+    ...base, exit: null, signal: "SIGTERM", timedOut: true,
+    problem: "baseline gate observation did not complete before its timeout",
+  }]) {
+    const wire = workspace.knockoutBaselineWireFromObservation("a".repeat(64), {
+      ...details,
+      armTerminalProtocolComplete: false, armTerminalProtocolError: null, armTerminalSummary: null,
+      failing: new Set(), failureEvents: [], fileFailureCount: 0, findings: 1,
+      gateProtocolComplete: true, gateProvenance: null,
+      protocolComplete: false, protocolError: null, testCount: 0,
+    }, { workspaceRoot: repositoryRoot });
+    assert.ok(workspace.canonicalJsonBytes(wire).length > 16 * 1024);
+    assert.ok(workspace.canonicalJsonBytes(wire).length < 512 * 1024);
+    const lines = knockoutCli.isolatedSweepFailureLines({
+      code: "SELFTEST_FAILED", message: "oversize fixture",
+      details: { ...details, source: "must-not-escape", custodyRoot: "/private/retained/fixture" },
+    });
+    const text = lines[1]!.slice("  selftest diagnostic: ".length);
+    const payload = JSON.parse(text) as Record<string, unknown>;
+    assert.ok(workspace.canonicalJsonBytes(payload).length <= 16 * 1024);
+    assert.equal(workspace.canonicalJsonBytes(payload).toString("utf8").trimEnd(), text);
+    assert.deepEqual(payload, {
+      diagnosticStatus: "OVERSIZE_DETAILS", exit: details.exit, gate: details.gate,
+      gateFindingCount: 1, gateProtocol: details.gateProtocol,
+      gateProtocolError: details.gateProtocolError, omittedFields: ["gateFindings"],
+      problem: details.problem, resultSha256: details.resultSha256, signal: details.signal,
+      terminalSha256: details.terminalSha256, timedOut: details.timedOut,
+    });
+    assert.equal(lines[0], "\nSELFTEST_FAILED: oversize fixture");
+    assert.equal(lines[2], "  retained custody: /private/retained/fixture");
+    assert.doesNotMatch(lines[1]!, /must-not-escape/);
+    diagnostics.push(lines[1]!);
+  }
+  assert.notEqual(diagnostics[0], diagnostics[1], "different failure classes lost their core metadata");
+});
+
+test("Phase 2 SELFTEST_FAILED CLI diagnostic bounds every variable field without losing its fixed core", () => {
+  // JSON escaping and UTF-8 can both exceed JavaScript string-length estimates.
+  const huge = "\u0000界".repeat(20_000);
+  const lines = knockoutCli.isolatedSweepFailureLines({
+    code: "SELFTEST_FAILED", message: "oversize scalar fixture",
+    details: {
+      exit: null, gate: huge, gateProtocol: huge, signal: huge, problem: huge,
+      gateProtocolError: huge,
+      gateFindings: [{ rule: "SELFTEST", subject: "fixture", detail: huge }],
+      resultSha256: "c".repeat(64), terminalSha256: "d".repeat(64), timedOut: true,
+    },
+  });
+  const text = lines[1]!.slice("  selftest diagnostic: ".length);
+  const payload = JSON.parse(text) as Record<string, unknown>;
+  assert.ok(workspace.canonicalJsonBytes(payload).length <= 16 * 1024);
+  assert.deepEqual(payload, {
+    diagnosticStatus: "OVERSIZE_DETAILS", exit: null, gateFindingCount: 1,
+    omittedFields: ["gate", "gateProtocol", "signal", "gateProtocolError", "problem", "gateFindings"],
+    resultSha256: "c".repeat(64), terminalSha256: "d".repeat(64), timedOut: true,
+  });
+});
+
+test("Phase 2 SELFTEST_FAILED actual catch wiring uses the typed diagnostic reporter and keeps exit one", () => {
+  const cliPath = path.join(repositoryRoot, "scripts", "lint-control-knockout.mjs");
+  const source = fs.readFileSync(cliPath, "utf8");
+  const ast = ts.createSourceFile(cliPath, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
+  let catchBlock: string | null = null;
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isTryStatement(node) && node.catchClause !== undefined &&
+      node.tryBlock.getText(ast).includes("runIsolatedKnockoutSweep(")
+    ) catchBlock = node.catchClause.block.getText(ast);
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.ok(catchBlock !== null, "isolated sweep catch block is absent");
+  assert.match(catchBlock, /isolatedSweepFailureLines\(error\)/);
+  assert.match(catchBlock, /console\.error\(line\)/);
+  assert.match(catchBlock, /process\.exitCode = 1/);
 });
 
 test("Phase 2 worker operations have one closed execution-role mapping", () => {

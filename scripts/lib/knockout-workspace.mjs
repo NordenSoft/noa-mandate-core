@@ -215,6 +215,7 @@ const DIRECTORY = fs.constants.O_DIRECTORY ?? 0;
 const SYMLINK = fs.constants.O_SYMLINK ?? 0;
 const METADATA_FCHDIR_LAUNCHER = "/usr/bin/perl";
 const MAC_METADATA_HELPER = "/usr/bin/python3";
+const MAC_METADATA_EXPECTED_INPUT_BYTES = MAC_METADATA_BATCH_NODE_LIMIT * 1024;
 const METADATA_FCHDIR_SCRIPT = [
   "open(my $directory, q{<&=3}) or die q{metadata directory descriptor unavailable};",
   "chdir($directory) or die q{metadata directory cannot be entered};",
@@ -239,12 +240,21 @@ EXIT_REFUSED = 70
 ACL_TYPE_EXTENDED = 0x00000100
 ACL_FIRST_ENTRY = 0
 PROVENANCE = b"com.apple.provenance"
+REFUSAL_PREFIX = "NOA_MAC_METADATA_REFUSAL_V1"
+failure_token = None
+active_phase = "setup"
 
 def refuse(stage, error_number=0):
-    sys.stderr.write("mac metadata helper refused " + stage + " errno=" + str(error_number) + "\n")
+    if failure_token is None:
+        sys.stderr.write("mac metadata helper refused " + stage + " errno=" + str(error_number) + "\n")
+    else:
+        sys.stderr.write(
+            REFUSAL_PREFIX + " token=" + failure_token + " phase=" + active_phase +
+            " stage=" + stage + " errno=" + str(error_number) + "\n"
+        )
     raise SystemExit(EXIT_REFUSED)
 
-if sys.platform != "darwin" or len(sys.argv) != 5:
+if sys.platform != "darwin" or len(sys.argv) != 7:
     refuse("arguments")
 
 mode = sys.argv[1]
@@ -252,10 +262,28 @@ try:
     output_limit = int(sys.argv[2])
     raw_limit = int(sys.argv[3])
     descriptor_count = int(sys.argv[4])
+    expected_input_limit = int(sys.argv[5])
 except ValueError:
     refuse("arguments")
-if mode not in ("acl", "xattr") or output_limit < 1 or raw_limit < 1 or not 1 <= descriptor_count <= 64:
+candidate_token = sys.argv[6]
+if (
+    mode != "both" or output_limit < 1 or raw_limit < 1 or
+    not 1 <= descriptor_count <= 64 or expected_input_limit < 1 or
+    len(candidate_token) != 64 or
+    any(character not in "0123456789abcdef" for character in candidate_token)
+):
     refuse("arguments")
+failure_token = candidate_token
+
+expected_input = sys.stdin.buffer.read(expected_input_limit + 1)
+if len(expected_input) > expected_input_limit:
+    refuse("expected_input_limit")
+try:
+    expected_records = json.loads(expected_input)
+except (UnicodeDecodeError, json.JSONDecodeError):
+    refuse("expected_input")
+if not isinstance(expected_records, list) or len(expected_records) != descriptor_count:
+    refuse("expected_input")
 
 libc = ctypes.CDLL(None, use_errno=True)
 libc.flistxattr.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
@@ -379,44 +407,72 @@ def acl_present(fd):
             refuse("acl_free", ctypes.get_errno())
     return result
 
-records = []
+active_phase = "acl"
+acl_records = []
 for ordinal in range(descriptor_count):
     fd = 4 + ordinal
     before = stat_record(fd)
-    if mode == "acl":
-        first = acl_present(fd)
-        second = acl_present(fd)
-        if first != second:
-            refuse("acl_changed")
-        record = {"fd": fd, "present": first, "stat": before}
-    else:
-        names_raw = list_xattrs(fd, True)
-        names = split_xattr_names(names_raw)
-        provenance = None
-        if PROVENANCE in names:
-            provenance = read_xattr(fd, PROVENANCE, True)
-        names_confirmed = list_xattrs(fd, False)
-        if names_confirmed != names_raw:
-            refuse("xattr_names_changed")
-        if provenance is not None:
-            provenance_confirmed = read_xattr(fd, PROVENANCE, False)
-            if provenance_confirmed != provenance:
-                refuse("provenance_changed")
-        record = {
-            "fd": fd,
-            "namesBase64": [base64.b64encode(name).decode("ascii") for name in names],
-            "provenanceBase64": None if provenance is None else base64.b64encode(provenance).decode("ascii"),
-            "stat": before,
-        }
+    if before != expected_records[ordinal]:
+        refuse("expected_descriptor_changed")
+    first = acl_present(fd)
+    second = acl_present(fd)
+    if first != second:
+        refuse("acl_changed")
+    if first:
+        refuse("acl_present")
     after = stat_record(fd)
     if after != before:
         refuse("descriptor_changed")
-    records.append(record)
+    acl_records.append({"fd": fd, "present": False, "stat": before})
 
-encoded = json.dumps(records, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii")
-if len(encoded) > output_limit:
+encoded_acl = json.dumps(
+    acl_records, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+).encode("ascii")
+if len(encoded_acl) > output_limit:
     refuse("output_limit")
-sys.stdout.buffer.write(encoded)
+
+active_phase = "xattr"
+xattr_records = []
+for ordinal in range(descriptor_count):
+    fd = 4 + ordinal
+    before = stat_record(fd)
+    if before != expected_records[ordinal]:
+        refuse("expected_descriptor_changed")
+    names_raw = list_xattrs(fd, True)
+    names = split_xattr_names(names_raw)
+    provenance = None
+    if PROVENANCE in names:
+        provenance = read_xattr(fd, PROVENANCE, True)
+    names_confirmed = list_xattrs(fd, False)
+    if names_confirmed != names_raw:
+        refuse("xattr_names_changed")
+    if provenance is not None:
+        provenance_confirmed = read_xattr(fd, PROVENANCE, False)
+        if provenance_confirmed != provenance:
+            refuse("provenance_changed")
+    after = stat_record(fd)
+    if after != before:
+        refuse("descriptor_changed")
+    xattr_records.append({
+        "fd": fd,
+        "namesBase64": [base64.b64encode(name).decode("ascii") for name in names],
+        "provenanceBase64": None if provenance is None else base64.b64encode(provenance).decode("ascii"),
+        "stat": before,
+    })
+
+encoded_xattr = json.dumps(
+    xattr_records, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+).encode("ascii")
+if len(encoded_xattr) > output_limit:
+    refuse("output_limit")
+framing_size = len(b'{"acl":') + len(encoded_acl) + len(b',"xattr":') + len(encoded_xattr) + 1
+if framing_size > output_limit:
+    refuse("combined_output_limit")
+sys.stdout.buffer.write(b'{"acl":')
+sys.stdout.buffer.write(encoded_acl)
+sys.stdout.buffer.write(b',"xattr":')
+sys.stdout.buffer.write(encoded_xattr)
+sys.stdout.buffer.write(b'}')
 `;
 const WORKER_FCHDIR_SCRIPT = [
   "open(my $directory, q{<&=7}) or die q{worker directory descriptor unavailable};",
@@ -4038,6 +4094,8 @@ function toolResult(
   timeoutMs = MAX_CHILD_PROCESS_DURATION_MS,
   directoryFd,
   inheritedDescriptors = [],
+  input = null,
+  macMetadataFailureToken = null,
 ) {
   const boundedTimeoutMs = requireCommandTimeoutMs(timeoutMs);
   if (!Number.isInteger(directoryFd) || directoryFd < 0) {
@@ -4056,6 +4114,18 @@ function toolResult(
       "metadata tool inherited-descriptor batch is malformed",
     );
   }
+  if (input !== null && !Buffer.isBuffer(input)) {
+    fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "metadata tool input is malformed");
+  }
+  if (
+    macMetadataFailureToken !== null &&
+    (typeof macMetadataFailureToken !== "string" || !HASH_64.test(macMetadataFailureToken))
+  ) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT,
+      "metadata helper failure token is malformed",
+    );
+  }
   // Node exposes no fchdir operation and Darwin's /dev/fd/<n> cannot be traversed. This fixed,
   // argument-only launcher performs exactly fchdir(descriptor) + exec(target, argv): no pathname
   // lookup of the admitted anchor and no shell interpolation can occur in the metadata child.
@@ -4065,9 +4135,11 @@ function toolResult(
     {
       encoding: null,
       env: { LANG: "C", LC_ALL: "C", PATH: "/usr/bin:/bin" },
+      ...(input === null ? {} : { input }),
       killSignal: "SIGKILL",
       maxBuffer: MAX_TOOL_OUTPUT_BYTES,
-      stdio: ["ignore", "pipe", "pipe", directoryFd, ...inheritedDescriptors],
+      stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe", directoryFd,
+        ...inheritedDescriptors],
       timeout: boundedTimeoutMs,
     },
   );
@@ -4075,7 +4147,10 @@ function toolResult(
     result.error !== undefined || result.status !== 0 ||
     !Buffer.isBuffer(result.stdout) || !Buffer.isBuffer(result.stderr) || result.stderr.length !== 0
   ) {
-    const stableCode = childProcessFailureCode(result.error, code);
+    const processFailureCode = childProcessFailureCode(result.error, code);
+    const stableCode = processFailureCode === code && macMetadataFailureToken !== null
+      ? macMetadataHelperFailureCode(result, macMetadataFailureToken, code)
+      : processFailureCode;
     fail(
       stableCode,
       `cannot inspect ${label}`,
@@ -4098,13 +4173,34 @@ function toolResult(
   return result.stdout;
 }
 
+function macMetadataHelperFailureCode(result, expectedToken, fallback) {
+  if (
+    result.error !== undefined || result.status !== 70 ||
+    !Buffer.isBuffer(result.stdout) || result.stdout.length !== 0 ||
+    !Buffer.isBuffer(result.stderr)
+  ) {
+    return fallback;
+  }
+  const marker = /^NOA_MAC_METADATA_REFUSAL_V1 token=([0-9a-f]{64}) phase=(acl|xattr) stage=([a-z0-9_]+) errno=([0-9]+)\n$/
+    .exec(result.stderr.toString("utf8"));
+  if (marker === null || marker[1] !== expectedToken) return fallback;
+  // The new parent-expectation guard replaces the old parent stat comparison.
+  // Within-helper descriptor changes retain the original ACL/xattr refusal code.
+  if (marker[3] === "expected_descriptor_changed") {
+    return KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE;
+  }
+  return marker[2] === "acl"
+    ? KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED
+    : KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED;
+}
+
 function metadataTimeout(operationBudget, label) {
   return operationBudget === null
     ? MAX_CHILD_PROCESS_DURATION_MS
     : remainingOperationMs(operationBudget, label);
 }
 
-function parseMacMetadataHelperJson(output, observations, code, label) {
+function parseMacMetadataHelperCanonicalJson(output, code, label) {
   const text = decodeUtf8(
     output,
     label,
@@ -4120,12 +4216,6 @@ function parseMacMetadataHelperJson(output, observations, code, label) {
       error,
     );
   }
-  if (!Array.isArray(parsed) || parsed.length !== observations.length) {
-    fail(
-      code,
-      `${label} does not cover the complete descriptor batch`,
-    );
-  }
   let canonical;
   try { canonical = canonicalJsonBytes(parsed); }
   catch (error) {
@@ -4137,8 +4227,48 @@ function parseMacMetadataHelperJson(output, observations, code, label) {
   return parsed;
 }
 
-function requireMacMetadataHelperStat(value, observation, label) {
-  const expected = {
+function parseMacMetadataHelperJson(output, observations, code, label) {
+  const parsed = parseMacMetadataHelperCanonicalJson(output, code, label);
+  if (!Array.isArray(parsed) || parsed.length !== observations.length) {
+    fail(
+      code,
+      `${label} does not cover the complete descriptor batch`,
+    );
+  }
+  return parsed;
+}
+
+function parseMacMetadataHelperEnvelope(output) {
+  const parsed = parseMacMetadataHelperCanonicalJson(
+    output,
+    KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
+    "combined macOS metadata descriptor batch",
+  );
+  if (!hasExactObjectKeys(parsed, ["acl", "xattr"])) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
+      "combined macOS metadata descriptor batch has malformed sections",
+    );
+  }
+  const sectionOutput = (section, label) => {
+    const canonical = canonicalJsonBytes(section);
+    if (canonical.length - 1 > MAX_TOOL_OUTPUT_BYTES) {
+      fail(
+        KNOCKOUT_WORKSPACE_ERROR_CODES.RESOURCE_LIMIT_EXCEEDED,
+        `${label} exceeds its fixed byte limit`,
+        { limitBytes: MAX_TOOL_OUTPUT_BYTES, observedBytes: canonical.length - 1 },
+      );
+    }
+    return canonical.subarray(0, canonical.length - 1);
+  };
+  return Object.freeze({
+    acl: sectionOutput(parsed.acl, "macOS ACL descriptor batch"),
+    xattr: sectionOutput(parsed.xattr, "macOS extended-attribute descriptor batch"),
+  });
+}
+
+function macMetadataExpectedStat(observation) {
+  return Object.freeze({
     ctimeNs: observation.opened.ctimeNs,
     identity: observation.opened.identity,
     mode: observation.opened.mode,
@@ -4147,7 +4277,11 @@ function requireMacMetadataHelperStat(value, observation, label) {
     size: observation.opened.size,
     type: observation.opened.type,
     uid: observation.opened.uid,
-  };
+  });
+}
+
+function requireMacMetadataHelperStat(value, observation, label) {
+  const expected = macMetadataExpectedStat(observation);
   if (
     !hasExactObjectKeys(value, [
       "ctimeNs", "identity", "mode", "mtimeNs", "nlink", "size", "type", "uid",
@@ -4209,6 +4343,7 @@ function parseMacXattrObservations(output, observations) {
     KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
     "macOS extended-attribute descriptor batch",
   );
+  const metadata = new Array(observations.length);
   for (let index = 0; index < observations.length; index++) {
     const value = parsed[index];
     const observation = observations[index];
@@ -4251,12 +4386,15 @@ function parseMacXattrObservations(output, observations) {
     const provenance = value.provenanceBase64 === null
       ? null
       : decodeMacMetadataBase64(value.provenanceBase64, "macOS provenance value");
-    observation.metadata = Object.freeze({
+    metadata[index] = Object.freeze({
       classification: PROVENANCE_CLASSIFICATION,
       length: provenance?.length ?? 0,
       present: provenance !== null,
       sha256: provenance === null ? null : sha256(provenance),
     });
+  }
+  for (let index = 0; index < observations.length; index++) {
+    observations[index].metadata = metadata[index];
   }
 }
 
@@ -4610,35 +4748,39 @@ function observeMacMetadataBatch(
           String(MAX_TOOL_OUTPUT_BYTES),
           String(Math.floor(MAX_TOOL_OUTPUT_BYTES / 2)),
           String(misses.length),
+          String(MAC_METADATA_EXPECTED_INPUT_BYTES),
         ];
-        const aclOutput = toolResult(
+        const expectedInput = canonicalJsonBytes(misses.map(macMetadataExpectedStat));
+        if (expectedInput.length > MAC_METADATA_EXPECTED_INPUT_BYTES) {
+          fail(
+            KNOCKOUT_WORKSPACE_ERROR_CODES.RESOURCE_LIMIT_EXCEEDED,
+            "macOS metadata descriptor expectations exceed their fixed byte limit",
+            {
+              limitBytes: MAC_METADATA_EXPECTED_INPUT_BYTES,
+              observedBytes: expectedInput.length,
+            },
+          );
+        }
+        const failureToken = crypto.randomBytes(32).toString("hex");
+        const combinedOutput = toolResult(
           MAC_METADATA_HELPER,
           [
             ...helperPrefix,
-            "acl",
+            "both",
             ...helperLimits,
+            failureToken,
           ],
           KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
-          "batched macOS ACLs",
-          metadataTimeout(operationBudget, "batched macOS ACL inspection"),
+          "batched macOS ACLs and extended attributes",
+          metadataTimeout(operationBudget, "batched macOS metadata inspection"),
           directoryFd,
           openedNodeFds,
+          expectedInput,
+          failureToken,
         );
-        parseMacAclObservations(aclOutput, misses);
-        const xattrOutput = toolResult(
-          MAC_METADATA_HELPER,
-          [
-            ...helperPrefix,
-            "xattr",
-            ...helperLimits,
-          ],
-          KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
-          "batched macOS extended attributes",
-          metadataTimeout(operationBudget, "batched macOS extended-attribute inspection"),
-          directoryFd,
-          openedNodeFds,
-        );
-        parseMacXattrObservations(xattrOutput, misses);
+        const sections = parseMacMetadataHelperEnvelope(combinedOutput);
+        parseMacAclObservations(sections.acl, misses);
+        parseMacXattrObservations(sections.xattr, misses);
       }
 
       for (const record of records) {

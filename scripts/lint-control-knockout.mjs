@@ -49,7 +49,10 @@ import {
   deriveBoundaryKnockoutCandidateSubject,
   loadAttestedTypeScriptForKnockout,
 } from "./lib/boundary-bootstrap.mjs";
-import { KNOCKOUT_WORKSPACE_ARM_LIMITS } from "./lib/knockout-workspace.mjs";
+import {
+  canonicalJsonBytes,
+  KNOCKOUT_WORKSPACE_ARM_LIMITS,
+} from "./lib/knockout-workspace.mjs";
 import { localPackageDependencyOrder } from "./lib/proof-resolve.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -58,6 +61,102 @@ const DIRECT_ENTRY = typeof process.argv[1] === "string" &&
 const CLI_ARGS = DIRECT_ENTRY ? process.argv.slice(2) : [];
 const CLI_VALUE_OPTIONS = new Set(["--only", "--shard"]);
 const CLI_FLAG_OPTIONS = new Set(["--print-suite-packages", "--selftest-unknown-kind", "--warn"]);
+// Bound the added CI log line while retaining fixed-size metadata for oversized observations.
+const SELFTEST_DIAGNOSTIC_MAX_PAYLOAD_BYTES = 16 * 1024;
+const HEX_64_RE = /^[0-9a-f]{64}$/;
+const hasOwn = (record, key) => Object.prototype.hasOwnProperty.call(record, key);
+
+function selftestFailureDiagnosticLine(details) {
+  try {
+    if (details === null || typeof details !== "object" || Array.isArray(details)) {
+      return "  selftest diagnostic unavailable: MALFORMED_DETAILS";
+    }
+    const required = [
+      "exit", "gate", "gateFindings", "gateProtocol", "gateProtocolError", "problem",
+      "resultSha256", "signal", "terminalSha256", "timedOut",
+    ];
+    if (required.some((key) => !hasOwn(details, key))) {
+      return "  selftest diagnostic unavailable: MALFORMED_DETAILS";
+    }
+    if (
+      !(details.exit === null || Number.isSafeInteger(details.exit)) ||
+      !(details.gate === null || typeof details.gate === "string") ||
+      !Array.isArray(details.gateFindings) ||
+      !(details.gateProtocol === null || typeof details.gateProtocol === "string") ||
+      !(details.gateProtocolError === null || typeof details.gateProtocolError === "string") ||
+      !(details.problem === null || typeof details.problem === "string") ||
+      typeof details.resultSha256 !== "string" || !HEX_64_RE.test(details.resultSha256) ||
+      !(details.signal === null || typeof details.signal === "string") ||
+      typeof details.terminalSha256 !== "string" || !HEX_64_RE.test(details.terminalSha256) ||
+      typeof details.timedOut !== "boolean"
+    ) {
+      return "  selftest diagnostic unavailable: MALFORMED_DETAILS";
+    }
+    const gateFindings = details.gateFindings.map((finding) => {
+      if (
+        finding === null || typeof finding !== "object" || Array.isArray(finding) ||
+        typeof finding.rule !== "string" || finding.rule.length === 0 ||
+        typeof finding.subject !== "string" || finding.subject.length === 0 ||
+        typeof finding.detail !== "string"
+      ) {
+        throw new TypeError("malformed gate finding");
+      }
+      return { detail: finding.detail, rule: finding.rule, subject: finding.subject };
+    });
+    const payload = {
+      exit: details.exit,
+      gate: details.gate,
+      gateFindings,
+      gateProtocol: details.gateProtocol,
+      gateProtocolError: details.gateProtocolError,
+      problem: details.problem,
+      resultSha256: details.resultSha256,
+      signal: details.signal,
+      terminalSha256: details.terminalSha256,
+      timedOut: details.timedOut,
+    };
+    let bytes = canonicalJsonBytes(payload);
+    if (bytes.length > SELFTEST_DIAGNOSTIC_MAX_PAYLOAD_BYTES) {
+      const variableFields = ["gate", "gateProtocol", "signal", "gateProtocolError", "problem", "gateFindings"];
+      let partial = {
+        diagnosticStatus: "OVERSIZE_DETAILS",
+        exit: payload.exit,
+        gateFindingCount: gateFindings.length,
+        omittedFields: variableFields,
+        resultSha256: payload.resultSha256,
+        terminalSha256: payload.terminalSha256,
+        timedOut: payload.timedOut,
+      };
+      bytes = canonicalJsonBytes(partial);
+      for (const key of variableFields) {
+        const candidate = {
+          ...partial,
+          [key]: payload[key],
+          omittedFields: partial.omittedFields.filter((field) => field !== key),
+        };
+        const candidateBytes = canonicalJsonBytes(candidate);
+        if (candidateBytes.length <= SELFTEST_DIAGNOSTIC_MAX_PAYLOAD_BYTES) {
+          partial = candidate;
+          bytes = candidateBytes;
+        }
+      }
+    }
+    const serialized = bytes.toString("utf8").replace(/\n$/, "");
+    return `  selftest diagnostic: ${serialized}`;
+  } catch {
+    return "  selftest diagnostic unavailable: MALFORMED_DETAILS";
+  }
+}
+
+export function isolatedSweepFailureLines(error) {
+  const code = typeof error?.code === "string" ? error.code : "ISOLATED_SWEEP_FAILED";
+  const lines = [`\n${code}: ${String(error?.message ?? error)}`];
+  if (code === "SELFTEST_FAILED") lines.push(selftestFailureDiagnosticLine(error?.details));
+  if (typeof error?.details?.custodyRoot === "string") {
+    lines.push(`  retained custody: ${error.details.custodyRoot}`);
+  }
+  return Object.freeze(lines);
+}
 
 function cliArgumentProblem(args) {
   const seen = new Set();
@@ -4651,11 +4750,7 @@ if (DIRECT_ENTRY) {
       workerTimeoutMs: ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS.workerTimeoutMs,
     });
   } catch (error) {
-    const code = typeof error?.code === "string" ? error.code : "ISOLATED_SWEEP_FAILED";
-    console.error(`\n${code}: ${String(error?.message ?? error)}`);
-    if (typeof error?.details?.custodyRoot === "string") {
-      console.error(`  retained custody: ${error.details.custodyRoot}`);
-    }
+    for (const line of isolatedSweepFailureLines(error)) console.error(line);
     process.exitCode = 1;
   }
 

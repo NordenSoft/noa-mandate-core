@@ -79,8 +79,8 @@ const FLOORS = [
     control: 'VERSION FLOOR ONLY — ajv runs it on our behalf while validating tool schemas',
   },
   {
-    name: 'hono', path: ['hono'], floor: '4.12.34',
-    advisory: 'GHSA-8j4g-w8fx-2239 (ReDoS in CORS middleware)',
+    name: 'hono', path: ['hono'], floor: '4.13.5',
+    advisory: 'GHSA-8j4g-w8fx-2239 (ReDoS in CORS middleware) + GHSA-crvj-82cr-hjcx (query fragment differential) + GHSA-g6gw-c38x-mqfc (parseBody nesting exhaustion) + GHSA-gqvv-2mrq-wpjv (SSG traversal)',
     control: 'VERSION FLOOR ONLY — the SDK serves the HTTP+SSE transport with it',
   },
   {

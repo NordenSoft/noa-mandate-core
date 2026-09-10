@@ -808,7 +808,7 @@ const LEGACY_PUBLISHER_WORKFLOWS = ["publish.yml", "publish-mcp.yml", "publish-t
 // A partial lexer cannot safely decide which hash begins YAML prose, so this quarantine ignores
 // nothing. Any material or prose change requires explicit re-review of the whole tiny workflow.
 const CLOSED_WORKFLOW_SHA256 = Object.freeze({
-  "boundary.yml": "7b0bd804e92afa0d98770e2c022a08671a264de02be2afbf60385348b0ca4796",
+  "boundary.yml": "f630fe249a7cd32c2c13d135767913f57f3a85b0d3b8dc75c2a30326e7d4e94d",
   "publish.yml": "95a5c267c674326e90ca97b1abe8c9b5b1628b7ca05a820851bbdb852795d5c3",
   "publish-mcp.yml": "7a38cf1cd331d2a61a2890f1430b422996e7c85d7aa892a18c2a8760bbcbc0e7",
   "publish-tsa.yml": "91745dac92651660718868884d203af96f7bcc42f5986ce9f319087c4b38716e",
@@ -892,7 +892,24 @@ check("boundary workflow is keyless Tier-A CI with least privilege", () => {
   const problems = boundaryWorkflowProblems(raw);
   assert.deepEqual(problems, [], problems.join("; "));
 
+  const pinnedImageAcquisition = [
+    "      - name: Acquire the exact boundary packer image (setup only; packer retains pull=never)",
+    "        run: |",
+    "          node --input-type=module --eval '",
+    '            import { execFileSync } from "node:child_process";',
+    '            import { fixedDockerExecutable } from "./scripts/lib/knockout-runner.mjs";',
+    '            import { NODE_IMAGE } from "./scripts/lib/publish-artifact-staging.mjs";',
+    '            execFileSync(fixedDockerExecutable(), ["pull", NODE_IMAGE], { stdio: "inherit" });',
+    "          '",
+  ].join("\n");
+  assert.equal(
+    base.split(pinnedImageAcquisition).length,
+    2,
+    "the exact source-owned boundary packer image acquisition must occur once",
+  );
+
   const mutations = [
+    ["missing pinned packer image acquisition", pinnedImageAcquisition, "      - run: node --version"],
     ["arbitrary ref trigger", "    branches: [main]\n", "    branches: ['**']\n    tags: ['**']\n"],
     ["secret access", "        shell: bash\n", "        shell: bash\n        env:\n          NOA_BOUNDARY_KEY: ${{ secrets['NOA_BOUNDARY_KEY'] }}\n"],
     ["whole secrets context", "        shell: bash\n", "        shell: bash\n        env:\n          OBSERVED: ${{ toJSON(secrets) }}\n"],
