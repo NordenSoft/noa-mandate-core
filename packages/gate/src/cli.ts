@@ -124,13 +124,22 @@ function flag(args: string[], name: string): string | undefined {
 }
 
 async function holdAndRun(args: string[]): Promise<number> {
-  const url = flag(args, "url") ?? "http://127.0.0.1:8899";
-  const key = flag(args, "key") ?? process.env["NOA_GATE_KEY"];
-  const canonical = flag(args, "canonical") ?? "noa.command.exec";
-  const risk = flag(args, "risk") ?? "HIGH";
-  const cwd = flag(args, "cwd") ?? process.cwd();
-  const targetEnv = flag(args, "target-env") ?? "production";
   const dashDash = args.indexOf("--");
+  const options = dashDash < 0 ? args : args.slice(0, dashDash);
+  const explicitUrl = flag(options, "url");
+  const explicitKey = flag(options, "key");
+  const environmentUrl = process.env["NOA_GATE_URL"];
+  if ((options.includes("--url") && explicitKey === undefined) ||
+    (explicitKey !== undefined && explicitUrl === undefined && environmentUrl !== undefined)) {
+    process.stderr.write("hold-and-run: GATE_CREDENTIAL_SOURCE_MISMATCH; use NOA_GATE_URL with NOA_GATE_KEY, or provide both --url and --key\n");
+    return 2;
+  }
+  const url = explicitUrl ?? environmentUrl ?? "http://127.0.0.1:8899";
+  const key = explicitKey ?? process.env["NOA_GATE_KEY"];
+  const canonical = flag(options, "canonical") ?? "noa.command.exec";
+  const risk = flag(options, "risk") ?? "HIGH";
+  const cwd = flag(options, "cwd") ?? process.cwd();
+  const targetEnv = flag(options, "target-env") ?? "production";
   const cmd = dashDash >= 0 ? args.slice(dashDash + 1) : [];
   if (!key) {
     process.stderr.write("hold-and-run: --key (or NOA_GATE_KEY) is required\n");
