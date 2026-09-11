@@ -15,8 +15,8 @@
       "name": "noa-receipt",
       "noticeTitle": "NOA Receipt — the open Agent Action Receipt organ",
       "packagePath": ".",
-      "pathCount": 74,
-      "pathSetSha256": "372fc74d8a716fc7b6e7aad7718b8be16133bdeef9e4c66d292e6b12ab192970"
+      "pathCount": 73,
+      "pathSetSha256": "9d1aa4c461046c038c47f18422d8f56205298ea4e80b7b5dd73d76b7e6deb686"
     },
     {
       "name": "noa-mcp-adapter-core",
