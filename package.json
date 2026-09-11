@@ -96,7 +96,7 @@
     "lint:stranded-branches": "node scripts/lint-stranded-branches.mjs --selftest && node scripts/lint-stranded-branches.mjs"
   },
   "devDependencies": {
-    "@types/node": "^26.1.2",
+    "@types/node": "^26.5.0",
     "cbor2": "^2.3.0",
     "typescript": "5.9.3",
     "vitest": "4.1.11"
