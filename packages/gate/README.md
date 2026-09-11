@@ -47,6 +47,19 @@ engine as bytes rather than caller-owned objects.
 Route names and payloads are an implementation surface, not proof that a particular client,
 identity provider, notification service, storage backend, or deployment is available.
 
+## HTTP client configuration
+
+`HttpGateClient` accepts an operator-trusted origin. Use HTTPS for remote servers; HTTP is allowed
+only for literal loopback addresses. User information, paths beyond `/`, query strings, fragments,
+and redirects are refused. Client configuration selects where the bearer credential is sent and
+must come from the same trusted configuration boundary as that credential.
+
+For `hold-and-run`, pair `NOA_GATE_KEY` with `NOA_GATE_URL` (default `http://127.0.0.1:8899`), or
+supply both `--url` and `--key`. Mixing an argument-provided origin with an environment-only
+credential, or an argument-provided credential with an environment-only origin, is refused.
+`--key` alone uses the default loopback origin only when `NOA_GATE_URL` is unset.
+Options after `--` belong to the wrapped command.
+
 ## Starting the reference server
 
 `noa-gate serve` binds to `127.0.0.1:8899` by default. `NOA_GATE_TENANT`, `NOA_GATE_BIND`, and

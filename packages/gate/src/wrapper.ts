@@ -54,10 +54,29 @@ export interface GateClient {
   report(grantId: string, body: Uint8Array): Promise<EngineResult>;
 }
 
-/** HTTP client — talks to a running gate over localhost (the real `noa hold-and-run` transport).
+/** HTTP client for an operator-trusted origin. Remote origins require HTTPS; plaintext HTTP
+ *  is restricted to literal loopback. Redirects cannot select a different credential destination.
  *  Uses global `fetch` (Node ≥ 20). Every response is normalized to an `EngineResult`. */
 export class HttpGateClient implements GateClient {
-  constructor(private readonly baseUrl: string, private readonly apiKey: string) {}
+  private readonly baseUrl: string;
+
+  constructor(baseUrl: string, private readonly apiKey: string) {
+    let endpoint: URL;
+    try {
+      endpoint = new URL(baseUrl);
+    } catch {
+      throw new Error("GATE_ENDPOINT_INVALID");
+    }
+    const loopback = endpoint.hostname === "127.0.0.1" || endpoint.hostname === "[::1]";
+    if (
+      (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && loopback)) ||
+      endpoint.username !== "" || endpoint.password !== "" || endpoint.pathname !== "/" ||
+      endpoint.href.includes("?") || endpoint.href.includes("#")
+    ) {
+      throw new Error("GATE_ENDPOINT_INVALID");
+    }
+    this.baseUrl = endpoint.origin;
+  }
 
   private headers(): Record<string, string> {
     return { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" };
@@ -69,20 +88,20 @@ export class HttpGateClient implements GateClient {
   async createHold(idempotencyKey: string, body: Uint8Array): Promise<EngineResult> {
     // The caller's bytes go on the wire UNCHANGED — no re-serialization here. That is the point of the
     // signature change: the document the caller committed to is the document the gate parses.
-    const res = await fetch(`${this.baseUrl}/v1/holds`, { method: "POST", headers: { ...this.headers(), "idempotency-key": idempotencyKey }, body });
+    const res = await fetch(`${this.baseUrl}/v1/holds`, { redirect: "error", method: "POST", headers: { ...this.headers(), "idempotency-key": idempotencyKey }, body });
     return this.toResult(res);
   }
   async wait(holdId: string, timeoutMs: number): Promise<EngineResult> {
     const sec = Math.max(0, Math.min(25, Math.round(timeoutMs / 1000)));
-    const res = await fetch(`${this.baseUrl}/v1/holds/${encodeURIComponent(holdId)}/wait?timeout=${sec}`, { headers: this.headers() });
+    const res = await fetch(`${this.baseUrl}/v1/holds/${encodeURIComponent(holdId)}/wait?timeout=${sec}`, { redirect: "error", headers: this.headers() });
     return this.toResult(res);
   }
   async reserve(grantId: string): Promise<EngineResult> {
-    const res = await fetch(`${this.baseUrl}/v1/grants/${encodeURIComponent(grantId)}/reserve`, { method: "POST", headers: this.headers(), body: "{}" });
+    const res = await fetch(`${this.baseUrl}/v1/grants/${encodeURIComponent(grantId)}/reserve`, { redirect: "error", method: "POST", headers: this.headers(), body: "{}" });
     return this.toResult(res);
   }
   async report(grantId: string, body: Uint8Array): Promise<EngineResult> {
-    const res = await fetch(`${this.baseUrl}/v1/grants/${encodeURIComponent(grantId)}/report`, { method: "POST", headers: this.headers(), body });
+    const res = await fetch(`${this.baseUrl}/v1/grants/${encodeURIComponent(grantId)}/report`, { redirect: "error", method: "POST", headers: this.headers(), body });
     return this.toResult(res);
   }
 }
