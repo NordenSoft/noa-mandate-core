@@ -1467,6 +1467,7 @@
     "test/security/r7-exploits/c02_includes425.mjs": "root kernel tests: string-keyring consumers",
     "test/security/r7-exploits/c02_sethas_verdict.mjs": "root kernel tests: string-keyring consumers",
     "test/security/r7-exploits/o01_preload_includes.mjs": "root kernel tests: string-keyring consumers",
+    "test/serve/frame-deadline.test.ts": "root kernel tests: string-keyring consumers",
     "test/serve/ipc-rehearsal.test.ts": "root kernel tests: string-keyring consumers",
     "test/survivable-retirement-conformance.test.ts": "G2 canonical TypeScript corpus consumer: loads checked-in receipt, lifecycle and checkpoint keyring bytes and asserts verifyHistoricalChain matches every versioned oracle; constructs no lifecycle entry and resolves no key itself",
     "test/verify.test.ts": "root kernel tests: string-keyring consumers",

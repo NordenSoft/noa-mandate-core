@@ -29,6 +29,7 @@ export const PROTO_ID = "noa-kernel-rehearsal/0";
 /** Spec §1 — equals the one-shot CLI's MAX_FILE_BYTES (src/cli.ts). */
 export const MAX_FRAME = 64 * 1024 * 1024;
 export const VERSION = 0x01;
+const MAX_FRAME_TIMEOUT_MS = 2_147_483_647;
 
 export const TYPE = {
   HELLO: 0x01,
@@ -174,7 +175,7 @@ export function runServe(args: string[]): Promise<number> {
     if (a === "--frame-timeout-ms") {
       const v = args[++i];
       const n = Number(v);
-      if (v === undefined || !Number.isSafeInteger(n) || n <= 0) {
+      if (v === undefined || !Number.isSafeInteger(n) || n <= 0 || n > MAX_FRAME_TIMEOUT_MS) {
         process.stderr.write("error: --frame-timeout-ms must be a positive integer\n");
         return Promise.resolve(4);
       }
@@ -275,12 +276,16 @@ export function runServe(args: string[]): Promise<number> {
         const payload = acc.subarray(0, need);
         acc = acc.subarray(need);
         need = null;
+        // This frame is complete. Its absolute assembly deadline must not carry into
+        // either payload handling or a following frame already buffered in this chunk.
+        clearTimer();
         const err = handlePayload(payload);
         if (err !== null) return protoError(err);
       }
-      // Frame-assembly deadline (spec §6): armed only while a PARTIAL frame is pending.
-      clearTimer();
-      if (!done && (need !== null || acc.length > 0)) {
+      // Frame-assembly deadline (spec §6): arm once for this partial frame. Additional
+      // chunks do not move its deadline; completing it above clears the timer so a
+      // following partial frame receives a fresh deadline.
+      if (!done && timer === null && (need !== null || acc.length > 0)) {
         timer = setTimeout(() => protoError(ERR.FRAME_TIMEOUT), frameTimeoutMs);
       }
     };
