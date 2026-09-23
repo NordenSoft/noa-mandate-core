@@ -1,0 +1,1236 @@
+{
+  "spec": "noa.deploy.release/1",
+  "canonical": "noa.deploy.release",
+  "generatedFrom": "scripts/gen-deploy-release-vectors.ts",
+  "implementationDigest": "sha256:51db5df44718981eba71c80356858e1b254fe30ec017c4a4e82c7159f2137bcc",
+  "note": "Generated, committed and diff-gated. This construct signs nothing, so there is no keyring: every value is a pure function of the committed fixtures, and the fixture tuple is SYNTHETIC BY CONSTRUCTION (RFC 2606 `.invalid` host, reserved `acct-example-N` accounts, counting-pattern digests) — it describes no real system. The three pinned hashes (both projection identities and the `valid` vector's paramsHash) are NORMATIVE EXPECTED VALUES: they define what a conforming implementation MUST compute, and the generator refuses to write if a regeneration cannot reproduce them byte-identically. They are NOT attestations about any running system, and this corpus cannot prove agreement with a non-public producer — every copy compared here is public, so all of them could move together while some other implementation differed. Closing that gap needs a signed cross-implementation parity manifest, which does not exist (NON-CLAIMS.md §S6).",
+  "vectors": [
+    {
+      "name": "identity-action-schema",
+      "note": "hash = sha256:hex(SHA-256(UTF8(JCS(descriptor)))). `implementation` is the pinned digest of the registered adapter's emitted run() source (ADR-0006-A shape) — a within-build commitment published as an expected value, so an offline verifier recomputes the identity a signed envelope advertises instead of trusting opaque hex.",
+      "descriptor": {
+        "id": "noa.deploy.release.schema",
+        "version": 1,
+        "kind": "actionSchema",
+        "implementation": "sha256:51db5df44718981eba71c80356858e1b254fe30ec017c4a4e82c7159f2137bcc"
+      },
+      "expect": {
+        "hash": "sha256:181779a415d998bb89e3c07cd42fd247fb272303bbb164faa953a1bcf03d0b70"
+      }
+    },
+    {
+      "name": "identity-display",
+      "note": "The same artifact under kind displayProjection. The two identities MUST differ: same artifact, different role — if a construction ever collapsed them, one of the two roles would be unpinned.",
+      "descriptor": {
+        "id": "noa.deploy.release.display",
+        "version": 1,
+        "kind": "displayProjection",
+        "implementation": "sha256:51db5df44718981eba71c80356858e1b254fe30ec017c4a4e82c7159f2137bcc"
+      },
+      "expect": {
+        "hash": "sha256:75fdd2b6f5674b8a4c274fb08ba7329870501dbb76b9d4646b929a9643b33d3b"
+      }
+    },
+    {
+      "name": "valid",
+      "note": "The gate's own conformance tuple. paramsHash is the AUTHORITY pin — the exact value the a conforming implementation must derive for this deployment.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": true,
+        "paramsHash": "sha256:97fff28779b378933054a67648b3e4c22dc9f774c7374d6f32f2fec990c58f7a",
+        "display": {
+          "Action": "noa.deploy.release",
+          "Release": "deploy example.invalid/example-service@0123456789abcdef0123456789abcdef01234567",
+          "Environment": "staging",
+          "Target": "acct-example-1",
+          "Image": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+        }
+      }
+    },
+    {
+      "name": "accept-key-order-irrelevant",
+      "note": "The same deployment serialized in reverse key order binds the SAME digest: JCS sorts keys, so the digest is a property of the deployment, not of the caller's serialization. Without this, two honest descriptions of one release would produce two grants.",
+      "paramsText": "{\"operation\":\"deploy\",\"targetAccount\":\"acct-example-1\",\"imageDigest\":\"sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\",\"environment\":\"staging\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\",\"repository\":\"example.invalid/example-service\"}",
+      "expect": {
+        "ok": true,
+        "paramsHash": "sha256:97fff28779b378933054a67648b3e4c22dc9f774c7374d6f32f2fec990c58f7a"
+      }
+    },
+    {
+      "name": "accept-label-at-bound",
+      "note": "256 characters is the identifier bound, not 255 — the boundary accepts.",
+      "params": {
+        "repository": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": true,
+        "paramsHash": "sha256:0c567fedadff95aac66bb871d52bc6c2e4e5012b8010d35c5f87a4c83a23c66d"
+      }
+    },
+    {
+      "name": "accept-distinct-commit",
+      "note": "One character of the SHA — the revision NEXT to the reviewed one. A single-field change MUST move the digest — exact authority permits only the exact attempt.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234568",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": true,
+        "paramsHash": "sha256:35ab7e9ae83905b5748ee4ade5b80dda5eed6dce7511dc8620e049bd115bd151"
+      }
+    },
+    {
+      "name": "accept-distinct-environment",
+      "note": "A staging approval must never alias production. A single-field change MUST move the digest — exact authority permits only the exact attempt.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "production",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": true,
+        "paramsHash": "sha256:ef6db6afc5ba1deb294f27981da7f39ae34d65e1440e9f6ae28278af5cba0ec9"
+      }
+    },
+    {
+      "name": "accept-distinct-image",
+      "note": "One character of the artifact digest. A single-field change MUST move the digest — exact authority permits only the exact attempt.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeefe",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": true,
+        "paramsHash": "sha256:92408798f78fb97ed8518f52f2e1892ed10f0062bdd3bd380577058e3aa4f8a1"
+      }
+    },
+    {
+      "name": "accept-distinct-repository",
+      "note": "A different source repository. A single-field change MUST move the digest — exact authority permits only the exact attempt.",
+      "params": {
+        "repository": "example.invalid/other-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": true,
+        "paramsHash": "sha256:3c67b725feb5737f91bdff85d83e2aea87b914fc9c4c88b538193e2c3cb4d77c"
+      }
+    },
+    {
+      "name": "accept-distinct-target",
+      "note": "A different target account. A single-field change MUST move the digest — exact authority permits only the exact attempt.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-2",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": true,
+        "paramsHash": "sha256:df28a0d96e8ef4fc30027929c1a794ff2f451baadd8c5b6933dd1e8e306ebb45"
+      }
+    },
+    {
+      "name": "accept-distinct-operation",
+      "note": "A rollback is a DIFFERENT bound action, never a cheaper spelling of the same one. A single-field change MUST move the digest — exact authority permits only the exact attempt.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "rollback"
+      },
+      "expect": {
+        "ok": true,
+        "paramsHash": "sha256:83bb16b55219152477974cd82744df628096f6d2ba2572c7fe71588ddf88e0b6"
+      }
+    },
+    {
+      "name": "accept-repo-with-at-and-hex-tail",
+      "note": "`@` IS a legal identifier character, so the Release line is injective only because `commit` is fixed-width and the join is parsed from the RIGHT. Two of these tuples rendering one line would mean the human authorizes one of two deployments and cannot tell which.",
+      "params": {
+        "repository": "example.invalid/svc@0123456789abcdef0123456789abcdef01234567",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": true,
+        "paramsHash": "sha256:18f440abfbc2e5c64d5e1c91a71765d0dfa10b8f6426fa8eb56fcdeb5cdf01f9"
+      }
+    },
+    {
+      "name": "accept-repo-at-tail-other-commit",
+      "note": "`@` IS a legal identifier character, so the Release line is injective only because `commit` is fixed-width and the join is parsed from the RIGHT. Two of these tuples rendering one line would mean the human authorizes one of two deployments and cannot tell which.",
+      "params": {
+        "repository": "example.invalid/svc@0123456789abcdef0123456789abcdef01234567",
+        "commit": "0123456789abcdef0123456789abcdef01234568",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": true,
+        "paramsHash": "sha256:630431e31e74400365fd28bca886ee7045c2730ddbc026b17df86ee7d60b754a"
+      }
+    },
+    {
+      "name": "accept-repo-at-tail-transposed",
+      "note": "`@` IS a legal identifier character, so the Release line is injective only because `commit` is fixed-width and the join is parsed from the RIGHT. Two of these tuples rendering one line would mean the human authorizes one of two deployments and cannot tell which.",
+      "params": {
+        "repository": "example.invalid/svc@0123456789abcdef0123456789abcdef01234568",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": true,
+        "paramsHash": "sha256:188d9c5aca0f5f119dfb8ba564dc4b2d8e89d9ee71835cb1aa05bd47271fb4a9"
+      }
+    },
+    {
+      "name": "reject-null-params",
+      "note": "null is not a params object.",
+      "paramsText": "null",
+      "expect": {
+        "ok": false,
+        "reasonContains": "params must be an object"
+      }
+    },
+    {
+      "name": "reject-string-params",
+      "note": "A bare string is not a params object.",
+      "paramsText": "\"noa.deploy.release\"",
+      "expect": {
+        "ok": false,
+        "reasonContains": "params must be an object"
+      }
+    },
+    {
+      "name": "reject-array-params",
+      "note": "An array is not a params object.",
+      "paramsText": "[]",
+      "expect": {
+        "ok": false,
+        "reasonContains": "params must be an object"
+      }
+    },
+    {
+      "name": "reject-repository-absent",
+      "note": "`repository` missing entirely: an optional bound concept would let two deployments share a digest.",
+      "params": {
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-repository-null",
+      "note": "`repository`: null is not a value, and null-means-default is a second spelling of absent.",
+      "params": {
+        "repository": null,
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-repository-empty",
+      "note": "`repository`: the empty string is the semantic \"unspecified\", spelled so a presence check cannot see it.",
+      "params": {
+        "repository": "",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-commit-absent",
+      "note": "`commit` missing entirely: an optional bound concept would let two deployments share a digest.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-commit-null",
+      "note": "`commit`: null is not a value, and null-means-default is a second spelling of absent.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": null,
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-commit-empty",
+      "note": "`commit`: the empty string is the semantic \"unspecified\", spelled so a presence check cannot see it.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-environment-absent",
+      "note": "`environment` missing entirely: an optional bound concept would let two deployments share a digest.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-environment-null",
+      "note": "`environment`: null is not a value, and null-means-default is a second spelling of absent.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": null,
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-environment-empty",
+      "note": "`environment`: the empty string is the semantic \"unspecified\", spelled so a presence check cannot see it.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-imageDigest-absent",
+      "note": "`imageDigest` missing entirely: an optional bound concept would let two deployments share a digest.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-imageDigest-null",
+      "note": "`imageDigest`: null is not a value, and null-means-default is a second spelling of absent.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": null,
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-imageDigest-empty",
+      "note": "`imageDigest`: the empty string is the semantic \"unspecified\", spelled so a presence check cannot see it.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-targetAccount-absent",
+      "note": "`targetAccount` missing entirely: an optional bound concept would let two deployments share a digest.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-targetAccount-null",
+      "note": "`targetAccount`: null is not a value, and null-means-default is a second spelling of absent.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": null,
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-targetAccount-empty",
+      "note": "`targetAccount`: the empty string is the semantic \"unspecified\", spelled so a presence check cannot see it.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-operation-absent",
+      "note": "`operation` missing entirely: an optional bound concept would let two deployments share a digest.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-operation-null",
+      "note": "`operation`: null is not a value, and null-means-default is a second spelling of absent.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": null
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-operation-empty",
+      "note": "`operation`: the empty string is the semantic \"unspecified\", spelled so a presence check cannot see it.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": ""
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-commit-float-number",
+      "note": "A JSON float shaped like a SHA-sized number. Refused at the BYTE BOUNDARY (the strict parser admits integers only) — one layer EARLIER than an object-API validator would refuse it, which is the fail-closed direction.",
+      "paramsText": "{\"repository\":\"example.invalid/example-service\",\"commit\":5.1e+39,\"environment\":\"staging\",\"imageDigest\":\"sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\",\"targetAccount\":\"acct-example-1\",\"operation\":\"deploy\"}",
+      "expect": {
+        "ok": false,
+        "reasonContains": "non-integer (float/exponent) number not allowed"
+      }
+    },
+    {
+      "name": "reject-commit-40-digit-integer",
+      "note": "Forty DIGITS are not forty hex characters, and an unsafe integer is refused at the byte boundary before any field rule runs.",
+      "paramsText": "{\"repository\":\"example.invalid/example-service\",\"commit\":1111111111111111111111111111111111111111,\"environment\":\"staging\",\"imageDigest\":\"sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\",\"targetAccount\":\"acct-example-1\",\"operation\":\"deploy\"}",
+      "expect": {
+        "ok": false,
+        "reasonContains": "integer outside safe range"
+      }
+    },
+    {
+      "name": "reject-commit-char-array",
+      "note": "An array of 40 one-character strings is not a string.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": [
+          "0",
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "a",
+          "b",
+          "c",
+          "d",
+          "e",
+          "f",
+          "0",
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "a",
+          "b",
+          "c",
+          "d",
+          "e",
+          "f",
+          "0",
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7"
+        ],
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-operation-boolean",
+      "note": "A boolean is not an operation.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": true
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-repository-object",
+      "note": "An object is not a repository identifier — nothing is coerced to string on this path.",
+      "params": {
+        "repository": {},
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-commit-39-hex",
+      "note": "39 hex is not a full SHA — a near-miss must not be a near-accept.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef0123456",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-commit-41-hex",
+      "note": "41 hex is not a full SHA.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef012345670",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-commit-uppercase",
+      "note": "Uppercase is REFUSED, not normalized: an equivalence class is an attacker's choice of representative, and a normalizer on a digest path is a forgery surface.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789ABCDEF0123456789ABCDEF01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-commit-non-hex-g",
+      "note": "`g` is not a hex character.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef0123456g",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-commit-cyrillic-homoglyph",
+      "note": "U+0430 CYRILLIC SMALL A renders as `a` and is not hex — a homoglyph must not survive a charset walk.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef0123456а",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-image-no-prefix",
+      "note": "64 bare hex without the `sha256:` prefix is not the OCI spelling.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-image-sha512-prefix",
+      "note": "A different hash family is a different identity scheme, not a variant spelling.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha512:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-image-63-hex",
+      "note": "63 hex after the prefix.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:333333333333333333333333333333333333333333333333333333333333333",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-image-65-hex",
+      "note": "65 hex after the prefix.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:33333333333333333333333333333333333333333333333333333333333333333",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-image-mutable-tag",
+      "note": "`latest` is a mutable tag; the bound artifact must be an immutable digest or the approved image is whatever the registry says tomorrow.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "latest",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-operation-not-a-member",
+      "note": "`restart` is not in {deploy, rollback}; a third operation is a code change and a new reviewed identity.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "restart"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-operation-case-sensitive",
+      "note": "`DEPLOY` is not `deploy` — the enum is exact.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "DEPLOY"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-operation-proto-string",
+      "note": "A null-prototype membership table has no inherited members: `__proto__` as a VALUE is just a non-member string.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "__proto__"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-operation-constructor-string",
+      "note": "Same class: `constructor` is not an operation.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "constructor"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-operation-tostring-string",
+      "note": "Same class: `toString` is not an operation.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "toString"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-repository-space",
+      "note": "A space would make the rendered Release line ambiguous — two bound tuples, one line.",
+      "params": {
+        "repository": "example.invalid/svc staging",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-repository-newline",
+      "note": "A newline can rewrite what the approver reads below it.",
+      "params": {
+        "repository": "example.invalid/svc\nstaging",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-environment-tab",
+      "note": "A tab is a control character.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "stag\ting",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-target-nul",
+      "note": "A NUL byte truncates in every C-adjacent renderer it meets.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct\u0000-4711",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-target-ansi-escape",
+      "note": "An ANSI escape can repaint a terminal renderer over the value the human is comparing.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct\u001b[31m-4711",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-repository-over-max-label",
+      "note": "257 characters — one past the bound (`accept-label-at-bound` holds the other side).",
+      "params": {
+        "repository": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "deploy params require"
+      }
+    },
+    {
+      "name": "reject-extra-force",
+      "note": "A scalar extra — the flag from the measured finding. An unrecognized own key is refused at validation, exactly like an absent or malformed field.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy",
+        "force": true
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "unrecognized field"
+      }
+    },
+    {
+      "name": "reject-extra-deployment-command",
+      "note": "A string extra that would drive a side effect. An unrecognized own key is refused at validation, exactly like an absent or malformed field.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy",
+        "deploymentCommand": "delete-before-deploy"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "unrecognized field"
+      }
+    },
+    {
+      "name": "reject-extra-nested-object",
+      "note": "A nested-object extra. An unrecognized own key is refused at validation, exactly like an absent or malformed field.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy",
+        "nested": {
+          "replicas": 9000
+        }
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "unrecognized field"
+      }
+    },
+    {
+      "name": "reject-extra-full-hostile-tuple",
+      "note": "The full hostile tuple from the finding. An unrecognized own key is refused at validation, exactly like an absent or malformed field.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy",
+        "force": true,
+        "deploymentCommand": "delete-before-deploy",
+        "nested": {
+          "replicas": 9000
+        }
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "unrecognized field"
+      }
+    },
+    {
+      "name": "reject-extra-case-variant-key",
+      "note": "`Operation` differs from a recognized key only in case — still unrecognized. An unrecognized own key is refused at validation, exactly like an absent or malformed field.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy",
+        "Operation": "rollback"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "unrecognized field"
+      }
+    },
+    {
+      "name": "reject-extra-leading-space-key",
+      "note": "A leading-space variant of a recognized key. An unrecognized own key is refused at validation, exactly like an absent or malformed field.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy",
+        " operation": "rollback"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "unrecognized field"
+      }
+    },
+    {
+      "name": "reject-extra-lookalike-key",
+      "note": "`operation2`, a lookalike. An unrecognized own key is refused at validation, exactly like an absent or malformed field.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy",
+        "operation2": "rollback"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "unrecognized field"
+      }
+    },
+    {
+      "name": "reject-extra-junk-x",
+      "note": "An arbitrary unrecognized key. An unrecognized own key is refused at validation, exactly like an absent or malformed field.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy",
+        "x": "anything"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "unrecognized field"
+      }
+    },
+    {
+      "name": "reject-extra-proto-lookalike",
+      "note": "`__proto__x` — prototype-flavoured but just an unrecognized own key. An unrecognized own key is refused at validation, exactly like an absent or malformed field.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy",
+        "__proto__x": "anything"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "unrecognized field"
+      }
+    },
+    {
+      "name": "reject-extra-command-exec-argv",
+      "note": "A key from ANOTHER action schema (`argv`) does not become legal here. An unrecognized own key is refused at validation, exactly like an absent or malformed field.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy",
+        "argv": [
+          "-rf",
+          "/srv"
+        ]
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "unrecognized field"
+      }
+    },
+    {
+      "name": "reject-extra-command-exec-cwd",
+      "note": "Same class: `cwd`. An unrecognized own key is refused at validation, exactly like an absent or malformed field.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy",
+        "cwd": "/srv"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "unrecognized field"
+      }
+    },
+    {
+      "name": "reject-extra-command-exec-executable",
+      "note": "Same class: `executable`. An unrecognized own key is refused at validation, exactly like an absent or malformed field.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy",
+        "executable": "/bin/sh"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "unrecognized field"
+      }
+    },
+    {
+      "name": "reject-extra-command-exec-target-env",
+      "note": "Same class: `targetEnv`. An unrecognized own key is refused at validation, exactly like an absent or malformed field.",
+      "params": {
+        "repository": "example.invalid/example-service",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "staging",
+        "imageDigest": "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "targetAccount": "acct-example-1",
+        "operation": "deploy",
+        "targetEnv": "prod"
+      },
+      "expect": {
+        "ok": false,
+        "reasonContains": "unrecognized field"
+      }
+    },
+    {
+      "name": "reject-duplicate-commit-key",
+      "note": "TWO `commit` members, different SHAs. Every mainstream JSON.parse keeps the LAST silently, so the approver-visible value and the last-writer value can disagree; the strict boundary refuses the document instead of choosing a winner.",
+      "paramsText": "{\"repository\":\"example.invalid/example-service\",\"commit\":\"0123456789abcdef0123456789abcdef01234568\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\",\"environment\":\"staging\",\"imageDigest\":\"sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\",\"targetAccount\":\"acct-example-1\",\"operation\":\"deploy\"}",
+      "expect": {
+        "ok": false,
+        "reasonContains": "duplicate object key"
+      }
+    },
+    {
+      "name": "reject-proto-own-key",
+      "note": "`__proto__` as an OWN KEY is refused at the parse boundary before this projection sees a value.",
+      "paramsText": "{\"__proto__\":{\"operation\":\"rollback\"},\"repository\":\"example.invalid/example-service\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\",\"environment\":\"staging\",\"imageDigest\":\"sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\",\"targetAccount\":\"acct-example-1\",\"operation\":\"deploy\"}",
+      "expect": {
+        "ok": false,
+        "reasonContains": "forbidden object key"
+      }
+    },
+    {
+      "name": "reject-truncated-json",
+      "note": "Truncated bytes. The refusal comes from the shared strict parser, and the pinned reason says so.",
+      "paramsText": "{\"repository\":",
+      "expect": {
+        "ok": false,
+        "reasonContains": "unexpected end of input"
+      }
+    }
+  ]
+}

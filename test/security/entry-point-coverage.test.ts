@@ -95,6 +95,8 @@ const CALLS: Record<string, (arg: unknown) => unknown> = {
   // next door — the same reason every other row here passes a real second argument.
   buildActionDigest: (a) => noaReceipt.buildActionDigest(a as never, EMPTY_OBJECT),
   verifyActionDigest: (a) => noaReceipt.verifyActionDigest(a as never, EMPTY_OBJECT),
+  // `noa.deploy.release/1`. One argument, and it is the hostile one.
+  projectDeployRelease: (a) => noaReceipt.projectDeployRelease(a as never),
   evaluate: (a) => noaReceipt.evaluate(a as never, EMPTY_OBJECT),
   validatePolicy: (a) => noaReceipt.validatePolicy(a as never),
   assertValidPolicy: (a) => { try { return noaReceipt.assertValidPolicy(a as never); } catch { return null; } },
