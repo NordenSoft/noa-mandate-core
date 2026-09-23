@@ -135,6 +135,10 @@ const TCB = [
   // against, plus the projection identities a signed envelope is compared to. In the TCB in the
   // same commit that creates it.
   "src/deploy-release.ts",
+  // `noa.ledger.transfer/1`. A decision path for the same reason: attacker-reachable bytes in, the
+  // `paramsHash`, the display and the pinned projection identities out. In the TCB in the same
+  // commit that creates it.
+  "src/ledger-transfer.ts",
 ];
 
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");

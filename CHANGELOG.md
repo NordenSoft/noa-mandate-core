@@ -8,6 +8,21 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Added
 
+- `noa.ledger.transfer/1` publishes the wire form of a reference ledger transfer
+  (`src/ledger-transfer.ts`; normative specification `docs/ledger-transfer-spec.md`; ADR-R-010,
+  PROPOSED). New exports: `projectLedgerTransfer` (bytes-in: validates the six string members
+  `amount`, `fromAccount`, `ledger`, `salt`, `toAccount`, `unit` with one spelling per value, refuses
+  any other member and a self-transfer, JCS-canonicalizes the tuple and returns its `paramsHash`,
+  canonical bytes, frozen tuple and six-row display — or one of eleven stable refusal codes), the
+  pinned `LEDGER_TRANSFER_SCHEMA_ID` / `LEDGER_TRANSFER_DISPLAY_ID` /
+  `LEDGER_TRANSFER_IMPLEMENTATION_DIGEST` (recomputable from the published build), the spec and
+  canonical-name constants, and the `LedgerTransferParams` / `LedgerTransferResult` /
+  `LedgerTransferRefusalCode` / `LedgerTransferUnit` types. A generated, diff-gated corpus lands with
+  it (`conformance/ledger-transfer/vectors.json`, 127 vectors: 2 identity pins, 15 accepts, 110
+  refusals) over a synthetic fixture (`acct-example-N`, `ledger-example-N`, the ISO 4217 testing code
+  `XTS`). The reference Gate gains a sealed adapter for the action that is deliberately not
+  registered. See `NON-CLAIMS.md` §S7. Additive: the frozen `noa.receipt/0.1` wire format gains no
+  field.
 - `noa.deploy.release/1` publishes the wire form of the deployment action bind
   (`src/deploy-release.ts`; normative specification `docs/deploy-release-spec.md`). New exports:
   `projectDeployRelease` (bytes-in: validates the six-member deployment tuple — `repository`,

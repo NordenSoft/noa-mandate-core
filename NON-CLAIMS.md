@@ -389,6 +389,80 @@ An enforcing implementation derives a risk tier from `environment` with its own 
 table. That table is authorization-side policy, is not published here, and must not be inferred from
 this specification.
 
+## S7. `noa.ledger.transfer/1` — what an accepted transfer does and does not establish
+
+`noa.ledger.transfer/1` (`src/ledger-transfer.ts`, `docs/ledger-transfer-spec.md`) publishes the rule
+for turning a six-member ledger transfer into canonical bytes, a `paramsHash` and a six-row display,
+plus two pinned projection identities. An accepted result establishes only that the disclosed tuple
+is well-formed under that rule and binds exactly the hash and display it returns.
+
+### NC-S7.1 — An accepted transfer is not authorization, execution or settlement
+
+It says nothing about whether the transfer was approved, by whom or under what policy, whether it was
+dispatched or committed, or whether it settled. Those are separate claims with their own evidence
+(§1, §2).
+
+### NC-S7.2 — Acceptance does not check accounts, balances or ledgers
+
+The projection is pure and network-less. Account existence, balance sufficiency, overdraft and
+whether `ledger` names the committing ledger are facts only the effect owner holds at commit time.
+
+### NC-S7.3 — A bound display does not prove what was rendered or understood
+
+The display is complete and recomputable from the bound tuple. Whether a device drew it faithfully,
+and whether a person read and understood it, is outside this construct (§3, NC-S5.5).
+
+### NC-S7.4 — The character set does not remove in-set confusables
+
+Non-ASCII homoglyphs, invisible characters and bidirectional overrides are refused. Confusable pairs
+inside the permitted set (`l`/`1`, `o`/`0`, `rn`/`m`) remain.
+
+### NC-S7.5 — Nothing here limits splitting or rate
+
+Many small transfers are each well-formed. Limits on count, rate or aggregate amount are policy.
+
+### NC-S7.6 — `XTS` is not money
+
+The only unit in `/1` is the ISO 4217 testing code. No real-currency semantics, scale or rounding is
+defined or implied.
+
+### NC-S7.7 — `paramsHash` is not a uniqueness or deduplication key
+
+Identical tuples, including an identical salt, bind the same `paramsHash` by construction. Request
+identity belongs to the authorization layer, and per-attempt correlation to `noa.action-digest/0.1`.
+
+### NC-S7.8 — The salt hides the tuple only from hash holders, and only with an honest producer
+
+The salt prevents a holder of `paramsHash` alone from confirming a guessed transfer, provided it is
+random, secret from that holder, and 128 bits long. A projection cannot test randomness: a constant or
+all-zero salt is accepted. The proposer, the enforcing gate, the approver and the auditor all see the
+salt and the full tuple. This rests on SHA-256 preimage resistance and is not a formal hiding proof.
+
+### NC-S7.9 — The pinned hashes are normative expected values, not attestations
+
+As NC-S6.1 and NC-S6.2 state for the deployment bind: the repository proves that its implementation,
+corpus and pinned literals agree and that each pin is load-bearing. It does not prove that any
+deployed producer computes them.
+
+### NC-S7.10 — The identity covers one function, and the gate's load-time check catches drift, not substitution
+
+The implementation digest is taken over the emitted text of `projectLedgerTransfer` only. Code it
+reaches through its helpers — the member validators, the canonicalizer, the parser — can change
+behaviour without moving the identity. The reference Gate refuses to load if the identity it measures
+differs from the published pins; because the pins and the code ship together, that detects accidental
+drift, not a deliberate substitution of both.
+
+### NC-S7.11 — The reference Gate does not enforce this action in this revision
+
+The reference Gate defines an adapter for `noa.ledger.transfer` but does not register it, so a hold for
+it is refused like any unregistered action. Its fixed `HIGH` risk floor is that Gate's policy, not part
+of the wire language.
+
+### NC-S7.12 — One implementation is not an independence claim
+
+The corpus is replayed by this repository's implementation only. No independent implementation of
+`/1` exists yet, and none is claimed (ADR-R-007).
+
 ## 7. Changing this document
 
 Removing or weakening a non-claim creates a stronger claim. Such a change requires an exact normative

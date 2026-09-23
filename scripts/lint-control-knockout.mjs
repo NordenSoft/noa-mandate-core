@@ -4722,6 +4722,145 @@ const KNOCKOUTS = [
     kind: "tests",
     suite: [".", "npm", ["run", "test:deploy-release"]],
   },
+  // ── `noa.ledger.transfer/1` (docs/ledger-transfer-spec.md) ────────────────────────────────────
+  //
+  // Registered in the same change that creates the module. Each entry names the corpus vector (or
+  // property test) that must go RED without the control. Nine of the ten are scoped to
+  // `npm run test:ledger-transfer`, where every detector lives; the gate's risk floor is measured by
+  // the gate package's own suite. Three mutations (strict parse, hash over canonical, Salt row) edit
+  // `projectLedgerTransfer`'s own body, so the implementation-digest test ALSO goes red; the corpus
+  // replay runs first in that file, so the reported first failures are the vectors that measure the
+  // control rather than the digest.
+  {
+    id: "ledger-transfer-bytes-in-strict-parse",
+    control:
+      "spec §3.1 — the transfer enters through the kernel's STRICT parser. A lenient parser is " +
+      "last-wins on duplicate keys, so `reject-parse-duplicate-amount` ({amount:\"1\", amount:\"100000\"}) " +
+      "would be ACCEPTED with the second amount — the value a first reader saw and the value bound differ.",
+    file: "src/ledger-transfer.ts",
+    find: '  const parsed = parseDocument(paramsBytes, "params");',
+    replace:
+      '  const parsed: { ok: true; value: unknown } | { ok: false; reason: string } = (() => {\n' +
+      '    try {\n' +
+      '      const raw = typeof paramsBytes === "string" ? paramsBytes : new TextDecoder().decode(paramsBytes);\n' +
+      '      return { ok: true as const, value: JSON.parse(raw) as unknown };\n' +
+      '    } catch {\n' +
+      '      return { ok: false as const, reason: "params: lenient parse failed" };\n' +
+      '    }\n' +
+      '  })();',
+    kind: "tests",
+    suite: [".", "npm", ["run", "test:ledger-transfer"]],
+  },
+  {
+    id: "ledger-transfer-closed-member-set",
+    control:
+      "spec §2 — the closed world, enforced in code. Without it `reject-extra-memo` is ACCEPTED with the " +
+      "BASE paramsHash: the memo rides along invisibly while the approver sees an unchanged transfer.",
+    file: "src/ledger-transfer.ts",
+    find: "    if (!hasOwn(RECOGNIZED_TRANSFER_KEYS, presentKeys[i] as string)) {",
+    replace: "    if (false as boolean) {",
+    kind: "tests",
+    suite: [".", "npm", ["run", "test:ledger-transfer"]],
+  },
+  {
+    id: "ledger-transfer-same-account-refused",
+    control:
+      "spec §2 — fromAccount !== toAccount, compared after parsing. Without it `reject-same-account` " +
+      "(and its escaped-spelling twin) is ACCEPTED as a self-transfer.",
+    file: "src/ledger-transfer.ts",
+    find: '  if (fromAccount === toAccount) return { ok: false, code: "TRANSFER_SAME_ACCOUNT" };',
+    replace: "",
+    kind: "tests",
+    suite: [".", "npm", ["run", "test:ledger-transfer"]],
+  },
+  {
+    id: "ledger-transfer-identifier-charset",
+    control:
+      "spec §2.1 — identifier interiors are [a-z0-9-] only. Widening the interior charset lets " +
+      "`reject-from-escaped-newline` (\"acct-\\nexample-1\") through: a newline can rewrite what the " +
+      "approver reads below it.",
+    file: "src/ledger-transfer.ts",
+    find: "    if (!hasOwn(ID_BODY, v[i] as string)) return undefined;",
+    replace: "    if (false as boolean) return undefined;",
+    kind: "tests",
+    suite: [".", "npm", ["run", "test:ledger-transfer"]],
+  },
+  {
+    id: "ledger-transfer-amount-one-spelling",
+    control:
+      "spec §2.2 — one spelling per amount. Replacing the digit grammar with integer normalization " +
+      "(Number then String) makes `reject-amount-leading-zero` (\"012345\") ACCEPTED with the base hash " +
+      "and the base display: two spellings, one bound value — the normalizer is the forgery surface.",
+    file: "src/ledger-transfer.ts",
+    find: "function asAmount(v: unknown): string | undefined {",
+    replace:
+      "function asAmount(v: unknown): string | undefined {\n" +
+      "  const n = typeof v === \"string\" ? Number(v) : Number.NaN;\n" +
+      "  return Number.isSafeInteger(n) && n > 0 ? String(n) : undefined;\n" +
+      "}\n" +
+      "function asAmountReviewed(v: unknown): string | undefined {",
+    kind: "tests",
+    suite: [".", "npm", ["run", "test:ledger-transfer"]],
+  },
+  {
+    id: "ledger-transfer-salt-validated",
+    control:
+      "spec §2 — the salt is exactly 32 LOWERCASE hex. Skipping the validator makes " +
+      "`reject-salt-uppercase` ACCEPTED: a second spelling of one salt, hence two hashes for one transfer.",
+    file: "src/ledger-transfer.ts",
+    find: '  const salt = asSalt(o["salt"]);',
+    replace: '  const salt = typeof o["salt"] === "string" ? (o["salt"] as string) : undefined;',
+    kind: "tests",
+    suite: [".", "npm", ["run", "test:ledger-transfer"]],
+  },
+  {
+    id: "ledger-transfer-hash-over-canonical",
+    control:
+      "spec §3 — paramsHash covers the RE-EMITTED canonical bytes, never the input bytes. Hashing the " +
+      "input makes `accept-escaped-spelling` (a \\u0061 spelling of the base tuple) bind a hash that is " +
+      "not the base hash, so one transfer would carry two commitments.",
+    file: "src/ledger-transfer.ts",
+    find: "  const paramsHash = sha256Prefixed(canonical);",
+    replace: '  const paramsHash = sha256Prefixed(typeof paramsBytes === "string" ? paramsBytes : canonical);',
+    kind: "tests",
+    suite: [".", "npm", ["run", "test:ledger-transfer"]],
+  },
+  {
+    id: "ledger-transfer-display-shows-salt",
+    control:
+      "spec §5 — the display is complete: every bound member is visible, so an auditor can rebuild the " +
+      "tuple from the rows and re-project it. Dropping the Salt row leaves a display that still looks " +
+      "complete; the mechanical completeness test (not a hand-written expectation) must go red.",
+    file: "src/ledger-transfer.ts",
+    find: "      Salt: b.salt,",
+    replace: "",
+    kind: "tests",
+    suite: [".", "npm", ["run", "test:ledger-transfer"]],
+  },
+  {
+    id: "ledger-transfer-implementation-pin",
+    control:
+      "spec §7 — the implementation digest is recomputed from the emitted projectLedgerTransfer on " +
+      "every run and is an INPUT to both identities. A one-character drift of the published pin must " +
+      "turn the digest test and both identity assertions red, or the pin is decoration.",
+    file: "src/ledger-transfer.ts",
+    find: '  "sha256:2f4dce6dce395e77b93ecec4c19f2d34d303fa07d198a8464d254a1561423039" as const;',
+    replace: '  "sha256:2f4dce6dce395e77b93ecec4c19f2d34d303fa07d198a8464d254a1561423038" as const;',
+    kind: "tests",
+    suite: [".", "npm", ["run", "test:ledger-transfer"]],
+  },
+  {
+    id: "ledger-transfer-gate-risk-floor",
+    control:
+      "the reference Gate's own policy for noa.ledger.transfer is a fixed HIGH floor, independent of the " +
+      "amount, so splitting a transfer cannot lower its approver tier. Lowering it to LOW must turn every " +
+      "accept in packages/gate/test/ledger-transfer-projection.test.ts red.",
+    file: "packages/gate/src/projections.ts",
+    find: 'const LEDGER_TRANSFER_RISK_FLOOR: RiskClass = "HIGH";',
+    replace: 'const LEDGER_TRANSFER_RISK_FLOOR: RiskClass = "LOW";',
+    kind: "tests",
+    suite: ["packages/gate", "npm", ["test"]],
+  },
 ];
 
 /**
