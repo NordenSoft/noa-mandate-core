@@ -5,9 +5,9 @@ waiting to happen and, worse, a list that can drift from the code it claims to d
 
 Source: `src/index.ts` value exports, resolved through the TypeScript compiler API.
 
-- total value exports: **76**
-- security-sensitive: **21**
-- security-sensitive already bytes-in: **21**
+- total value exports: **83**
+- security-sensitive: **22**
+- security-sensitive already bytes-in: **22**
 - security-sensitive NOT yet bytes-in (ADR §3.1 target): **0**
 
 | Export | Kind | First parameter | Bytes-in | Declared in | Exemption reason |
@@ -34,6 +34,11 @@ Source: `src/index.ts` value exports, resolved through the TypeScript compiler A
 | `decode` | SECURITY_SENSITIVE | `Uint8Array<ArrayBufferLike>` | YES | `src/cose/cbor.ts` |  |
 | `decodeDocument` | UTILITY | `unknown` | n/a | `src/bytes.ts` | IS the byte boundary (src/bytes.ts); decides whether a value is a document at all |
 | `deepFreeze` | UTILITY | `T` | n/a | `src/inert.ts` | pure structural helper |
+| `DEPLOY_RELEASE_CANONICAL` | CONSTANT | `—` | n/a | `src/deploy-release.ts` |  |
+| `DEPLOY_RELEASE_DISPLAY_ID` | CONSTANT | `—` | n/a | `src/deploy-release.ts` |  |
+| `DEPLOY_RELEASE_IMPLEMENTATION_DIGEST` | CONSTANT | `—` | n/a | `src/deploy-release.ts` |  |
+| `DEPLOY_RELEASE_SCHEMA_ID` | CONSTANT | `—` | n/a | `src/deploy-release.ts` |  |
+| `DEPLOY_RELEASE_SPEC` | CONSTANT | `—` | n/a | `src/deploy-release.ts` |  |
 | `encArray` | UTILITY | `Buffer<ArrayBufferLike>[]` | n/a | `src/cose/cbor.ts` | CBOR encoder primitive |
 | `encBstr` | UTILITY | `Buffer<ArrayBufferLike>` | n/a | `src/cose/cbor.ts` | CBOR encoder primitive |
 | `encInt` | UTILITY | `number` | n/a | `src/cose/cbor.ts` | CBOR encoder primitive |
@@ -62,6 +67,8 @@ Source: `src/index.ts` value exports, resolved through the TypeScript compiler A
 | `POLICY_SPEC` | CONSTANT | `—` | n/a | `src/policy/dsl.ts` |  |
 | `PolicyError` | ERROR_CLASS | `—` | n/a | `src/policy/eval.ts` |  |
 | `policyHash` | UTILITY | `Policy` | n/a | `src/policy/dsl.ts` | pure hash of a policy |
+| `projectDeployRelease` | SECURITY_SENSITIVE | `string \| Uint8Array<ArrayBufferLike>` | YES | `src/deploy-release.ts` |  |
+| `projectionIdentityHash` | UTILITY | `ProjectionIdentityDescriptor` | n/a | `src/deploy-release.ts` | pure pre-image construction (src/deploy-release.ts); no verdict |
 | `readSet` | UTILITY | `Policy` | n/a | `src/policy/dsl.ts` | pure projection |
 | `readSetHash` | UTILITY | `Policy` | n/a | `src/policy/dsl.ts` | pure hash |
 | `RECEIPT_SPEC` | CONSTANT | `—` | n/a | `src/types.ts` |  |

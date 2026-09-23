@@ -8,6 +8,19 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Added
 
+- `noa.deploy.release/1` publishes the wire form of the deployment action bind
+  (`src/deploy-release.ts`; normative specification `docs/deploy-release-spec.md`). New exports:
+  `projectDeployRelease` (bytes-in: validates the six-member deployment tuple — `repository`,
+  `commit`, `environment`, `imageDigest`, `targetAccount`, `operation` — refuses any other member,
+  JCS-canonicalizes it and derives the `paramsHash` a deployment receipt's `action.paramsHash`
+  commits to), `projectionIdentityHash`, the `DeployOperation` closed union, and the pinned
+  `DEPLOY_RELEASE_SCHEMA_ID` / `DEPLOY_RELEASE_DISPLAY_ID` / `DEPLOY_RELEASE_IMPLEMENTATION_DIGEST`
+  plus the spec and canonical-name constants. A generated, diff-gated corpus lands with it
+  (`conformance/deploy-release/vectors.json`, 77 vectors: 2 identity pins, 12 accepts, 63 refusals)
+  over a fixture that is synthetic by construction (`example.invalid`, RFC 2606). The pinned hashes
+  are normative expected values, not attestations about any running system; see `NON-CLAIMS.md`
+  §S6. The enforcement machinery that operates the projection does not ship here. Additive: the
+  frozen `noa.receipt/0.1` wire format gains no field.
 - `verifyHistoricalChain` and CLI `--purpose historical` add the versioned
   `noa.historical-verification/0.1` result. Its independent dimensions report receipt integrity,
   prefix/head completeness, as-of attribution, and evidence availability. A dedicated checkpoint

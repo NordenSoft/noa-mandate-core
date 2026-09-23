@@ -160,6 +160,29 @@ export {
   type ActionDigestVerifyResult,
 } from "./action-digest.js";
 
+// `noa.deploy.release/1` — the public wire form of the deployment bind
+// (docs/deploy-release-spec.md, indexed as ADR-R-009 in 03_DECISIONS_ADR.md — that spec is the
+// normative authority; this comment is a pointer, never a second statement of the rule).
+// ADDITIVE and DISJOINT from the receipt: the frozen `noa.receipt/0.1` wire format
+// gains no field. It lets an offline verifier recompute a deployment receipt's `action.paramsHash`
+// from a disclosed six-field tuple and recompute the projection identities a signed envelope
+// advertises; the enforcing gate that OPERATES the projection is proprietary and does not ship
+// here. The module header states precisely what a recomputed match does not establish.
+export {
+  DEPLOY_RELEASE_SPEC,
+  DEPLOY_RELEASE_CANONICAL,
+  DEPLOY_RELEASE_IMPLEMENTATION_DIGEST,
+  DEPLOY_RELEASE_SCHEMA_ID,
+  DEPLOY_RELEASE_DISPLAY_ID,
+  projectionIdentityHash,
+  projectDeployRelease,
+  type ProjectionIdentity,
+  type ProjectionIdentityDescriptor,
+  type DeployOperation,
+  type DeployReleaseParams,
+  type DeployReleaseResult,
+} from "./deploy-release.js";
+
 // Universal envelope — the NOA receipt as a COSE_Sign1 (RFC 9052) / SCITT Signed Statement, so it
 // verifies in ANY conforming COSE implementation without NOA's code. Zero runtime deps.
 export { coseSign1, coseSign1Verify, type CoseSigner, type CoseVerifyResult } from "./cose/cose-sign1.js";
