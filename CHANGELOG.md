@@ -8,6 +8,19 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Added
 
+- `noa.deploy.release/1` publishes the wire form of the deployment action bind
+  (`src/deploy-release.ts`; normative specification `docs/deploy-release-spec.md`). New exports:
+  `projectDeployRelease` (bytes-in: validates the six-member deployment tuple — `repository`,
+  `commit`, `environment`, `imageDigest`, `targetAccount`, `operation` — refuses any other member,
+  JCS-canonicalizes it and derives the `paramsHash` a deployment receipt's `action.paramsHash`
+  commits to), `projectionIdentityHash`, the `DeployOperation` closed union, and the pinned
+  `DEPLOY_RELEASE_SCHEMA_ID` / `DEPLOY_RELEASE_DISPLAY_ID` / `DEPLOY_RELEASE_IMPLEMENTATION_DIGEST`
+  plus the spec and canonical-name constants. A generated, diff-gated corpus lands with it
+  (`conformance/deploy-release/vectors.json`, 77 vectors: 2 identity pins, 12 accepts, 63 refusals)
+  over a fixture that is synthetic by construction (`example.invalid`, RFC 2606). The pinned hashes
+  are normative expected values, not attestations about any running system; see `NON-CLAIMS.md`
+  §S6. The enforcement machinery that operates the projection does not ship here. Additive: the
+  frozen `noa.receipt/0.1` wire format gains no field.
 - `verifyHistoricalChain` and CLI `--purpose historical` add the versioned
   `noa.historical-verification/0.1` result. Its independent dimensions report receipt integrity,
   prefix/head completeness, as-of attribution, and evidence availability. A dedicated checkpoint
@@ -1021,7 +1034,7 @@ predicate is neutered.
 
 ## [0.3.0] - 2026-07-09
 
-[GitHub release](https://github.com/NordenSoft/noa/releases/tag/v0.3.0)
+[npm release](https://www.npmjs.com/package/noa-receipt/v/0.3.0)
 
 ### Changed
 
@@ -1096,11 +1109,11 @@ scoped `@noa/receipt`).
   "a keyring-trusted key signed this" to "this agent signed this", closing cross-agent
   impersonation in a multi-key keyring.
 
-[Unreleased]: https://github.com/NordenSoft/noa/compare/v0.7.0...HEAD
-[0.7.0]: https://github.com/NordenSoft/noa/compare/v0.6.2...v0.7.0
-[0.6.2]: https://github.com/NordenSoft/noa/compare/v0.6.1...v0.6.2
-[0.6.1]: https://github.com/NordenSoft/noa/compare/v0.6.0...v0.6.1
-[0.6.0]: https://github.com/NordenSoft/noa/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/NordenSoft/noa/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/NordenSoft/noa/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/NordenSoft/noa/releases/tag/v0.3.0
+[Unreleased]: https://github.com/NordenSoft/noa-mandate-core/commits/main
+[0.7.0]: https://www.npmjs.com/package/noa-receipt/v/0.7.0
+[0.6.2]: https://www.npmjs.com/package/noa-receipt/v/0.6.2
+[0.6.1]: https://www.npmjs.com/package/noa-receipt/v/0.6.1
+[0.6.0]: https://www.npmjs.com/package/noa-receipt/v/0.6.0
+[0.5.0]: https://www.npmjs.com/package/noa-receipt/v/0.5.0
+[0.4.0]: https://www.npmjs.com/package/noa-receipt/v/0.4.0
+[0.3.0]: https://www.npmjs.com/package/noa-receipt/v/0.3.0

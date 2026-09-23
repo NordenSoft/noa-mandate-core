@@ -331,6 +331,64 @@ Registry membership constrains evidence requirements; it does not create authori
 If required external evidence is absent or cannot be checked, the correct result is inconclusive or
 unverified, not success.
 
+### NC-S5.9 — A leap-second timestamp passes the released schemas and then reads as no instant
+
+Every released artifact schema writes its seconds field as `\d{2}`, so `2016-12-31T23:59:60Z`
+validates, while the exact nanosecond parser (`rfc3339Nanos`) refuses `:60` and returns no instant.
+Such an artifact can authenticate and then fail whichever time rule reads it first (for example a
+window or activation check) without saying that the timestamp names no computable instant. The
+behavior is fail-closed: nothing is accepted that would otherwise be refused. It is recorded rather
+than fixed because a leap-second-aware parser needs a table every consumer would have to share, and
+narrowing a released grammar to `[0-5]\d` is a specification change for a future revision. The
+unreleased `noa.action-class-enrolment/0.1` schema already narrows its seconds field and states why.
+
+## S6. `noa.deploy.release/1` — what the published pins do and do not establish
+
+`noa.deploy.release/1` (`src/deploy-release.ts`, `docs/deploy-release-spec.md`) publishes the rule
+for turning a six-member deployment tuple into the `paramsHash` a deployment receipt commits to, plus
+two pinned projection identities.
+
+### NC-S6.1 — The pinned hashes are normative expected values, not attestations
+
+They define what a conforming implementation must compute. They are not signed by, and carry no
+statement from, any running producer. Repository tests prove that the implementation, the committed
+corpus and the pinned literals agree, and that each pin is load-bearing. They do not prove that a
+particular deployed producer computes them.
+
+### NC-S6.2 — Public CI cannot detect public/non-public drift
+
+If every public copy of the literals changed together while a non-public producer differed, every
+public test would stay green. A signed, versioned parity manifest from the producer would close this;
+none exists, and cross-plane agreement is asserted nowhere here.
+
+### NC-S6.3 — A recomputed `paramsHash` is not authorization, execution or completion
+
+It establishes that a disclosed tuple is the committed parameter set. Approval, its validity, dispatch,
+execution and completion are separate claims with their own evidence (§1, §2,
+`docs/action-digest-spec.md`).
+
+### NC-S6.4 — `paramsHash` repeats across retries and is not the action digest
+
+Two attempts of the same deployment share one `paramsHash` by construction. Per-attempt correlation
+is what `noa.action-digest/0.1` is for (ADR-R-004).
+
+### NC-S6.5 — The published implementation digest is a fingerprint, not a confidentiality boundary
+
+`DEPLOY_RELEASE_IMPLEMENTATION_DIGEST` does not reveal the adapter source, but it reveals equality
+between builds and lets anyone holding a candidate source confirm or refute it.
+
+### NC-S6.6 — The projection identity does not cover the canonicalizer it depends on
+
+The identity commits to the adapter's emitted `run()` source text only. Code reached through its free
+variables, including the canonicalizer, can change every `paramsHash` without moving the identity.
+Identity equality is a necessary signal for substitution, never a sufficient one for equivalence.
+
+### NC-S6.7 — The risk class is not part of this wire language
+
+An enforcing implementation derives a risk tier from `environment` with its own reviewed policy
+table. That table is authorization-side policy, is not published here, and must not be inferred from
+this specification.
+
 ## 7. Changing this document
 
 Removing or weakening a non-claim creates a stronger claim. Such a change requires an exact normative

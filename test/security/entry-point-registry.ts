@@ -119,6 +119,10 @@ export const NOA_RECEIPT: EntryPoint[] = [
   { name: "buildActionDigest", cls: "bytes-in", why: "receipt and grant are both documents; every hash in the projection is recomputed from those bytes and never accepted from a caller" },
   { name: "verifyActionDigest", cls: "bytes-in", why: "claim and context are both documents; the two source documents re-enter through buildActionDigest's own byte boundary, so builder and verifier cannot disagree about what they read" },
 
+  // ── noa.deploy.release/1 (src/deploy-release.ts) ───────────────────────────────────────────────
+  { name: "projectDeployRelease", cls: "bytes-in", why: "the deployment tuple is a DOCUMENT, parsed by the shared strict boundary; a caller-owned live object is refused without being traversed, which is what makes symbol keys, accessors and revisable reads unreachable rather than merely rejected" },
+  { name: "projectionIdentityHash", cls: "producer-inert", why: "pure pre-image construction over four scalar fields read once; its output is compared against pinned golden vectors, never accepted as a verdict" },
+
   // ── policy surface ─────────────────────────────────────────────────────────────────────────────
   { name: "evaluate", cls: "bytes-in", why: "policy and inputs are documents; the rule walk runs over safeParse output" },
   { name: "validatePolicy", cls: "bytes-in", why: "the validated bytes ARE the supplied bytes" },

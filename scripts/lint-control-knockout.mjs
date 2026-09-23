@@ -4634,6 +4634,93 @@ const KNOCKOUTS = [
       subject: "ratchet: a finding with no ledger entry BLOCKS",
     }],
     suite: [".", "node", ["scripts/lint-boundary.mjs", "--selftest", "--knockout-json"]],
+  },  // ── `noa.deploy.release/1` (docs/deploy-release-spec.md) ──────────────────────────────────────
+  //
+  // REGISTERED IN THE SAME ROUND THE MODULE LANDED, and the reason is this gate's own history: a
+  // review observed that `projectDeployRelease` is SECURITY_SENSITIVE and in the derived TCB while
+  // L4 had no entry for it, so the module's 91 focused tests were substantial but were NOT the
+  // repository's mechanical anti-vacuity proof. "Substantial tests" is what `grant-atomic.test.ts`
+  // looked like for months while asserting a defect as correct behaviour.
+  //
+  // Each entry below is scoped to `npm run test:deploy-release` rather than the whole kernel suite:
+  // the detector for every one of these controls lives in that file, and a five-arm registration
+  // that each costs a full kernel run would be the kind of gate people start skipping.
+  {
+    id: "deploy-release-bytes-in-strict-parse",
+    control:
+      "spec §3.1 — the deployment tuple enters through the kernel's STRICT parser, so a duplicate " +
+      "`commit` member, a `__proto__` key or a non-integer number is refused before any field rule " +
+      "runs. A lenient parser is last-wins on duplicates, which is precisely how the value an " +
+      "approver reads and the value a producer binds come to differ.",
+    file: "src/deploy-release.ts",
+    find: '  const parsed = parseDocument(paramsBytes, "params");',
+    // The union annotation keeps BOTH branches reachable so the mutant compiles — `ok: true as const`
+    // alone narrows `!parsed.ok` to `never` and the next line stops type-checking. That trap cost the
+    // g3 entry three attempts and is documented there; it is avoided rather than rediscovered.
+    replace:
+      '  const parsed: { ok: true; value: unknown } | { ok: false; reason: string } = (() => {\n' +
+      '    try {\n' +
+      '      const raw = typeof paramsBytes === "string" ? paramsBytes : new TextDecoder().decode(paramsBytes);\n' +
+      '      return { ok: true as const, value: JSON.parse(raw) as unknown };\n' +
+      '    } catch {\n' +
+      '      return { ok: false as const, reason: "params: lenient parse failed" };\n' +
+      '    }\n' +
+      '  })();',
+    kind: "tests",
+    suite: [".", "npm", ["run", "test:deploy-release"]],
+  },
+  {
+    id: "deploy-release-closed-key-set",
+    control:
+      "spec §5 — `additionalProperties:false`, enforced in code. Without it `{six members}` and " +
+      "`{six members, force:true}` produce the SAME paramsHash while the extra member is invisible " +
+      "in the display, so a member the approver never saw can ride an approved authorization to " +
+      "whatever executes it. Not hypothetical: an early revision of this projection omitted the " +
+      "closed key set, and a review found exactly that escalation before it shipped.",
+    file: "src/deploy-release.ts",
+    find: "    if (!hasOwn(RECOGNIZED_DEPLOY_KEYS, presentKeys[i] as string)) {",
+    replace: "    if (false as boolean) {",
+    kind: "tests",
+    suite: [".", "npm", ["run", "test:deploy-release"]],
+  },
+  {
+    id: "deploy-release-hash-over-canonical-bytes",
+    control:
+      "spec §3 — paramsHash is SHA-256 over the JCS canonical bytes of the six members. Hashing " +
+      "anything else (here: the repository alone) still yields a well-formed `sha256:` value and a " +
+      "correct-looking display, so only a pinned vector can tell the difference. That is why the " +
+      "corpus pins the digest rather than merely asserting its shape.",
+    file: "src/deploy-release.ts",
+    find: "  const paramsHash = sha256Prefixed(canonical);",
+    replace: "  const paramsHash = sha256Prefixed(snapshot.repository);",
+    kind: "tests",
+    suite: [".", "npm", ["run", "test:deploy-release"]],
+  },
+  {
+    id: "deploy-release-display-shows-every-bound-field",
+    control:
+      "spec §4 — every bound member is visible in the rendering. Dropping a row leaves a display " +
+      "that still looks complete and a digest that still binds the hidden value, which is the " +
+      "approver-sees != executor-gets split in its display half. The mechanical completeness arm " +
+      "of the suite, not the hand-written expectation, is what must catch this.",
+    file: "src/deploy-release.ts",
+    find: "    Image: b.imageDigest,",
+    replace: "",
+    kind: "tests",
+    suite: [".", "npm", ["run", "test:deploy-release"]],
+  },
+  {
+    id: "deploy-release-authority-pin-drift",
+    control:
+      "spec §6-§7 — the published implementation digest is an INPUT to both projection identities, " +
+      "so a one-character drift must move both. If it does not, the identity does not commit to the " +
+      "artifact it names and the pin is decoration. The mutation drifts the published digest by one " +
+      "character; the identity vectors and the anti-vacuity test must both go red.",
+    file: "src/deploy-release.ts",
+    find: '  "sha256:51db5df44718981eba71c80356858e1b254fe30ec017c4a4e82c7159f2137bcc" as const;',
+    replace: '  "sha256:51db5df44718981eba71c80356858e1b254fe30ec017c4a4e82c7159f2137bcd" as const;',
+    kind: "tests",
+    suite: [".", "npm", ["run", "test:deploy-release"]],
   },
 ];
 

@@ -130,6 +130,11 @@ const TCB = [
   // records what happens otherwise, twice. `verifyActionDigest` returns a verdict a relying party
   // correlates an authorization on, and both of its parameters are attacker-reachable bytes.
   "src/action-digest.ts",
+  // `noa.deploy.release/1`. A decision path by construction and for the same reason: it takes
+  // attacker-reachable bytes and produces the `paramsHash` a deployment receipt is checked
+  // against, plus the projection identities a signed envelope is compared to. In the TCB in the
+  // same commit that creates it.
+  "src/deploy-release.ts",
 ];
 
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
