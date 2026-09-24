@@ -1,0 +1,460 @@
+name: release-npm-noa-receipt
+
+# The release controller for the noa-receipt package. The legacy publish*.yml workflow IDs stay
+# quarantined; this new file earns publication authority from three separate jobs:
+#
+#   stage     no OIDC. Binds the dispatch to the named signed squash merge at the tip of main,
+#             requires every context the live ruleset demands (push-lane contexts on the release
+#             commit, pull-request-lane contexts on the merged pull request's head, whose tree must
+#             equal the release tree), restages the tarballs from the exact commit in the pinned
+#             container, and requires the noa-receipt bytes to equal the main-push candidate that an
+#             independent run built. It uploads only that one tarball and outputs its digests.
+#   publish   the only job that can mint an OIDC token, behind the npm-release environment. It never
+#             checks out the repository and runs no repository code: it compares the downloaded
+#             tarball with the stage digests and publishes exactly that file with provenance.
+#   readback  no permissions. Reads the registry integrity and the provenance statement back and
+#             verifies the registry and attestation signatures from a scratch install.
+#
+# The environment's reviewers and main-only branch policy, and the npm trusted-publisher binding to
+# this workflow file and environment, are provider settings; this file does not create them.
+# Every change to this file needs a full re-review: its complete bytes are digest-pinned by the
+# knockout selftest together with structural pins that are measured separately.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact noa-receipt version at the release commit (X.Y.Z)"
+        required: true
+        type: string
+      commit:
+        description: "Full 40-hex SHA of the current main tip being released"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-npm-noa-receipt
+  cancel-in-progress: false
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    outputs:
+      artifact: ${{ steps.bind-bytes.outputs.artifact }}
+      filename: ${{ steps.bind-bytes.outputs.filename }}
+      integrity: ${{ steps.bind-bytes.outputs.integrity }}
+      sha256: ${{ steps.bind-bytes.outputs.sha256 }}
+    steps:
+      - name: Refuse any dispatch other than the named commit on main
+        shell: bash
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REPOSITORY" = NordenSoft/noa-mandate-core
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$INPUT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_SHA" = "$INPUT_COMMIT"
+          [[ "$INPUT_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.2
+          package-manager-cache: false
+
+      - name: Bind the release commit to its merged pull request and the live ruleset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RULESET_ID: "22911326"
+          # Contexts produced only by pull_request workflows; they can never exist on a main commit.
+          PR_ONLY_CONTEXTS: "pr-title review"
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          sha="$GITHUB_SHA"
+          api() { gh api -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$@"; }
+          test "$(env -u HOME GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 /usr/bin/git rev-parse HEAD)" = "$sha"
+          test "$(api "repos/${repo}" --jq .default_branch)" = main
+
+          ruleset="$(api "repos/${repo}/rulesets/${RULESET_ID}")"
+          jq -e --arg id "$RULESET_ID" --arg repo "$repo" '
+            (.id | tostring) == $id and .enforcement == "active" and .target == "branch" and
+            .source_type == "Repository" and .source == $repo and
+            (.conditions.ref_name.include | index("~DEFAULT_BRANCH")) != null and
+            (.conditions.ref_name.exclude | length) == 0 and
+            ((has("bypass_actors") | not) or (.bypass_actors | length) == 0) and
+            ((has("current_user_can_bypass") | not) or .current_user_can_bypass == "never") and
+            ([.rules[].type] as $types |
+              all(("deletion", "non_fast_forward", "required_linear_history", "required_signatures",
+                   "pull_request", "required_status_checks"); . as $t | $types | index($t) != null)) and
+            ([.rules[] | select(.type == "pull_request") | .parameters.allowed_merge_methods] == [["squash"]]) and
+            ([.rules[] | select(.type == "required_status_checks") | .parameters.strict_required_status_checks_policy] == [true])
+          ' <<<"$ruleset" >/dev/null || { echo "::error::ruleset ${RULESET_ID} is not the active squash-only signed main protection"; exit 1; }
+          if jq -e 'has("bypass_actors")' <<<"$ruleset" >/dev/null; then
+            bypass_note='read: none'
+          else
+            bypass_note='not observable with the job token (GitHub returns bypass actors only to ruleset writers)'
+          fi
+          required="$(jq -c '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[] | {context, integration_id}]' <<<"$ruleset")"
+          jq -e 'length > 0 and all(.[]; (.context | type) == "string" and (.integration_id | type) == "number")' <<<"$required" >/dev/null
+          for context in $PR_ONLY_CONTEXTS; do
+            jq -e --arg c "$context" 'any(.[]; .context == $c)' <<<"$required" >/dev/null ||
+              { echo "::error::declared pull-request-only context ${context} is not required by the ruleset"; exit 1; }
+          done
+
+          # The merged pull request, found two independent ways that must agree.
+          subject="$(env -u HOME GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 /usr/bin/git log -1 --format=%s "$sha")"
+          subject_pr=''
+          if [[ "$subject" =~ \(#([0-9]+)\)$ ]]; then subject_pr="${BASH_REMATCH[1]}"; fi
+          associated="$(api "repos/${repo}/commits/${sha}/pulls" |
+            jq -c --arg sha "$sha" --arg repo "$repo" '[.[] | select(.merged_at != null and .merge_commit_sha == $sha and .base.ref == "main" and .base.repo.full_name == $repo) | .number]')"
+          associated_count="$(jq 'length' <<<"$associated")"
+          if [ "$associated_count" -gt 1 ]; then echo "::error::more than one merged pull request claims ${sha}"; exit 1; fi
+          if [ "$associated_count" -eq 1 ]; then
+            pr_number="$(jq -r '.[0]' <<<"$associated")"
+            if [ -n "$subject_pr" ] && [ "$subject_pr" != "$pr_number" ]; then
+              echo "::error::the squash subject names #${subject_pr} but the merge belongs to #${pr_number}"; exit 1
+            fi
+          elif [ -n "$subject_pr" ]; then
+            pr_number="$subject_pr"
+          else
+            echo "::error::no merged pull request is bound to ${sha}"; exit 1
+          fi
+          pr="$(api "repos/${repo}/pulls/${pr_number}")"
+          jq -e --arg sha "$sha" --arg repo "$repo" '.merged == true and .merge_commit_sha == $sha and .base.ref == "main" and .base.repo.full_name == $repo' <<<"$pr" >/dev/null ||
+            { echo "::error::pull request #${pr_number} is not the merged pull request of ${sha}"; exit 1; }
+          head_sha="$(jq -r '.head.sha' <<<"$pr")"
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+
+          # A signed single-parent squash whose tree is exactly the reviewed pull-request head tree.
+          commit="$(api "repos/${repo}/git/commits/${sha}")"
+          jq -e '(.parents | length) == 1 and .verification.verified == true' <<<"$commit" >/dev/null ||
+            { echo "::error::${sha} is not a signed single-parent squash commit"; exit 1; }
+          release_tree="$(jq -r '.tree.sha' <<<"$commit")"
+          test "$release_tree" = "$(env -u HOME GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 /usr/bin/git rev-parse "${sha}^{tree}")"
+          test "$release_tree" = "$(api "repos/${repo}/git/commits/${head_sha}" --jq '.tree.sha')" ||
+            { echo "::error::the release tree differs from the tree the pull-request checks ran on"; exit 1; }
+
+          # Every required context, from the lane that can produce it, by the app the ruleset names.
+          while IFS= read -r row; do
+            context="$(jq -r '.context' <<<"$row")"
+            app_id="$(jq -r '.integration_id' <<<"$row")"
+            target="$sha"
+            lane=push
+            for pr_only in $PR_ONLY_CONTEXTS; do
+              if [ "$context" = "$pr_only" ]; then target="$head_sha"; lane=pull_request; fi
+            done
+            runs="$(api -X GET "repos/${repo}/commits/${target}/check-runs" -f check_name="$context" -f filter=latest -f per_page=100)"
+            jq -e --argjson app "$app_id" '[.check_runs[] | select(.app.id == $app)] as $r | ($r | length) > 0 and all($r[]; .status == "completed" and .conclusion == "success")' <<<"$runs" >/dev/null ||
+              { echo "::error::required context ${context} is not successful on the ${lane} commit ${target}"; exit 1; }
+          done < <(jq -c '.[]' <<<"$required")
+
+          {
+            echo '## Release binding'
+            printf 'Release commit: %s (pull request #%s, head %s)\n' "$sha" "$pr_number" "$head_sha"
+            printf 'Required contexts successful: %s (ruleset %s)\n' "$(jq 'length' <<<"$required")" "$RULESET_ID"
+            printf 'Ruleset bypass actors: %s\n' "$bypass_note"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require the declared version, its changelog entry and an unused registry version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          jq -e --arg v "$INPUT_VERSION" '.name == "noa-receipt" and .version == $v' package.json >/dev/null ||
+            { echo "::error::package.json at the release commit is not noa-receipt ${INPUT_VERSION}"; exit 1; }
+          escaped="${INPUT_VERSION//./\\.}"
+          grep -E -q "^## \[${escaped}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md ||
+            { echo "::error::CHANGELOG.md has no dated heading for ${INPUT_VERSION}"; exit 1; }
+          packument="$RUNNER_TEMP/noa-receipt-packument.json"
+          test "$(curl --silent --show-error --proto '=https' --tlsv1.2 -o "$packument" -w '%{http_code}' https://registry.npmjs.org/noa-receipt)" = 200
+          jq -e --arg v "$INPUT_VERSION" '.name == "noa-receipt" and (.versions | has($v) | not) and (.time | has($v) | not)' "$packument" >/dev/null ||
+            { echo "::error::noa-receipt ${INPUT_VERSION} is already on the registry or was published before"; exit 1; }
+          latest="$(jq -r '.["dist-tags"].latest' "$packument")"
+          test "$(printf '%s\n%s\n' "$latest" "$INPUT_VERSION" | sort -V | tail -n 1)" = "$INPUT_VERSION" && test "$latest" != "$INPUT_VERSION" ||
+            { echo "::error::${INPUT_VERSION} is not above the current latest ${latest}"; exit 1; }
+
+      - name: Acquire the exact public Node image (setup only; staging later uses pull=never)
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='docker.io/library/node@sha256:62e4daa6819762bbd3072af77cc282ab72c631c4aed30dd7980192babaf385b3'
+          docker pull --platform=linux/amd64 "$image"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = 'linux/amd64'
+
+      - name: Stage and verify immutable tarballs from the exact Git commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git='/usr/bin/git'
+          node_bin="$(command -v node)"
+          test "$GITHUB_SHA" = "$(env -u HOME GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 LANG=C LC_ALL=C "$git" rev-parse HEAD)"
+          bootstrap_dirs=()
+          cleanup_bootstraps() {
+            local dir
+            for dir in "${bootstrap_dirs[@]}"; do rm -rf -- "$dir"; done
+          }
+          trap cleanup_bootstraps EXIT
+          run_exact_bootstrap() {
+            local bootstrap_dir bootstrap
+            bootstrap_dir="$(mktemp -d "$RUNNER_TEMP/noa-release-exact-bootstrap.XXXXXX")"
+            bootstrap_dirs+=("$bootstrap_dir")
+            bootstrap="$bootstrap_dir/stage-publish-artifacts.mjs"
+            env -u HOME GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 LANG=C LC_ALL=C "$git" \
+              show "$GITHUB_SHA:scripts/lib/stage-publish-artifacts.mjs" > "$bootstrap"
+            test -s "$bootstrap"
+            chmod 500 "$bootstrap"
+            "$node_bin" "$bootstrap" --repo-root "$GITHUB_WORKSPACE" "$@"
+          }
+          output="$RUNNER_TEMP/noa-release-stage"
+          run_exact_bootstrap --git-ref "$GITHUB_SHA" --output "$output"
+          run_exact_bootstrap --verify "$output" --git-ref "$GITHUB_SHA"
+
+      - name: Require the independent main-push candidate to carry the same tarball bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          sha="$GITHUB_SHA"
+          file="noa-receipt-${INPUT_VERSION}.tgz"
+          staged="$RUNNER_TEMP/noa-release-stage/$file"
+          test -f "$staged" && test ! -L "$staged"
+          name="noa-publish-${sha}-CANDIDATE-NON-RELEASE"
+          listing="$(gh api -X GET "repos/${repo}/actions/artifacts" -f name="$name" -f per_page=100)"
+          matches="$(jq -c --arg sha "$sha" '[.artifacts[] | select(.expired == false and .workflow_run.head_sha == $sha and .workflow_run.head_branch == "main" and .workflow_run.repository_id == .workflow_run.head_repository_id)]' <<<"$listing")"
+          if [ "$(jq 'length' <<<"$matches")" != 1 ]; then
+            echo "::error::expected exactly one unexpired main-push candidate named ${name}; re-run publish-surface-lint on main for ${sha}, then dispatch again"
+            exit 1
+          fi
+          artifact_id="$(jq -r '.[0].id' <<<"$matches")"
+          run_id="$(jq -r '.[0].workflow_run.id' <<<"$matches")"
+          digest="$(jq -r '.[0].digest' <<<"$matches")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          gh api "repos/${repo}/actions/runs/${run_id}" |
+            jq -e --arg sha "$sha" '.event == "push" and .path == ".github/workflows/publish-surface-lint.yml" and .head_sha == $sha and .head_branch == "main" and .status == "completed" and .conclusion == "success"' >/dev/null
+          independent="$RUNNER_TEMP/noa-main-push-candidate"
+          mkdir -- "$independent"
+          gh api "repos/${repo}/actions/artifacts/${artifact_id}/zip" > "$independent/candidate.zip"
+          test "sha256:$(sha256sum "$independent/candidate.zip" | cut -d' ' -f1)" = "$digest"
+          unzip -q "$independent/candidate.zip" "$file" -d "$independent/files"
+          test -f "$independent/files/$file" && test ! -L "$independent/files/$file"
+          test "$(sha256sum < "$independent/files/$file")" = "$(sha256sum < "$staged")"
+
+      - name: Refuse local-path dependencies in the staged manifest
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          extracted="$RUNNER_TEMP/noa-release-manifest"
+          mkdir -- "$extracted"
+          tar -xzf "$RUNNER_TEMP/noa-release-stage/noa-receipt-${INPUT_VERSION}.tgz" -C "$extracted" package/package.json
+          node scripts/lint-publish-tarball-deps.mjs --manifest --dir "$extracted/package"
+
+      - name: Bind the release bytes
+        id: bind-bytes
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          file="noa-receipt-${INPUT_VERSION}.tgz"
+          stage="$RUNNER_TEMP/noa-release-stage"
+          upload="$RUNNER_TEMP/noa-receipt-release"
+          mkdir -- "$upload"
+          cp -- "$stage/$file" "$upload/$file"
+          sha256="$(sha256sum "$upload/$file" | cut -d' ' -f1)"
+          integrity="sha512-$(openssl dgst -sha512 -binary "$upload/$file" | base64 -w0)"
+          jq -e --arg f "$file" --arg s "$sha256" '[.packages[] | select(.filename == $f)] | length == 1 and .[0].name == "noa-receipt" and .[0].tarballSha256 == $s' "$stage/publish-artifacts.manifest.json" >/dev/null
+          {
+            printf 'artifact=noa-receipt-%s-%s-RELEASE-BYTES\n' "$INPUT_VERSION" "$GITHUB_SHA"
+            printf 'filename=%s\n' "$file"
+            printf 'integrity=%s\n' "$integrity"
+            printf 'sha256=%s\n' "$sha256"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.bind-bytes.outputs.artifact }}
+          path: ${{ runner.temp }}/noa-receipt-release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          overwrite: false
+
+  publish:
+    needs: stage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm-release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.2
+          package-manager-cache: false
+
+      - name: Install the exact npm CLI
+        shell: bash
+        env:
+          NPM_VERSION: 12.1.0
+          NPM_INTEGRITY: sha512-Fyhu62pNx70YCs/5+dEmJQTFVmSKwvo5CA0qvBkGDRpob42MJ6G2RQ2tdxeKM4nYnIZDqkYAxEgqtoejn9QGtQ==
+        run: |
+          set -euo pipefail
+          cli="$RUNNER_TEMP/noa-npm-cli"
+          mkdir -- "$cli"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 -o "$cli/npm.tgz" "https://registry.npmjs.org/npm/-/npm-${NPM_VERSION}.tgz"
+          test "sha512-$(openssl dgst -sha512 -binary "$cli/npm.tgz" | base64 -w0)" = "$NPM_INTEGRITY"
+          npm install --global --ignore-scripts --no-audit --no-fund "$cli/npm.tgz"
+          hash -r
+          test "$(npm -v)" = "$NPM_VERSION"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.stage.outputs.artifact }}
+          path: ${{ runner.temp }}/noa-receipt-release
+          digest-mismatch: error
+
+      - name: Publish only the staged bytes
+        shell: bash
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_VERSION: ${{ inputs.version }}
+          STAGED_FILENAME: ${{ needs.stage.outputs.filename }}
+          STAGED_INTEGRITY: ${{ needs.stage.outputs.integrity }}
+          STAGED_SHA256: ${{ needs.stage.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$INPUT_COMMIT"
+          [[ "$INPUT_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$STAGED_FILENAME" = "noa-receipt-${INPUT_VERSION}.tgz"
+          [[ "$STAGED_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$STAGED_INTEGRITY" =~ ^sha512-[A-Za-z0-9+/]{86}==$ ]]
+
+          # No ambient credential or npm configuration may reach the publish.
+          for credential in NODE_AUTH_TOKEN NPM_TOKEN NPM_ID_TOKEN; do
+            if [ -n "${!credential+x}" ]; then echo "::error::${credential} is set; this job publishes through OIDC only"; exit 1; fi
+          done
+          npm_config_names="$(compgen -e | grep -i '^npm_config_' || true)"
+          if [ -n "$npm_config_names" ]; then echo "::error::npm configuration variables are present"; exit 1; fi
+          for rc in "$HOME/.npmrc" "$RUNNER_TEMP/.npmrc" "$PWD/.npmrc" "$(npm prefix --global)/etc/npmrc"; do
+            if [ -e "$rc" ] || [ -L "$rc" ]; then echo "::error::npm configuration file present: ${rc}"; exit 1; fi
+          done
+          test "$(npm config get registry)" = https://registry.npmjs.org/
+
+          # Exactly the one staged file, byte-identical to the stage digests.
+          dir="$RUNNER_TEMP/noa-receipt-release"
+          test "$(ls -A "$dir")" = "$STAGED_FILENAME" || { echo "::error::the downloaded artifact is not exactly ${STAGED_FILENAME}"; exit 1; }
+          tarball="$dir/$STAGED_FILENAME"
+          test -f "$tarball" && test ! -L "$tarball"
+          test "$(sha256sum "$tarball" | cut -d' ' -f1)" = "$STAGED_SHA256" &&
+            test "sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)" = "$STAGED_INTEGRITY" ||
+            { echo "::error::the downloaded tarball is not the staged bytes"; exit 1; }
+          tar -xzOf "$tarball" package/package.json |
+            jq -e --arg v "$INPUT_VERSION" '.name == "noa-receipt" and .version == $v and .repository == {type: "git", url: "https://github.com/NordenSoft/noa-mandate-core.git"}' >/dev/null ||
+            { echo "::error::the staged tarball is not noa-receipt ${INPUT_VERSION} naming the public source repository"; exit 1; }
+
+          npm publish "$tarball" --ignore-scripts --access public --provenance --tag latest --registry https://registry.npmjs.org/
+
+  readback:
+    needs: [stage, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions: {}
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.2
+          package-manager-cache: false
+
+      - name: Install the exact npm CLI
+        shell: bash
+        env:
+          NPM_VERSION: 12.1.0
+          NPM_INTEGRITY: sha512-Fyhu62pNx70YCs/5+dEmJQTFVmSKwvo5CA0qvBkGDRpob42MJ6G2RQ2tdxeKM4nYnIZDqkYAxEgqtoejn9QGtQ==
+        run: |
+          set -euo pipefail
+          cli="$RUNNER_TEMP/noa-npm-cli"
+          mkdir -- "$cli"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 -o "$cli/npm.tgz" "https://registry.npmjs.org/npm/-/npm-${NPM_VERSION}.tgz"
+          test "sha512-$(openssl dgst -sha512 -binary "$cli/npm.tgz" | base64 -w0)" = "$NPM_INTEGRITY"
+          npm install --global --ignore-scripts --no-audit --no-fund "$cli/npm.tgz"
+          hash -r
+          test "$(npm -v)" = "$NPM_VERSION"
+
+      - name: Read back the registry integrity, provenance statement and signatures
+        shell: bash
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_VERSION: ${{ inputs.version }}
+          STAGED_INTEGRITY: ${{ needs.stage.outputs.integrity }}
+        run: |
+          set -euo pipefail
+          [[ "$INPUT_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          work="$RUNNER_TEMP/noa-readback"
+          mkdir -- "$work"
+          served=''
+          for attempt in $(seq 1 30); do
+            code="$(curl --silent --show-error --proto '=https' --tlsv1.2 -o "$work/version.json" -w '%{http_code}' "https://registry.npmjs.org/noa-receipt/${INPUT_VERSION}" || true)"
+            if [ "$code" = 200 ]; then served="$(jq -r '.dist.integrity' "$work/version.json")"; break; fi
+            sleep 20
+          done
+          if [ "$served" != "$STAGED_INTEGRITY" ]; then
+            echo "::error::the registry serves ${served:-nothing} for noa-receipt@${INPUT_VERSION}, not the staged integrity"; exit 1
+          fi
+
+          attested=''
+          for attempt in $(seq 1 10); do
+            code="$(curl --silent --show-error --proto '=https' --tlsv1.2 -o "$work/attestations.json" -w '%{http_code}' "https://registry.npmjs.org/-/npm/v1/attestations/noa-receipt@${INPUT_VERSION}" || true)"
+            if [ "$code" = 200 ]; then attested=yes; break; fi
+            sleep 20
+          done
+          test "$attested" = yes || { echo "::error::the registry serves no attestations for noa-receipt@${INPUT_VERSION}"; exit 1; }
+          jq -r '[.attestations[] | select(.predicateType == "https://slsa.dev/provenance/v1")] | if length == 1 then .[0].bundle.dsseEnvelope.payload else error("expected exactly one SLSA provenance attestation") end' "$work/attestations.json" |
+            base64 -d > "$work/statement.json"
+          digest="$(printf '%s' "${STAGED_INTEGRITY#sha512-}" | base64 -d | od -An -v -tx1 | tr -d ' \n')"
+          jq -e \
+            --arg digest "$digest" \
+            --arg name "pkg:npm/noa-receipt@${INPUT_VERSION}" \
+            --arg path ".github/workflows/release-npm-noa-receipt.yml" \
+            --arg repository "https://github.com/${GITHUB_REPOSITORY}" \
+            --arg sha "$INPUT_COMMIT" '
+              .subject == [{name: $name, digest: {sha512: $digest}}] and
+              .predicate.buildDefinition.externalParameters.workflow == {ref: "refs/heads/main", repository: $repository, path: $path} and
+              .predicate.buildDefinition.internalParameters.github.event_name == "workflow_dispatch" and
+              [.predicate.buildDefinition.resolvedDependencies[].digest.gitCommit] == [$sha]
+            ' "$work/statement.json" >/dev/null ||
+            { echo "::error::the provenance statement does not bind these bytes to this workflow on main at ${INPUT_COMMIT}"; exit 1; }
+
+          project="$work/project"
+          mkdir -- "$project"
+          cd "$project"
+          printf '{"name":"noa-readback","version":"0.0.0","private":true}\n' > package.json
+          npm install --ignore-scripts --no-audit --no-fund --save-exact "noa-receipt@${INPUT_VERSION}"
+          npm audit signatures --json --include-attestations > "$work/signatures.json"
+          jq -e --arg v "$INPUT_VERSION" '.invalid == [] and .missing == [] and ([.verified[] | select(.name == "noa-receipt" and .version == $v)] | length) == 1' "$work/signatures.json" >/dev/null
+          {
+            echo '## Registry readback'
+            printf 'noa-receipt@%s integrity %s\n' "$INPUT_VERSION" "$STAGED_INTEGRITY"
+            printf 'Provenance: %s at refs/heads/main, commit %s\n' '.github/workflows/release-npm-noa-receipt.yml' "$INPUT_COMMIT"
+          } >> "$GITHUB_STEP_SUMMARY"

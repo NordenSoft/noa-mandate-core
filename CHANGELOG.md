@@ -65,6 +65,27 @@ All notable changes to `noa-receipt` are documented here. The format follows
   supplied keyring. A successful result means both the native receipt and outer envelope checks
   required by the selected path succeeded; it is not an independent-execution or deployment claim.
 
+### Security
+
+- A new release controller, `.github/workflows/release-npm-noa-receipt.yml`, is the only workflow that
+  can publish `noa-receipt`; the legacy `publish*.yml` workflow IDs stay quarantined. It is dispatched
+  on `main` for the named tip commit only. The `stage` job, with read-only scopes, binds that commit to
+  its signed squash merge and merged pull request, requires every context of the live branch ruleset
+  (push-lane contexts on the release commit, pull-request contexts on the merged head, whose tree must
+  equal the release tree), restages the tarballs in the pinned container and requires the
+  `noa-receipt` bytes to equal the independently built main-push candidate. Only the `publish` job,
+  behind the `npm-release` environment, can mint an OIDC token: it checks out nothing, runs no
+  repository code, installs an integrity-pinned npm CLI, refuses ambient registry credentials and
+  publishes exactly the staged tarball with provenance. A `readback` job without permissions requires
+  the registry integrity, the provenance statement (this workflow, `refs/heads/main`, the release
+  commit) and the registry and attestation signatures to match. The environment protection and the
+  npm trusted-publisher binding are provider settings; this repository does not create them, and no
+  version has been published through the controller yet.
+- Public artifacts now carry their exact source repository instead of omitting it, because npm
+  provenance requires `repository.url` to match the publishing repository. Staging writes the policy
+  value (`https://github.com/NordenSoft/noa-mandate-core.git`, plus `directory` for subpackages) when
+  a manifest lacks it and refuses a manifest that names any other source.
+
 ## [0.8.0] - 2026-08-14
 
 **MINOR, and it contains TWO deliberate behaviour breaks.** Under

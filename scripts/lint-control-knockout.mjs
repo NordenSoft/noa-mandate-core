@@ -2728,6 +2728,115 @@ const KNOCKOUTS = [
     }],
     suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
   },
+  // Release controller arms. The whole workflow is also digest-pinned, and that digest check fires
+  // on every mutation below; it has its own name, so it can never satisfy these arms. Each arm is
+  // bound to the structural check that must detect the removed control, named in its finding.
+  {
+    id: "release-controller-stage-mints-no-oidc",
+    control:
+      "Release controller — the stage job runs repository code and holds read scopes only. Granting it " +
+      "id-token would let repository code mint the publish credential. Detector: the knockout-selftest " +
+      "check on OIDC placement.",
+    file: ".github/workflows/release-npm-noa-receipt.yml",
+    find: "      pull-requests: read\n",
+    replace: "      pull-requests: read\n      id-token: write\n",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "release controller mints OIDC only in the environment-gated publish job",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "release-controller-publish-requires-environment",
+    control:
+      "Release controller — the only OIDC-capable job runs behind the npm-release environment, whose " +
+      "reviewers and main-only branch policy gate every publish. Removing the environment line leaves an " +
+      "ungated OIDC job. Detector: the knockout-selftest check on OIDC placement.",
+    file: ".github/workflows/release-npm-noa-receipt.yml",
+    find: "    environment: npm-release\n",
+    replace: "",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "release controller mints OIDC only in the environment-gated publish job",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "release-controller-publish-checks-out-nothing",
+    control:
+      "Release controller — the publish job never checks out the repository, so no repository byte runs " +
+      "while an OIDC token can be minted. A checkout step reopens that path. Detector: the knockout-selftest " +
+      "check on the publish job.",
+    file: ".github/workflows/release-npm-noa-receipt.yml",
+    find: "    environment: npm-release\n    permissions:\n      id-token: write\n    steps:\n",
+    replace:
+      "    environment: npm-release\n    permissions:\n      id-token: write\n    steps:\n" +
+      "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n" +
+      "        with:\n          persist-credentials: false\n",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "release controller publish runs no repository code and publishes only the staged bytes",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "release-controller-publishes-only-staged-bytes",
+    control:
+      "Release controller — publish compares the downloaded tarball's sha512 with the stage output before " +
+      "npm publish. Without it any file placed under the artifact name would be published. Detector: the " +
+      "knockout-selftest check on the publish job.",
+    file: ".github/workflows/release-npm-noa-receipt.yml",
+    find:
+      "            test \"sha512-$(openssl dgst -sha512 -binary \"$tarball\" | base64 -w0)\" = \"$STAGED_INTEGRITY\" ||\n",
+    replace: "            true ||\n",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "release controller publish runs no repository code and publishes only the staged bytes",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "release-controller-dispatch-only",
+    control:
+      "Release controller — workflow_dispatch is the only trigger. A tag trigger would run the workflow " +
+      "bytes of whatever commit a tag names, outside the main-only dispatch. Detector: the knockout-selftest " +
+      "check on the trigger and commit binding.",
+    file: ".github/workflows/release-npm-noa-receipt.yml",
+    find: "on:\n  workflow_dispatch:\n",
+    replace: "on:\n  push:\n    tags: [v1]\n  workflow_dispatch:\n",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "release controller is dispatch-only and bound to the named commit on main",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "release-controller-binds-named-commit",
+    control:
+      "Release controller — stage refuses unless github.sha equals the full commit the dispatcher named, " +
+      "so a dispatch cannot release whatever main happens to be when the run starts. Detector: the " +
+      "knockout-selftest check on the trigger and commit binding.",
+    file: ".github/workflows/release-npm-noa-receipt.yml",
+    find: "          [[ \"$INPUT_COMMIT\" =~ ^[0-9a-f]{40}$ ]]\n          test \"$GITHUB_SHA\" = \"$INPUT_COMMIT\"\n",
+    replace: "          [[ \"$INPUT_COMMIT\" =~ ^[0-9a-f]{40}$ ]]\n",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "release controller is dispatch-only and bound to the named commit on main",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
   {
     id: "k4-launch-coverage-counts-are-exact",
     control: "L4 evidence integrity — the launch-point coverage asserts EXACT counts, not merely that the sanitized launches it finds are sanitized. Without the count a launch point can disappear, or be added unsanitized, while the check stays green on its siblings — which is precisely how the npm publish launch went unnoticed.",

@@ -812,6 +812,9 @@ const CLOSED_WORKFLOW_SHA256 = Object.freeze({
   "publish.yml": "95a5c267c674326e90ca97b1abe8c9b5b1628b7ca05a820851bbdb852795d5c3",
   "publish-mcp.yml": "7a38cf1cd331d2a61a2890f1430b422996e7c85d7aa892a18c2a8760bbcbc0e7",
   "publish-tsa.yml": "91745dac92651660718868884d203af96f7bcc42f5986ce9f319087c4b38716e",
+  // The release controller is pinned whole as well; its controls are ALSO measured structurally
+  // below, because a digest alone would make every knockout arm on the file vacuous.
+  "release-npm-noa-receipt.yml": "a2d73139349ce4027cbdaad0b8386d731a236a9dd07d891522e4d8e8e1fe1a2e",
 });
 
 // Only LF is a line separator in the canonical production representation. Reject every other
@@ -958,6 +961,509 @@ check("boundary workflow is keyless Tier-A CI with least privilege", () => {
     /not canonical UTF-8/u,
     "invalid UTF-8 reached the workflow digest as decoded replacement text",
   );
+});
+
+// ── RELEASE CONTROLLER ──────────────────────────────────────────────────────────────────────────
+// `release-npm-noa-receipt.yml` is the one workflow that can publish noa-receipt. Its complete bytes
+// are in CLOSED_WORKFLOW_SHA256, so any change needs a full re-review. A digest alone would make
+// every knockout arm on this file "killed" by the digest check, which measures nothing about the
+// control an arm removes. The load-bearing controls are therefore measured a second time here, by
+// a structural reader that is independent of the digest: each group below is its own named check
+// (the knockout arms bind to those names), and every pin has one mutation that must turn exactly
+// that pin red. The reader accepts only this file's canonical block shape; anchors, aliases, merge
+// keys, flow mappings, tabs and extra documents are refused rather than interpreted.
+const RELEASE_CONTROLLER_WORKFLOW = "release-npm-noa-receipt.yml";
+const RELEASE_CONTROLLER_CHECKS = Object.freeze({
+  trigger: "release controller is dispatch-only and bound to the named commit on main",
+  oidc: "release controller mints OIDC only in the environment-gated publish job",
+  publish: "release controller publish runs no repository code and publishes only the staged bytes",
+  stage: "release controller stage derives required contexts live and pins the pull-request lane",
+  readback: "release controller readback binds the provenance to this workflow on main",
+});
+// Parsed `uses:` values are SHA pins; the trailing version comment is YAML prose, not the value.
+const RELEASE_SETUP_NODE = `actions/setup-node@${SETUP_NODE_ATTESTED_REVISION}`;
+const RELEASE_DOWNLOAD_ARTIFACT = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c";
+const RELEASE_UPLOAD_ARTIFACT = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a";
+const RELEASE_CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
+
+/** A closed reader for the canonical block-YAML shape of one workflow file. */
+function parseCanonicalWorkflow(source) {
+  const shape = [];
+  const lines = source.split("\n");
+  const root = { entries: [] };
+  const frames = [{ indent: 0, entries: root.entries }];
+  const keyRe = /^( *)([A-Za-z0-9_-]+):(?: (.*))?$/;
+  const itemRe = /^( *)- ([A-Za-z0-9_-]+):(?: (.*))?$/;
+  const scalarValue = (raw, lineNo) => {
+    let value = raw ?? "";
+    if (!value.startsWith("\"") && !value.startsWith("'")) value = value.replace(/\s+#.*$/u, "");
+    value = value.trim();
+    if (/^[&*!]/u.test(value)) shape.push(`line ${lineNo}: anchor, alias or tag`);
+    if (value.startsWith("{") && value !== "{}") shape.push(`line ${lineNo}: flow mapping`);
+    if (value.startsWith("[") && !/^\[[A-Za-z0-9_-]+(?:, [A-Za-z0-9_-]+)*\]$/u.test(value)) {
+      shape.push(`line ${lineNo}: flow sequence`);
+    }
+    if (/^"[^"\\]*"$/u.test(value) || /^'[^']*'$/u.test(value)) return value.slice(1, -1);
+    if (value.startsWith("\"") || value.startsWith("'")) shape.push(`line ${lineNo}: quoted scalar`);
+    return value === "" ? null : value;
+  };
+  const addEntry = (entries, key, raw, lineNo, indent) => {
+    if (key === "<<") shape.push(`line ${lineNo}: merge key`);
+    if (entries.some((entry) => entry.key === key)) shape.push(`line ${lineNo}: duplicate key ${key}`);
+    const entry = { key, value: scalarValue(raw, lineNo), line: lineNo, indent, entries: [], items: [], body: null };
+    entries.push(entry);
+    return entry;
+  };
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    const lineNo = index + 1;
+    if (line.includes("\t") || line.includes("\r")) shape.push(`line ${lineNo}: tab or carriage return`);
+    if (line === "---" || line === "...") shape.push(`line ${lineNo}: document marker`);
+    if (line.trim() === "" || line.trim().startsWith("#")) continue;
+    const item = itemRe.exec(line);
+    const key = item === null ? keyRe.exec(line) : null;
+    if (item === null && key === null) {
+      shape.push(`line ${lineNo}: not a canonical block mapping line`);
+      continue;
+    }
+    let entry;
+    if (item !== null) {
+      const dash = item[1].length;
+      while (frames.at(-1).indent > dash) frames.pop();
+      const parent = frames.at(-1);
+      const owner = parent.entries.at(-1);
+      if (parent.indent >= dash || owner === undefined || owner.value !== null || owner.entries.length > 0) {
+        shape.push(`line ${lineNo}: sequence item without an owning key`);
+        continue;
+      }
+      const mapping = { line: lineNo, entries: [] };
+      owner.items.push(mapping);
+      frames.push({ indent: dash + 2, entries: mapping.entries });
+      entry = addEntry(mapping.entries, item[2], item[3], lineNo, dash + 2);
+    } else {
+      const indent = key[1].length;
+      while (frames.at(-1).indent > indent) frames.pop();
+      const parent = frames.at(-1);
+      if (parent.indent < indent) {
+        const owner = parent.entries.at(-1);
+        if (owner === undefined || owner.value !== null || owner.items.length > 0) {
+          shape.push(`line ${lineNo}: mapping without an owning key`);
+          continue;
+        }
+        frames.push({ indent, entries: owner.entries });
+      }
+      entry = addEntry(frames.at(-1).entries, key[2], key[3], lineNo, indent);
+    }
+    if (entry.value !== null && /^[|>][+-]?$/u.test(entry.value)) {
+      const body = [];
+      let cursor = index + 1;
+      for (; cursor < lines.length; cursor++) {
+        const bodyLine = lines[cursor];
+        if (bodyLine.trim() !== "" && bodyLine.length - bodyLine.trimStart().length <= entry.indent) break;
+        body.push(bodyLine);
+      }
+      const bodyIndent = Math.min(...body.filter((b) => b.trim() !== "").map((b) => b.length - b.trimStart().length));
+      entry.body = body.map((b) => b.slice(Number.isFinite(bodyIndent) ? bodyIndent : 0)).join("\n");
+      entry.value = null;
+      index = cursor - 1;
+    }
+  }
+  return { root, shape };
+}
+
+const workflowEntry = (entries, key) => entries.find((entry) => entry.key === key);
+const workflowMap = (entry) =>
+  entry === undefined ? undefined : Object.fromEntries(entry.entries.map((child) => [child.key, child.value]));
+const workflowKeys = (entries) => entries.map((entry) => entry.key).sort();
+const sameSet = (left, right) => JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
+const sameMap = (left, right) => left !== undefined && JSON.stringify(Object.entries(left).sort()) === JSON.stringify(Object.entries(right).sort());
+
+/** Job IDs (or job names) of every sibling workflow that runs ONLY on pull_request. */
+function pullRequestOnlyContexts(workflowDir, exclude) {
+  const contexts = new Set();
+  for (const file of fs.readdirSync(workflowDir).filter((name) => /\.ya?ml$/u.test(name)).sort()) {
+    if (file === exclude) continue;
+    const parsed = parseCanonicalWorkflow(fs.readFileSync(path.join(workflowDir, file), "utf8"));
+    const on = workflowEntry(parsed.root.entries, "on");
+    const triggers = on === undefined ? [] : on.value === null ? workflowKeys(on.entries) : [on.value];
+    if (!sameSet(triggers, ["pull_request"])) continue;
+    for (const job of workflowEntry(parsed.root.entries, "jobs")?.entries ?? []) {
+      contexts.add(workflowEntry(job.entries, "name")?.value ?? job.key);
+    }
+  }
+  return contexts;
+}
+
+function releaseControllerProblems(source, prOnlyContexts) {
+  const problems = [];
+  const fail = (group, pin, detail) => problems.push({ group, pin, detail });
+  const { root, shape } = parseCanonicalWorkflow(source);
+  for (const detail of shape) fail("shape", "SHAPE-CANONICAL", detail);
+  const top = root.entries;
+  const jobsEntry = workflowEntry(top, "jobs");
+  const job = (name) => workflowEntry(jobsEntry?.entries ?? [], name);
+  const jobKeys = (name) => workflowKeys(job(name)?.entries ?? []);
+  const steps = (name) => (workflowEntry(job(name)?.entries ?? [], "steps")?.items ?? []).map((item) => ({
+    item,
+    uses: workflowEntry(item.entries, "uses")?.value ?? null,
+    name: workflowEntry(item.entries, "name")?.value ?? null,
+    id: workflowEntry(item.entries, "id")?.value ?? null,
+    run: workflowEntry(item.entries, "run")?.body ?? null,
+    env: workflowMap(workflowEntry(item.entries, "env")) ?? {},
+    with: workflowMap(workflowEntry(item.entries, "with")),
+  }));
+  const allSteps = ["stage", "publish", "readback"].flatMap((name) => steps(name).map((step) => ({ ...step, job: name })));
+  const hasLine = (body, expected) => (body ?? "").split("\n").some((line) => line.trim() === expected);
+  const stepNamed = (jobName, name) => steps(jobName).find((step) => step.name === name);
+  const permissionsOf = (name) => workflowEntry(job(name)?.entries ?? [], "permissions");
+  const publishStep = stepNamed("publish", "Publish only the staged bytes");
+
+  // Shape: no GitHub expression may be expanded into shell source.
+  for (const step of allSteps) {
+    if ((step.run ?? "").includes("${{")) fail("shape", "SHAPE-RUN-EXPRESSION", `${step.job}/${step.name ?? step.uses}`);
+  }
+
+  // Trigger and commit binding.
+  if (!sameSet(workflowKeys(top), ["concurrency", "jobs", "name", "on", "permissions"])) {
+    fail("trigger", "TRG-TOP-KEYS", workflowKeys(top).join(","));
+  }
+  const on = workflowEntry(top, "on");
+  const dispatch = workflowEntry(on?.entries ?? [], "workflow_dispatch");
+  const inputs = workflowEntry(dispatch?.entries ?? [], "inputs");
+  if (on?.value !== null || !sameSet(workflowKeys(on?.entries ?? []), ["workflow_dispatch"]) ||
+      !sameSet(workflowKeys(dispatch?.entries ?? []), ["inputs"]) ||
+      !sameSet(workflowKeys(inputs?.entries ?? []), ["commit", "version"]) ||
+      !(inputs?.entries ?? []).every((input) => {
+        const fields = workflowMap(input);
+        return fields.required === "true" && fields.type === "string";
+      })) {
+    fail("trigger", "TRG-DISPATCH-ONLY", "the only trigger is workflow_dispatch with required string inputs commit and version");
+  }
+  if (!sameMap(workflowMap(workflowEntry(top, "concurrency")), { group: "release-npm-noa-receipt", "cancel-in-progress": "false" })) {
+    fail("trigger", "TRG-CONCURRENCY", "one serialized, never-cancelled release group");
+  }
+  const expectedJobKeys = {
+    stage: ["outputs", "permissions", "runs-on", "steps", "timeout-minutes"],
+    publish: ["environment", "needs", "permissions", "runs-on", "steps", "timeout-minutes"],
+    readback: ["needs", "permissions", "runs-on", "steps", "timeout-minutes"],
+  };
+  if (!sameSet(workflowKeys(jobsEntry?.entries ?? []), Object.keys(expectedJobKeys))) {
+    fail("trigger", "TRG-JOBS", "the jobs are exactly stage, publish and readback");
+  }
+  for (const [name, keys] of Object.entries(expectedJobKeys)) {
+    if (!sameSet(jobKeys(name), keys)) fail("trigger", "TRG-JOB-KEYS", `${name}: ${jobKeys(name).join(",")}`);
+    if (workflowEntry(job(name)?.entries ?? [], "runs-on")?.value !== "ubuntu-latest") {
+      fail("trigger", "TRG-HOSTED-RUNNER", `${name} must run on a GitHub-hosted ubuntu-latest runner`);
+    }
+  }
+  if (workflowEntry(job("publish")?.entries ?? [], "needs")?.value !== "stage" ||
+      workflowEntry(job("readback")?.entries ?? [], "needs")?.value !== "[stage, publish]") {
+    fail("trigger", "TRG-NEEDS", "publish needs stage and readback needs stage and publish");
+  }
+  const guard = steps("stage")[0];
+  if (guard?.name !== "Refuse any dispatch other than the named commit on main" || guard.uses !== null ||
+      !sameMap(guard.env, { INPUT_COMMIT: "${{ inputs.commit }}", INPUT_VERSION: "${{ inputs.version }}" })) {
+    fail("trigger", "TRG-GUARD-FIRST", "the dispatch guard is the first stage step and reads inputs only through env");
+  }
+  if (!hasLine(guard?.run, 'test "$GITHUB_EVENT_NAME" = workflow_dispatch') ||
+      !hasLine(guard?.run, 'test "$GITHUB_REF" = refs/heads/main')) {
+    fail("trigger", "TRG-MAIN-ONLY", "the stage guard refuses every ref except refs/heads/main");
+  }
+  if (!hasLine(guard?.run, '[[ "$INPUT_COMMIT" =~ ^[0-9a-f]{40}$ ]]') ||
+      !hasLine(guard?.run, 'test "$GITHUB_SHA" = "$INPUT_COMMIT"')) {
+    fail("trigger", "TRG-NAMED-COMMIT", "github.sha must equal the full commit named by the dispatcher");
+  }
+  if (publishStep?.env.INPUT_COMMIT !== "${{ inputs.commit }}" ||
+      !hasLine(publishStep?.run, 'test "$GITHUB_REF" = refs/heads/main') ||
+      !hasLine(publishStep?.run, 'test "$GITHUB_SHA" = "$INPUT_COMMIT"')) {
+    fail("trigger", "TRG-PUBLISH-REBINDS", "the publish step re-checks main and the named commit itself");
+  }
+
+  // OIDC: only publish, only id-token, only behind the environment.
+  if (workflowEntry(top, "permissions")?.value !== "{}") fail("oidc", "OIDC-TOP-EMPTY", "top-level permissions are {}");
+  if (permissionsOf("stage")?.value !== null ||
+      !sameMap(workflowMap(permissionsOf("stage")), { actions: "read", checks: "read", contents: "read", "pull-requests": "read" })) {
+    fail("oidc", "OIDC-STAGE-READ-ONLY", "stage holds read scopes only and no id-token");
+  }
+  if (permissionsOf("publish")?.value !== null || !sameMap(workflowMap(permissionsOf("publish")), { "id-token": "write" })) {
+    fail("oidc", "OIDC-PUBLISH-ONLY-ID-TOKEN", "publish holds id-token: write and nothing else");
+  }
+  if (permissionsOf("readback")?.value !== "{}") fail("oidc", "OIDC-READBACK-EMPTY", "readback holds no permission");
+  const idTokenMentions = source.split("\n").filter((line) => !line.trim().startsWith("#") && /id-token/u.test(line)).length;
+  if (idTokenMentions !== 1) fail("oidc", "OIDC-SINGLE-GRANT", `id-token appears ${idTokenMentions} times outside comments`);
+  if (workflowEntry(job("publish")?.entries ?? [], "environment")?.value !== "npm-release") {
+    fail("oidc", "OIDC-ENVIRONMENT", "publish runs in the npm-release environment");
+  }
+  const nonComment = source.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n");
+  if (/\bsecrets\b/u.test(nonComment)) fail("oidc", "OIDC-NO-SECRETS", "the controller reads no secret");
+  const tokenUses = [...nonComment.matchAll(/github(?:\.token|\[\s*['"]token['"]\s*\])/gu)].length;
+  const sanctionedTokenUses = steps("stage").filter((step) => step.env.GH_TOKEN === "${{ github.token }}").length;
+  if (tokenUses !== sanctionedTokenUses || steps("publish").some((step) => "GH_TOKEN" in step.env)) {
+    fail("oidc", "OIDC-JOB-TOKEN", "the job token is handed to gh in stage steps only");
+  }
+
+  // Publish: no repository code, the staged bytes only, the pinned npm, no ambient credential.
+  const publishUses = steps("publish").map((step) => step.uses).filter((uses) => uses !== null);
+  if (JSON.stringify(publishUses) !== JSON.stringify([RELEASE_SETUP_NODE, RELEASE_DOWNLOAD_ARTIFACT])) {
+    fail("publish", "PUB-ACTIONS", `publish uses ${publishUses.join(", ")}`);
+  }
+  const repositoryCode = [
+    /(?:^|[\s;|&(`])(?:node|npx|git|bash|sh|zsh|source|eval|python3?|perl|ruby)(?:\s|$)/mu,
+    /\bnpm\s+(?:run|ci|test|exec|pack|rebuild|link|install(?!\s+--global\s+--ignore-scripts\s))/u,
+    /scripts\//u,
+    /GITHUB_WORKSPACE/u,
+    /(?:^|\s)\.{1,2}\/[A-Za-z]/mu,
+  ];
+  // Quoted literals are data, not commands: single-quoted text never executes here (bash, sh and
+  // eval, which could execute it, are themselves refused), and a double-quoted string is dropped
+  // only when it contains no command substitution. Comment lines are prose.
+  const commandText = (body) => (body ?? "").split("\n")
+    .filter((line) => !line.trim().startsWith("#"))
+    .map((line) => line.replace(/'[^']*'/gu, "''").replace(/"(?:[^"\\$`]|\\.|\$(?!\())*"/gu, "\"\""))
+    .join("\n");
+  for (const step of steps("publish")) {
+    const hit = repositoryCode.find((pattern) => pattern.test(commandText(step.run)));
+    if (hit !== undefined) fail("publish", "PUB-NO-REPOSITORY-CODE", `${step.name}: ${hit}`);
+  }
+  const publishLines = allSteps.flatMap((step) => (step.run ?? "").split("\n")
+    .filter((line) => /\bnpm\s+publish\b/u.test(line)).map((line) => ({ job: step.job, name: step.name, line: line.trim() })));
+  if (publishLines.length !== 1 || publishLines[0].job !== "publish" || publishLines[0].name !== publishStep?.name ||
+      publishLines[0].line !== 'npm publish "$tarball" --ignore-scripts --access public --provenance --tag latest --registry https://registry.npmjs.org/') {
+    fail("publish", "PUB-ONE-EXACT-PUBLISH", "exactly one npm publish of the staged tarball with the reviewed flags");
+  }
+  if (!sameMap(
+    publishStep?.env === undefined ? undefined : {
+      filename: publishStep.env.STAGED_FILENAME, integrity: publishStep.env.STAGED_INTEGRITY, sha256: publishStep.env.STAGED_SHA256,
+    },
+    {
+      filename: "${{ needs.stage.outputs.filename }}",
+      integrity: "${{ needs.stage.outputs.integrity }}",
+      sha256: "${{ needs.stage.outputs.sha256 }}",
+    },
+  ) || !hasLine(publishStep?.run, 'test "sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)" = "$STAGED_INTEGRITY" ||') ||
+      !hasLine(publishStep?.run, 'test "$(sha256sum "$tarball" | cut -d\' \' -f1)" = "$STAGED_SHA256" &&')) {
+    fail("publish", "PUB-STAGED-BYTES", "publish compares the downloaded tarball with both stage digests");
+  }
+  const download = steps("publish").find((step) => step.uses === RELEASE_DOWNLOAD_ARTIFACT);
+  if (!sameMap(download?.with, {
+    name: "${{ needs.stage.outputs.artifact }}",
+    path: "${{ runner.temp }}/noa-receipt-release",
+    "digest-mismatch": "error",
+  })) {
+    fail("publish", "PUB-DOWNLOAD", "publish downloads only the stage artifact and errors on a digest mismatch");
+  }
+  if (!sameMap(workflowMap(workflowEntry(job("stage")?.entries ?? [], "outputs")), {
+    artifact: "${{ steps.bind-bytes.outputs.artifact }}",
+    filename: "${{ steps.bind-bytes.outputs.filename }}",
+    integrity: "${{ steps.bind-bytes.outputs.integrity }}",
+    sha256: "${{ steps.bind-bytes.outputs.sha256 }}",
+  })) {
+    fail("publish", "PUB-STAGE-OUTPUTS", "the digests come from the bind-bytes step");
+  }
+  const upload = steps("stage").find((step) => step.uses === RELEASE_UPLOAD_ARTIFACT);
+  if (!sameMap(upload?.with, {
+    name: "${{ steps.bind-bytes.outputs.artifact }}",
+    path: "${{ runner.temp }}/noa-receipt-release/",
+    "if-no-files-found": "error",
+    "compression-level": "0",
+    "retention-days": "1",
+    overwrite: "false",
+  })) {
+    fail("publish", "PUB-UPLOAD", "stage uploads only the bound tarball, immutable and short-lived");
+  }
+  for (const jobName of ["publish", "readback"]) {
+    const jobSteps = steps(jobName);
+    const installAt = jobSteps.findIndex((step) => step.name === "Install the exact npm CLI");
+    const install = jobSteps[installAt];
+    const version = /^(\d+)\.(\d+)\.(\d+)$/u.exec(install?.env.NPM_VERSION ?? "");
+    const supported = version !== null && (Number(version[1]) > 11 ||
+      (Number(version[1]) === 11 && (Number(version[2]) > 5 || (Number(version[2]) === 5 && Number(version[3]) >= 1))));
+    if (!supported || !/^sha512-[A-Za-z0-9+/]{86}==$/u.test(install?.env.NPM_INTEGRITY ?? "") ||
+        !hasLine(install?.run, 'test "sha512-$(openssl dgst -sha512 -binary "$cli/npm.tgz" | base64 -w0)" = "$NPM_INTEGRITY"') ||
+        !hasLine(install?.run, 'npm install --global --ignore-scripts --no-audit --no-fund "$cli/npm.tgz"') ||
+        !hasLine(install?.run, 'test "$(npm -v)" = "$NPM_VERSION"') || installAt !== 1) {
+      fail("publish", "PUB-NPM-PIN", `${jobName}: exact trusted-publishing npm, integrity-checked and asserted before use`);
+    }
+  }
+  if (/registry-url/u.test(nonComment)) fail("publish", "PUB-NO-REGISTRY-URL", "setup-node writes no registry configuration");
+  for (const step of allSteps.filter((candidate) => (candidate.uses ?? "").startsWith("actions/setup-node@"))) {
+    if (step.uses !== RELEASE_SETUP_NODE || !sameMap(step.with, { "node-version": "22.22.2", "package-manager-cache": "false" })) {
+      fail("publish", "PUB-SETUP-NODE", `${step.job}: setup-node is the attested revision with no cache and no registry`);
+    }
+  }
+  for (const expected of [
+    "for credential in NODE_AUTH_TOKEN NPM_TOKEN NPM_ID_TOKEN; do",
+    "npm_config_names=\"$(compgen -e | grep -i '^npm_config_' || true)\"",
+    'for rc in "$HOME/.npmrc" "$RUNNER_TEMP/.npmrc" "$PWD/.npmrc" "$(npm prefix --global)/etc/npmrc"; do',
+    'test "$(npm config get registry)" = https://registry.npmjs.org/',
+  ]) {
+    if (!hasLine(publishStep?.run, expected)) fail("publish", "PUB-NO-AMBIENT-CREDENTIAL", expected);
+  }
+  if (steps("stage").some((step) => step.uses !== null &&
+      ![RELEASE_CHECKOUT, RELEASE_SETUP_NODE, RELEASE_UPLOAD_ARTIFACT].includes(step.uses)) ||
+      steps("readback").some((step) => step.uses !== null && step.uses !== RELEASE_SETUP_NODE)) {
+    fail("publish", "PUB-PINNED-ACTIONS", "every action outside publish is one of the reviewed SHA pins");
+  }
+
+  // Stage: the live ruleset, both pull-request lookups, the reviewed tree, the independent bytes.
+  const bind = stepNamed("stage", "Bind the release commit to its merged pull request and the live ruleset");
+  if (bind?.env.RULESET_ID !== "22911326" ||
+      !hasLine(bind?.run, 'ruleset="$(api "repos/${repo}/rulesets/${RULESET_ID}")"') ||
+      !hasLine(bind?.run, "required=\"$(jq -c '[.rules[] | select(.type == \"required_status_checks\") | .parameters.required_status_checks[] | {context, integration_id}]' <<<\"$ruleset\")\"") ||
+      !hasLine(bind?.run, "done < <(jq -c '.[]' <<<\"$required\")")) {
+    fail("stage", "STG-RULESET-LIVE", "the required contexts are derived from the live ruleset, never listed");
+  }
+  const lane = (bind?.env.PR_ONLY_CONTEXTS ?? "").split(" ").filter(Boolean);
+  if (lane.length === 0 || lane.some((context) => !prOnlyContexts.has(context))) {
+    fail("stage", "STG-PR-LANE", `pull-request-only contexts ${JSON.stringify(lane)} must all be produced only by pull_request workflows`);
+  }
+  if (!hasLine(bind?.run, "associated=\"$(api \"repos/${repo}/commits/${sha}/pulls\" |") ||
+      !hasLine(bind?.run, 'if [[ "$subject" =~ \\(#([0-9]+)\\)$ ]]; then subject_pr="${BASH_REMATCH[1]}"; fi') ||
+      !hasLine(bind?.run, 'echo "::error::the squash subject names #${subject_pr} but the merge belongs to #${pr_number}"; exit 1')) {
+    fail("stage", "STG-PR-BINDING", "the merged pull request is found two independent ways that must agree");
+  }
+  if (!hasLine(bind?.run, 'test "$release_tree" = "$(api "repos/${repo}/git/commits/${head_sha}" --jq \'.tree.sha\')" ||')) {
+    fail("stage", "STG-REVIEWED-TREE", "the release tree equals the tree the pull-request checks ran on");
+  }
+  const independent = stepNamed("stage", "Require the independent main-push candidate to carry the same tarball bytes");
+  if (!hasLine(independent?.run, 'test "sha256:$(sha256sum "$independent/candidate.zip" | cut -d\' \' -f1)" = "$digest"') ||
+      !hasLine(independent?.run, 'test "$(sha256sum < "$independent/files/$file")" = "$(sha256sum < "$staged")"')) {
+    fail("stage", "STG-INDEPENDENT-BYTES", "an independent main-push run built the same tarball bytes");
+  }
+  const staging = stepNamed("stage", "Stage and verify immutable tarballs from the exact Git commit");
+  if (!hasLine(staging?.run, 'show "$GITHUB_SHA:scripts/lib/stage-publish-artifacts.mjs" > "$bootstrap"') ||
+      !hasLine(staging?.run, 'run_exact_bootstrap --verify "$output" --git-ref "$GITHUB_SHA"')) {
+    fail("stage", "STG-EXACT-BOOTSTRAP", "staging runs the exact bootstrap from the release commit and verifies it");
+  }
+  const unused = stepNamed("stage", "Require the declared version, its changelog entry and an unused registry version");
+  if (!hasLine(unused?.run, "jq -e --arg v \"$INPUT_VERSION\" '.name == \"noa-receipt\" and (.versions | has($v) | not) and (.time | has($v) | not)' \"$packument\" >/dev/null ||")) {
+    fail("stage", "STG-UNUSED-VERSION", "the version was never published before");
+  }
+
+  // Readback: the registry serves the staged bytes, attested to this workflow on main.
+  const readback = stepNamed("readback", "Read back the registry integrity, provenance statement and signatures");
+  if (readback?.env.STAGED_INTEGRITY !== "${{ needs.stage.outputs.integrity }}" ||
+      !hasLine(readback?.run, 'if [ "$served" != "$STAGED_INTEGRITY" ]; then')) {
+    fail("readback", "RB-INTEGRITY", "the registry integrity equals the staged integrity");
+  }
+  if (!hasLine(readback?.run, '--arg path ".github/workflows/release-npm-noa-receipt.yml" \\') ||
+      !hasLine(readback?.run, '.predicate.buildDefinition.externalParameters.workflow == {ref: "refs/heads/main", repository: $repository, path: $path} and')) {
+    fail("readback", "RB-PROVENANCE", "the provenance names this workflow file on main");
+  }
+  if (!hasLine(readback?.run, 'npm audit signatures --json --include-attestations > "$work/signatures.json"')) {
+    fail("readback", "RB-SIGNATURES", "registry and attestation signatures verify from a scratch install");
+  }
+  return problems;
+}
+
+function releaseControllerGroupProblems(group, source, prOnlyContexts) {
+  return releaseControllerProblems(source, prOnlyContexts)
+    .filter((problem) => problem.group === group || problem.group === "shape")
+    .map((problem) => `${problem.pin}: ${problem.detail}`);
+}
+
+const RELEASE_CONTROLLER_SOURCE = () =>
+  fs.readFileSync(path.join(REPO, ".github/workflows", RELEASE_CONTROLLER_WORKFLOW), "utf8");
+const RELEASE_PR_ONLY_CONTEXTS = () =>
+  pullRequestOnlyContexts(path.join(REPO, ".github/workflows"), RELEASE_CONTROLLER_WORKFLOW);
+
+check("release controller workflow bytes are the reviewed closed digest", () => {
+  const raw = fs.readFileSync(path.join(REPO, ".github/workflows", RELEASE_CONTROLLER_WORKFLOW));
+  const problems = closedWorkflowByteProblems(RELEASE_CONTROLLER_WORKFLOW, raw);
+  assert.deepEqual(problems, [], problems.join("; "));
+});
+
+for (const group of ["trigger", "oidc", "publish", "stage", "readback"]) {
+  check(RELEASE_CONTROLLER_CHECKS[group], () => {
+    const problems = releaseControllerGroupProblems(group, RELEASE_CONTROLLER_SOURCE(), RELEASE_PR_ONLY_CONTEXTS());
+    assert.deepEqual(problems, [], problems.join("; "));
+  });
+}
+
+check("release controller pins each detect their own mutation", () => {
+  const base = RELEASE_CONTROLLER_SOURCE();
+  const lane = RELEASE_PR_ONLY_CONTEXTS();
+  assert.deepEqual(releaseControllerProblems(base, lane), [], "the reviewed workflow itself carries a pin problem");
+  // Mutation subjects are the file's literal text, version comments included.
+  const CHECKOUT_TEXT = `${RELEASE_CHECKOUT} # v7.0.1`;
+  const SETUP_NODE_TEXT = `${RELEASE_SETUP_NODE} # v7.0.0`;
+  const setupNodeStep = [
+    `      - uses: ${SETUP_NODE_TEXT}`,
+    "        with:",
+    "          node-version: 22.22.2",
+    "          package-manager-cache: false",
+    "",
+  ].join("\n");
+  const publishHead = "    environment: npm-release\n    permissions:\n      id-token: write\n    steps:\n";
+  const mutations = [
+    ["SHAPE-CANONICAL", "YAML anchor", "    runs-on: ubuntu-latest\n    timeout-minutes: 45\n", "    runs-on: &runner ubuntu-latest\n    timeout-minutes: 45\n"],
+    ["SHAPE-CANONICAL", "second document", "  cancel-in-progress: false\n", "  cancel-in-progress: false\n---\n"],
+    ["SHAPE-CANONICAL", "duplicate permissions key", publishHead, `${publishHead.replace("    steps:\n", "")}    permissions:\n      contents: write\n    steps:\n`],
+    ["SHAPE-RUN-EXPRESSION", "expression expanded into shell", '          test "$GITHUB_SHA" = "$INPUT_COMMIT"\n          [[ "$INPUT_VERSION" =~ ^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$ ]]\n          test "$STAGED_FILENAME"', '          test "$GITHUB_SHA" = "${{ inputs.commit }}"\n          [[ "$INPUT_VERSION" =~ ^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$ ]]\n          test "$STAGED_FILENAME"'],
+    ["TRG-TOP-KEYS", "workflow-level env", "permissions: {}\n\nconcurrency:", "permissions: {}\n\nenv:\n  NODE_AUTH_TOKEN: placeholder\n\nconcurrency:"],
+    ["TRG-DISPATCH-ONLY", "tag trigger", "on:\n  workflow_dispatch:\n", "on:\n  push:\n    tags: [v1]\n  workflow_dispatch:\n"],
+    ["TRG-CONCURRENCY", "cancelled release", "  cancel-in-progress: false\n", "  cancel-in-progress: true\n"],
+    ["TRG-JOBS", "extra job", "  readback:\n    needs: [stage, publish]\n", "  observer:\n    runs-on: ubuntu-latest\n    timeout-minutes: 1\n    permissions: {}\n    steps:\n      - run: echo observer\n  readback:\n    needs: [stage, publish]\n"],
+    ["TRG-JOB-KEYS", "job-level env on publish", publishHead, `    environment: npm-release\n    env:\n      NPM_CONFIG_REGISTRY: https://registry.npmjs.org/\n    permissions:\n      id-token: write\n    steps:\n`],
+    ["TRG-HOSTED-RUNNER", "self-hosted publish", "  publish:\n    needs: stage\n    runs-on: ubuntu-latest\n", "  publish:\n    needs: stage\n    runs-on: self-hosted\n"],
+    ["TRG-NEEDS", "publish without stage", "  publish:\n    needs: stage\n", "  publish:\n    needs: readback\n"],
+    ["TRG-GUARD-FIRST", "guard moved after checkout", "    steps:\n      - name: Refuse any dispatch other than the named commit on main\n", `    steps:\n      - uses: ${CHECKOUT_TEXT}\n        with:\n          persist-credentials: false\n      - name: Refuse any dispatch other than the named commit on main\n`],
+    ["TRG-MAIN-ONLY", "any branch", '          test "$GITHUB_REPOSITORY" = NordenSoft/noa-mandate-core\n          test "$GITHUB_REF" = refs/heads/main\n', '          test "$GITHUB_REPOSITORY" = NordenSoft/noa-mandate-core\n'],
+    ["TRG-NAMED-COMMIT", "unbound commit", '          [[ "$INPUT_COMMIT" =~ ^[0-9a-f]{40}$ ]]\n          test "$GITHUB_SHA" = "$INPUT_COMMIT"\n', '          [[ "$INPUT_COMMIT" =~ ^[0-9a-f]{40}$ ]]\n'],
+    ["TRG-PUBLISH-REBINDS", "publish trusts stage alone", '          test "$GITHUB_REF" = refs/heads/main\n          test "$GITHUB_SHA" = "$INPUT_COMMIT"\n          [[ "$INPUT_VERSION"', '          [[ "$INPUT_VERSION"'],
+    ["OIDC-TOP-EMPTY", "workflow-wide read", "permissions: {}\n\nconcurrency:", "permissions:\n  contents: read\n\nconcurrency:"],
+    ["OIDC-STAGE-READ-ONLY", "OIDC in stage", "      pull-requests: read\n", "      pull-requests: read\n      id-token: write\n"],
+    ["OIDC-PUBLISH-ONLY-ID-TOKEN", "contents read in publish", "      id-token: write\n", "      id-token: write\n      contents: read\n"],
+    ["OIDC-READBACK-EMPTY", "readback token", "    timeout-minutes: 30\n    permissions: {}\n", "    timeout-minutes: 30\n    permissions:\n      contents: read\n"],
+    ["OIDC-SINGLE-GRANT", "second OIDC grant", "      actions: read\n", "      actions: read\n      id-token: none\n"],
+    ["OIDC-ENVIRONMENT", "environment removed", "    environment: npm-release\n", ""],
+    ["OIDC-NO-SECRETS", "secret in publish", "          STAGED_SHA256: ${{ needs.stage.outputs.sha256 }}\n", "          STAGED_SHA256: ${{ needs.stage.outputs.sha256 }}\n          NPM_TOKEN_FALLBACK: ${{ secrets.NPM_TOKEN }}\n"],
+    ["OIDC-JOB-TOKEN", "job token in publish", "          STAGED_SHA256: ${{ needs.stage.outputs.sha256 }}\n", "          STAGED_SHA256: ${{ needs.stage.outputs.sha256 }}\n          GH_TOKEN: ${{ github.token }}\n"],
+    ["PUB-ACTIONS", "checkout in publish", publishHead, `${publishHead}      - uses: ${CHECKOUT_TEXT}\n        with:\n          persist-credentials: false\n`],
+    ["PUB-NO-REPOSITORY-CODE", "repository script in publish", "          npm publish \"$tarball\"", "          node scripts/lint-publish-tarball-deps.mjs --dir .\n          npm publish \"$tarball\""],
+    ["PUB-ONE-EXACT-PUBLISH", "provenance dropped", "--access public --provenance --tag latest", "--access public --tag latest"],
+    ["PUB-STAGED-BYTES", "sha512 comparison removed", '            test "sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)" = "$STAGED_INTEGRITY" ||\n', '            true ||\n'],
+    ["PUB-DOWNLOAD", "digest mismatch tolerated", "          digest-mismatch: error\n", "          digest-mismatch: warn\n"],
+    ["PUB-STAGE-OUTPUTS", "integrity output from another step", "      integrity: ${{ steps.bind-bytes.outputs.integrity }}\n", "      integrity: ${{ steps.other.outputs.integrity }}\n"],
+    ["PUB-UPLOAD", "overwritable artifact", "          overwrite: false\n", "          overwrite: true\n"],
+    ["PUB-NPM-PIN", "npm version not asserted", '          test "$(npm -v)" = "$NPM_VERSION"\n\n      - uses: actions/download-artifact@', "\n      - uses: actions/download-artifact@"],
+    ["PUB-NO-REGISTRY-URL", "registry-url in publish", `${publishHead}${setupNodeStep}`, `${publishHead}${setupNodeStep.replace("          package-manager-cache: false\n", "          package-manager-cache: false\n          registry-url: https://registry.npmjs.org\n")}`],
+    ["PUB-SETUP-NODE", "cached setup-node in readback", `    timeout-minutes: 30\n    permissions: {}\n    steps:\n${setupNodeStep}`, `    timeout-minutes: 30\n    permissions: {}\n    steps:\n${setupNodeStep.replace("package-manager-cache: false", "package-manager-cache: true")}`],
+    ["PUB-NO-AMBIENT-CREDENTIAL", "credential scan removed", "          for credential in NODE_AUTH_TOKEN NPM_TOKEN NPM_ID_TOKEN; do\n", "          for credential in NPM_TOKEN; do\n"],
+    ["PUB-PINNED-ACTIONS", "floating checkout in stage", `      - uses: ${CHECKOUT_TEXT}\n        with:\n          persist-credentials: false\n      - uses: ${SETUP_NODE_TEXT}`, `      - uses: actions/checkout@v7\n        with:\n          persist-credentials: false\n      - uses: ${SETUP_NODE_TEXT}`],
+    ["STG-RULESET-LIVE", "hard-coded ruleset", '          RULESET_ID: "22911326"\n', '          RULESET_ID: "1"\n'],
+    ["STG-PR-LANE", "push-lane context moved to the pull-request lane", 'PR_ONLY_CONTEXTS: "pr-title review"', 'PR_ONLY_CONTEXTS: "pr-title review shapes"'],
+    ["STG-PR-BINDING", "subject disagreement tolerated", '              echo "::error::the squash subject names #${subject_pr} but the merge belongs to #${pr_number}"; exit 1\n', '              echo "::warning::subject disagrees"\n'],
+    ["STG-REVIEWED-TREE", "tree equality removed", '          test "$release_tree" = "$(api "repos/${repo}/git/commits/${head_sha}" --jq \'.tree.sha\')" ||\n', '          true ||\n'],
+    ["STG-INDEPENDENT-BYTES", "independent bytes not compared", '          test "$(sha256sum < "$independent/files/$file")" = "$(sha256sum < "$staged")"\n', ""],
+    ["STG-EXACT-BOOTSTRAP", "no verification pass", '          run_exact_bootstrap --verify "$output" --git-ref "$GITHUB_SHA"\n', ""],
+    ["STG-UNUSED-VERSION", "registry reuse allowed", "(.versions | has($v) | not) and (.time | has($v) | not)", "(.versions | has($v) | not)"],
+    ["RB-INTEGRITY", "integrity not compared", '          if [ "$served" != "$STAGED_INTEGRITY" ]; then', '          if [ -z "$served" ]; then'],
+    ["RB-PROVENANCE", "any workflow ref", 'workflow == {ref: "refs/heads/main", repository: $repository, path: $path} and', 'workflow.repository == $repository and'],
+    ["RB-SIGNATURES", "signatures unchecked", 'npm audit signatures --json --include-attestations > "$work/signatures.json"', 'npm ls --json > "$work/signatures.json"'],
+  ];
+  const seenPins = new Set();
+  for (const [pin, label, find, replace] of mutations) {
+    assert.equal(base.split(find).length, 2, `${label}: the mutation subject must occur exactly once`);
+    const mutant = exactReplacement(base, find, replace, label);
+    assert.notEqual(mutant, base, `${label}: the mutation changed nothing`);
+    const pins = releaseControllerProblems(mutant, lane).map((problem) => problem.pin);
+    assert.ok(pins.includes(pin), `${label}: pin ${pin} did not go red (got ${JSON.stringify([...new Set(pins)])})`);
+    seenPins.add(pin);
+  }
+  // Every pin the reader can report has a mutation of its own; the list is read from the reader's
+  // own call sites so a new pin without a mutation turns this check red.
+  const declaredPins = new Set(
+    [...releaseControllerProblems.toString().matchAll(/fail\("[a-z]+", "([A-Z]+(?:-[A-Z0-9]+)+)"/gu)].map((match) => match[1]),
+  );
+  assert.ok(declaredPins.size >= 30, `only ${declaredPins.size} pins were found in the reader`);
+  assert.deepEqual([...declaredPins].filter((pin) => !seenPins.has(pin)), [], "pins without a mutation of their own");
+  // The lane derivation itself: a sibling that also runs on push is not a pull-request-only lane.
+  const widened = new Set([...lane, "shapes"]);
+  assert.ok(releaseControllerProblems(base.replace('PR_ONLY_CONTEXTS: "pr-title review"', 'PR_ONLY_CONTEXTS: "pr-title review shapes"'), lane)
+    .some((problem) => problem.pin === "STG-PR-LANE"));
+  assert.deepEqual(releaseControllerProblems(base.replace('PR_ONLY_CONTEXTS: "pr-title review"', 'PR_ONLY_CONTEXTS: "pr-title review shapes"'), widened)
+    .filter((problem) => problem.pin === "STG-PR-LANE"), [], "the lane pin is not bound to the sibling-derived set");
 });
 
 check("branch-hygiene workflow retains least-privilege pull-request measurement", () => {
@@ -1901,7 +2407,9 @@ check("the pre-npm guard closes npm's whole config namespace before npm exists",
     // it was read at. The CI workflow pins one setup-node SHA; if it moves, the contract must be
     // re-read from the new source rather than assumed to have survived the bump. Quarantined legacy
     // publisher workflows contain no setup action and therefore cannot stand in for this evidence.
-    for (const file of ["ci.yml"]) {
+    // The release controller runs setup-node without a registry, so the same attested revision is
+    // also what establishes that no rc file is written in its OIDC job.
+    for (const file of ["ci.yml", RELEASE_CONTROLLER_WORKFLOW]) {
       const pins = fs.readFileSync(path.join(REPO, ".github/workflows", file), "utf8")
         .split("\n").filter((line) => line.includes("actions/setup-node@"));
       assert.notEqual(pins.length, 0, `${file}: no setup-node pin found, so the rc contract is bound to nothing`);

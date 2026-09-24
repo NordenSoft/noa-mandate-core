@@ -26,6 +26,7 @@ This checklist decides a candidate revision. It cannot convert earlier evidence 
 - [ ] Obtain an independent adversarial review of the frozen diff and reproduce or disposition each material finding. **A green suite does not substitute for adversarial review.**
 - [ ] Re-measure every public status, test, control, and parity claim against the exact candidate tree; do not reuse a mutable summary as release evidence.
 - [ ] Verify the release artifact version, integrity, contents, and rollback/forward-fix instructions.
+- [ ] Publish `noa-receipt` only through `.github/workflows/release-npm-noa-receipt.yml`, dispatched on `main` for the exact tip commit right after the release pull request merges (the main-push candidate it compares against expires after seven days). Before the first dispatch, read back the `npm-release` environment protection and the npm trusted-publisher binding; afterwards record the run, the staged integrity and the readback summary. A green controller run is publication evidence, not a release decision.
 
 ## Interoperability and release decision
 
