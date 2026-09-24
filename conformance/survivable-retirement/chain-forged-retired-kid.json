@@ -1,0 +1,41 @@
+[
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "g2-receipt-0",
+    "ts": "2026-01-01T00:00:00.000Z",
+    "scope": {
+      "tenant": "g2-test",
+      "chain": "g2-survivable-retirement"
+    },
+    "agent": {
+      "id": "g2-historical-agent",
+      "model": null,
+      "principal": "SERVICE"
+    },
+    "action": {
+      "id": "inventory.read",
+      "canonical": "inventory.read",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:c22f2c182ae5abc82cea24a39f638820f6906714011f93805f00a9fc45225122",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "g2-test",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 0,
+      "prevHash": null,
+      "hash": "sha256:f36712f339b324e68774417b4eed41970d95720a7d665b7798af4ea2539eec39"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "g2-receipt-retired",
+      "value": "43yltB6QyUqth2pjp8zunOYTkxC7sFSFYb5Vu1+iUitmS1ARf1Y+EBDUhMubEiVxtpnc0jmLfb6gbWq7tJTMCg=="
+    }
+  }
+]

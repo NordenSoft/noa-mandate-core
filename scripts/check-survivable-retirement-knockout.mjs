@@ -4,12 +4,17 @@
  *
  * Build a disposable copy of the shipped JavaScript verifier, remove one historical control at a
  * time, and require the canonical corpus oracle to turn red. The shared worktree is never mutated.
+ *
+ * The same disposable-copy method proves that the current-use half of the corpus DEFINES the
+ * KEY_RETIRED refusal order: each mutant swaps one adjacent pair of that order (or reports a
+ * different retired signature), and every case named for the pair must stop matching the oracle.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { currentUseMismatch } from "./lib/current-use-oracle.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CORPUS = join(ROOT, "conformance", "survivable-retirement");
@@ -135,6 +140,80 @@ try {
     );
     process.stdout.write(`KILLED: ${mutant.name} (${mutant.caseId})\n`);
   }
+
+  // ── CURRENT USE: every adjacent pair of the KEY_RETIRED refusal order, swapped one at a time ────
+  const current = new Map(corpus.currentUse.cases.map((c) => [c.id, c]));
+  const runCurrent = (cli, id) => {
+    const c = current.get(id);
+    assert.ok(c !== undefined, `unknown current-use case ${id}`);
+    const args = [cli, "verify", join(CORPUS, c.receipts), "--keyring", join(CORPUS, c.keyring)];
+    if (c.checkpoint !== undefined) args.push("--checkpoint", join(CORPUS, c.checkpoint));
+    if (c.identity !== undefined) args.push("--identity", join(CORPUS, c.identity));
+    const completed = spawnSync(process.execPath, args, { cwd: ROOT, encoding: "utf8" });
+    return currentUseMismatch(c.expected, { stdout: completed.stdout, stderr: completed.stderr, exit: completed.status });
+  };
+  const early = (subject, kid, seq) =>
+    `return keyRetired(${subject}, ${kid}, chainId, list.length, ${seq}, [keyRetiredWarning(${subject}, ${kid}, ${seq})]);`;
+  const orderMutants = [
+    {
+      name: "KEY_RETIRED above receipt signature authentication",
+      caseIds: ["current-retired-kid-forged-signature", "current-retired-then-altered"],
+      before: "const pub = keyring[r.sig.kid];",
+      after: `if (verification.retiredKids[r.sig.kid] === true) ${early('"receipt"', "r.sig.kid", "seq")} const pub = keyring[r.sig.kid];`,
+    },
+    {
+      name: "KEY_RETIRED above receipt identity binding (UNTRUSTED)",
+      caseIds: ["current-retired-receipt-unauthorized-identity"],
+      before: "if (retiredSeq < 0 && verification.retiredKids[r.sig.kid] === true) {",
+      after: `if (verification.retiredKids[r.sig.kid] === true) ${early('"receipt"', "r.sig.kid", "seq")} if (false) {`,
+    },
+    {
+      name: "KEY_RETIRED above the checkpoint MALFORMED check",
+      caseIds: ["current-retired-checkpoint-not-an-object"],
+      before: "let tailChecked = false;",
+      after: `if (retiredSeq >= 0) ${early("retiredSubject", "retiredKid", "retiredSeq")} let tailChecked = false;`,
+    },
+    {
+      name: "the LAST retired signature reported instead of the first",
+      caseIds: ["current-first-retired-signature-mid-chain"],
+      before: "if (retiredSeq < 0 && verification.retiredKids[r.sig.kid] === true) {",
+      after: "if (verification.retiredKids[r.sig.kid] === true) {",
+    },
+    {
+      name: "a checkpoint finding outranks a receipt finding",
+      caseIds: ["current-receipt-finding-outranks-checkpoint"],
+      before: "if (checkpointKeyRetired && retiredSeq < 0) {",
+      after: "if (checkpointKeyRetired) {",
+    },
+    {
+      name: "KEY_RETIRED above checkpoint signature authentication",
+      caseIds: ["current-retired-checkpoint-forged"],
+      before: "cpVerify = verifyCheckpointParsed(cp, retainedPublicMaterial(verification));",
+      after: 'cpVerify = "ok";',
+    },
+    {
+      name: "KEY_RETIRED above the checkpoint head and opener checks",
+      caseIds: ["current-retired-checkpoint-truncated-head", "current-retired-checkpoint-unauthorized-identity"],
+      before: 'checkpointKeyRetired = cpVerify === "ok";',
+      after: `checkpointKeyRetired = cpVerify === "ok"; if (checkpointKeyRetired) ${early('"checkpoint"', "cp.sig.kid", "head.chain.seq")}`,
+    },
+  ];
+  for (const c of corpus.currentUse.cases) {
+    assert.equal(runCurrent(shippedCli, c.id), null, `${c.id}: the shipped verifier does not match the current-use oracle`);
+  }
+  for (let i = 0; i < orderMutants.length; i++) {
+    const mutant = orderMutants[i];
+    const mutantRoot = join(temp, `order-mutant-${i}`);
+    const mutantSrc = join(mutantRoot, "src");
+    cpSync(sourceDir, mutantSrc, { recursive: true });
+    writeFileSync(join(mutantSrc, "verify.js"), replaceOnce(pristine, mutant.before, mutant.after, mutant.name));
+    for (const id of mutant.caseIds) {
+      const mismatch = runCurrent(join(mutantSrc, "cli.js"), id);
+      assert.notEqual(mismatch, null, `${mutant.name}: swapping the pair left ${id} matching the oracle`);
+      process.stdout.write(`KILLED: ${mutant.name} (${id}: ${mismatch})\n`);
+    }
+  }
+  process.stdout.write(`survivable-retirement current-use ordering: ${orderMutants.length}/${orderMutants.length} swaps detected\n`);
 } finally {
   rmSync(temp, { recursive: true, force: true });
 }

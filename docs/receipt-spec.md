@@ -186,6 +186,9 @@ verify(receipts, { keyring?, checkpoint?, identityManifest? }):
                                              (curve-PINNED: a non-Ed25519 key is rejected, no alg-confusion)
        - keyring supplied AND kid UNKNOWN -> TAMPERED (no silent TOFU on attacker input)
        - no keyring at all                -> UNVERIFIED (cannot authenticate; never VALID)
+       - lifecycle keyring AND kid RETIRED -> verify with the retained public key first: a bad
+                                             signature is TAMPERED; an authentic one is remembered
+                                             and the walk CONTINUES (it never becomes VALID)
   5b. identity binding (only if identityManifest supplied):
        - (agent.id, sig.kid) authorized in the manifest -> ok
        - else                                           -> UNTRUSTED (cross-agent impersonation:
@@ -196,16 +199,32 @@ verify(receipts, { keyring?, checkpoint?, identityManifest? }):
   7. if checkpoint: assert head matches checkpoint (tail-truncation); and (if identityManifest
        supplied) the checkpoint sig.kid MUST be authorized for the GENESIS agent.id (the chain
        OPENER, seq 0) — NOT the mutable head — else UNTRUSTED (closes the re-heading attack); warn
-       when the chain has >1 agent.id (opener-scoped completeness)
-  -> VALID | UNVERIFIED | UNTRUSTED | TAMPERED | MALFORMED
+       when the chain has >1 agent.id (opener-scoped completeness). A checkpoint whose kid is
+       lifecycle-RETIRED is authenticated with the retained public key like step 5
+  8. if every check above passed but step 5 or 7 remembered an authentic retired-key signature
+       -> KEY_RETIRED (refused for current use; the first such signature is reported)
+  -> VALID | UNVERIFIED | UNTRUSTED | TAMPERED | MALFORMED | KEY_RETIRED
 ```
 
 CLI exit codes: `0` VALID · `1` UNVERIFIED (no keyring supplied) · `2` TAMPERED · `3` MALFORMED
-· `4` usage · `5` UNTRUSTED (identity binding failed). **CI rule: treat any non-zero exit as failure** (do not special-case `==2`). Honest
+· `4` usage · `5` UNTRUSTED (identity binding failed) · `9` KEY_RETIRED. **CI rule: treat any non-zero exit as failure** (do not special-case `==2`). Honest
 by design: without a keyring, signatures are reported UNVERIFIED, never VALID; without a
 checkpoint, the verifier emits an explicit tail-truncation warning; and it always emits a
 fork/equivocation caveat (an offline verifier sees only the branch it was given) plus a
 non-monotonic-timestamp warning if `ts` goes backwards.
+
+**Retired keys (optional lifecycle trust root).** The static keyring above has no notion of
+retirement. A verifier that also accepts the `noa.signing-key-lifecycle/0.1` trust root (the
+reference verifier does) MUST refuse every non-null `retiredAt` for current use, and MUST
+authenticate the signature against the retired key's retained public material before it decides
+how to refuse. A signature that does not authenticate is `TAMPERED`, exactly as with a current key.
+An authentic one is `KEY_RETIRED`, reported only when every other check passes, so it can never
+stand in for a hash, signature, linkage, identity or checkpoint failure. `KEY_RETIRED` is not an
+acceptance: the signer-chosen `ts` is not evidence of when the signature was made, so the result
+does not establish that the receipt predates retirement. Attribution of such a receipt is the job
+of the separate `noa.historical-verification/0.1` purpose, which requires an independently trusted
+checkpoint. The reference verifier's `KEY_RETIRED` result carries a `key-retired:` warning that
+names that purpose; no other status carries it.
 
 **Public-key strictness (interop-normative).** A conformant verifier MUST decode the Ed25519 public
 key `A` strictly: it **MUST reject** the 8 canonical small-order point encodings (the torsion subgroup

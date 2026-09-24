@@ -771,5 +771,184 @@
         "asOf": null
       }
     }
-  ]
+  ],
+  "currentUse": {
+    "spec": "noa.current-use-lifecycle-corpus/0.1",
+    "ports": {
+      "typescript": "IMPLEMENTED",
+      "python": "NOT_IMPLEMENTED",
+      "go": "NOT_IMPLEMENTED",
+      "rust": "NOT_IMPLEMENTED",
+      "csharp": "NOT_IMPLEMENTED"
+    },
+    "cases": [
+      {
+        "id": "current-retired-receipts",
+        "pins": "authentic retired receipt signatures and nothing else wrong -> KEY_RETIRED",
+        "receipts": "chain.json",
+        "keyring": "receipt-keyring-retired.json",
+        "expected": {
+          "status": "KEY_RETIRED",
+          "exit": 9,
+          "badSeq": 0,
+          "keyRetired": {
+            "seq": 0,
+            "kid": "g2-receipt-retired",
+            "subject": "receipt"
+          },
+          "historicalPointer": true
+        }
+      },
+      {
+        "id": "current-first-retired-signature-mid-chain",
+        "pins": "the FIRST retired signature is reported (seq 1, not the last one at seq 2)",
+        "receipts": "chain-mixed.json",
+        "keyring": "current-keyring-mixed.json",
+        "expected": {
+          "status": "KEY_RETIRED",
+          "exit": 9,
+          "badSeq": 1,
+          "keyRetired": {
+            "seq": 1,
+            "kid": "g2-receipt-retired",
+            "subject": "receipt"
+          },
+          "historicalPointer": true
+        }
+      },
+      {
+        "id": "current-retired-kid-forged-signature",
+        "pins": "KEY_RETIRED below signature authentication: a retired kid with another key's signature is TAMPERED",
+        "receipts": "chain-forged-retired-kid.json",
+        "keyring": "receipt-keyring-retired.json",
+        "expected": {
+          "status": "TAMPERED",
+          "exit": 2,
+          "badSeq": 0,
+          "keyRetired": null,
+          "historicalPointer": false
+        }
+      },
+      {
+        "id": "current-retired-then-altered",
+        "pins": "KEY_RETIRED below TAMPERED: an authentic retired seq 0 does not hide altered bytes at seq 1",
+        "receipts": "chain-damaged.json",
+        "keyring": "receipt-keyring-retired.json",
+        "expected": {
+          "status": "TAMPERED",
+          "exit": 2,
+          "badSeq": 1,
+          "keyRetired": null,
+          "historicalPointer": false
+        }
+      },
+      {
+        "id": "current-retired-receipt-unauthorized-identity",
+        "pins": "KEY_RETIRED below UNTRUSTED: the identity manifest does not authorize the retired receipt kid",
+        "receipts": "chain.json",
+        "keyring": "receipt-keyring-retired.json",
+        "identity": "identity-receipt-unauthorized.json",
+        "expected": {
+          "status": "UNTRUSTED",
+          "exit": 5,
+          "badSeq": 0,
+          "keyRetired": null,
+          "historicalPointer": false
+        }
+      },
+      {
+        "id": "current-retired-checkpoint-not-an-object",
+        "pins": "KEY_RETIRED below MALFORMED: retired receipts with a checkpoint document that is not an object",
+        "receipts": "chain.json",
+        "keyring": "receipt-keyring-retired.json",
+        "checkpoint": "checkpoints/not-an-object.json",
+        "expected": {
+          "status": "MALFORMED",
+          "exit": 3,
+          "badSeq": null,
+          "keyRetired": null,
+          "historicalPointer": false
+        }
+      },
+      {
+        "id": "current-retired-checkpoint",
+        "pins": "an authentic checkpoint by a retired key and nothing else wrong -> KEY_RETIRED (checkpoint)",
+        "receipts": "chain.json",
+        "keyring": "current-keyring-checkpoint-retired.json",
+        "checkpoint": "checkpoints/exact-before-retirement.json",
+        "expected": {
+          "status": "KEY_RETIRED",
+          "exit": 9,
+          "badSeq": 2,
+          "keyRetired": {
+            "seq": 2,
+            "kid": "g2-checkpoint-current",
+            "subject": "checkpoint"
+          },
+          "historicalPointer": true
+        }
+      },
+      {
+        "id": "current-retired-checkpoint-forged",
+        "pins": "KEY_RETIRED below checkpoint authentication: a retired checkpoint kid over bytes it did not sign is TAMPERED",
+        "receipts": "chain.json",
+        "keyring": "current-keyring-checkpoint-retired.json",
+        "checkpoint": "checkpoints/forged-signature.json",
+        "expected": {
+          "status": "TAMPERED",
+          "exit": 2,
+          "badSeq": null,
+          "keyRetired": null,
+          "historicalPointer": false
+        }
+      },
+      {
+        "id": "current-retired-checkpoint-truncated-head",
+        "pins": "KEY_RETIRED below TAMPERED: an authentic retired checkpoint over a truncated head",
+        "receipts": "chain.json",
+        "keyring": "current-keyring-checkpoint-retired.json",
+        "checkpoint": "checkpoints/prefix-before-retirement.json",
+        "expected": {
+          "status": "TAMPERED",
+          "exit": 2,
+          "badSeq": 2,
+          "keyRetired": null,
+          "historicalPointer": false
+        }
+      },
+      {
+        "id": "current-retired-checkpoint-unauthorized-identity",
+        "pins": "KEY_RETIRED below UNTRUSTED: the retired checkpoint kid is not authorized for the chain opener",
+        "receipts": "chain.json",
+        "keyring": "current-keyring-checkpoint-retired.json",
+        "checkpoint": "checkpoints/exact-before-retirement.json",
+        "identity": "identity-checkpoint-unauthorized.json",
+        "expected": {
+          "status": "UNTRUSTED",
+          "exit": 5,
+          "badSeq": 2,
+          "keyRetired": null,
+          "historicalPointer": false
+        }
+      },
+      {
+        "id": "current-receipt-finding-outranks-checkpoint",
+        "pins": "a retired receipt finding (seq 0) is reported before a retired checkpoint finding (head seq 2)",
+        "receipts": "chain.json",
+        "keyring": "current-keyring-both-retired.json",
+        "checkpoint": "checkpoints/exact-before-retirement.json",
+        "expected": {
+          "status": "KEY_RETIRED",
+          "exit": 9,
+          "badSeq": 0,
+          "keyRetired": {
+            "seq": 0,
+            "kid": "g2-receipt-retired",
+            "subject": "receipt"
+          },
+          "historicalPointer": true
+        }
+      }
+    ]
+  }
 }

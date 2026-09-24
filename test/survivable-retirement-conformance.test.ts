@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { verifyHistoricalChain, type HistoricalVerificationResult, type HistoricalVerifyOptions } from "../src/verify.js";
+import {
+  verifyChain,
+  verifyHistoricalChain,
+  type HistoricalVerificationResult,
+  type HistoricalVerifyOptions,
+  type VerifyOptions,
+} from "../src/verify.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CORPUS = join(__dirname, "..", "..", "conformance", "survivable-retirement");
@@ -17,9 +23,30 @@ interface CorpusCase {
   readonly expected: HistoricalVerificationResult;
 }
 
+interface CurrentUseCase {
+  readonly id: string;
+  readonly pins: string;
+  readonly receipts: string;
+  readonly keyring: string;
+  readonly checkpoint?: string;
+  readonly identity?: string;
+  readonly expected: {
+    readonly status: string;
+    readonly exit: number;
+    readonly badSeq: number | null;
+    readonly keyRetired: { readonly seq: number; readonly kid: string; readonly subject: string } | null;
+    readonly historicalPointer: boolean;
+  };
+}
+
 interface Corpus {
   readonly spec: string;
   readonly cases: CorpusCase[];
+  readonly currentUse: {
+    readonly spec: string;
+    readonly ports: Readonly<Record<string, string>>;
+    readonly cases: CurrentUseCase[];
+  };
 }
 
 function bytes(rel: string): Uint8Array {
@@ -78,5 +105,28 @@ test("the corpus pins evidence monotonicity and never infers deliberate suppress
   );
   for (const result of results.values()) {
     assert.notEqual(result.dimensions.evidence.availability, "PROVEN_SUPPRESSED");
+  }
+});
+
+test("every current-use lifecycle case reproduces its refusal order through the library", () => {
+  const corpus = JSON.parse(readFileSync(join(CORPUS, "cases.json"), "utf8")) as Corpus;
+  assert.equal(corpus.currentUse.spec, "noa.current-use-lifecycle-corpus/0.1");
+  assert.equal(corpus.currentUse.cases.length, 11);
+  assert.deepEqual(Object.keys(corpus.currentUse.ports).sort(), ["csharp", "go", "python", "rust", "typescript"]);
+  assert.equal(corpus.currentUse.ports.typescript, "IMPLEMENTED");
+  for (const c of corpus.currentUse.cases) {
+    const opts: VerifyOptions = { keyring: bytes(c.keyring) };
+    if (c.checkpoint !== undefined) opts.checkpoint = bytes(c.checkpoint);
+    if (c.identity !== undefined) opts.identityManifest = bytes(c.identity);
+    const result = verifyChain(bytes(c.receipts), opts);
+    assert.equal(result.status, c.expected.status, `${c.id}: ${result.reason ?? ""}`);
+    assert.equal(result.badSeq ?? null, c.expected.badSeq, c.id);
+    assert.equal(result.signaturesVerified, false, c.id);
+    const retired = result.warnings.filter((w) => w.startsWith("key-retired:"));
+    const k = c.expected.keyRetired;
+    assert.equal(retired.length, k === null ? 0 : 1, c.id);
+    if (k !== null) assert.ok(retired[0]!.startsWith(`key-retired: seq ${k.seq} kid "${k.kid}" (${k.subject})`), c.id);
+    const pointer = [result.reason ?? "", ...result.warnings].some((text) => text.includes("--purpose historical"));
+    assert.equal(pointer, c.expected.historicalPointer, c.id);
   }
 });

@@ -56,6 +56,40 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Changed
 
+- **Behaviour change (refusal labels only): an authentic signature by a lifecycle-retired key is now
+  `KEY_RETIRED`, not `TAMPERED`, on the default `verifyChain` path, and the CLI exits `9`, not `2`.**
+  Previously a relying party could tell "intact bytes with an authentic signature by a key the trust
+  root has since retired" from "altered bytes / forged signature" only by matching `reason` text. The
+  verifier now authenticates a retired key's signature against its retained public material first,
+  so a forged or altered receipt or checkpoint naming that key stays `TAMPERED`; `KEY_RETIRED` is
+  reported only when every other hash, signature, linkage, identity and checkpoint check passed, so
+  it cannot stand in for any of them. It remains a refusal: `signaturesVerified` and `tailChecked`
+  are `false`, and it does not establish that the signature predates retirement. The result keeps
+  every warning a complete run produces (truncation, fork, attribution-level and the other caveats)
+  plus exactly one `key-retired: seq N kid "…" (receipt|checkpoint)` warning; that warning, the
+  `reason` and a CLI stderr note (default and `--anchors`/`--trust-set` paths) point to
+  `--purpose historical`, and no other status carries that pointer.
+  Because the retired-key refusal moved to the end of the walk, other lifecycle-keyring inputs were
+  relabelled too, each measured on the parent commit and pinned by a test (full table:
+  [VERSIONING.md §3.2](VERSIONING.md)):
+  - `TAMPERED` (exit 2) → `KEY_RETIRED` (exit 9): authentic retired receipt or checkpoint, nothing
+    else wrong.
+  - `TAMPERED` (2) → `UNTRUSTED` (5): a retired seq-0 receipt whose kid the identity manifest does not
+    authorize; an authentic retired checkpoint whose kid is not authorized for the chain opener.
+  - `TAMPERED` (2) → `MALFORMED` (3): `requireNFC: true` with a non-NFC string in a later receipt; a
+    checkpoint document that is not a JSON object (for example `[]` or `null`).
+  - `TAMPERED` → `TAMPERED` with a different `reason`/`badSeq`: a retired kid carrying another key's
+    signature ("invalid signature"), later altered bytes (reported at the altered seq), a retired
+    checkpoint kid with a bad signature ("checkpoint not authenticated"), an authentic retired
+    checkpoint over a truncated head ("tail truncated").
+  No receipt moves into or out of `VALID`, the static-keyring algorithm and every vector under
+  `conformance/vectors` are unchanged, and the historical purpose is unchanged. Consumers that accept
+  only `VALID` / exit `0` need no change; a consumer that matched `TAMPERED` or exit `2` to detect
+  retirement must match `KEY_RETIRED` or exit `9`. `conformance/survivable-retirement/cases.json` now
+  carries an 11-case `currentUse` half that pins this refusal order (each adjacent pair swapped in the
+  knockout must turn a case red). The TypeScript reference is the one port that implements lifecycle
+  keyrings on its current-use path; Python, Go, Rust and C# are declared `NOT_IMPLEMENTED` there and
+  are checked to refuse every case without ever reporting `KEY_RETIRED`.
 - Historical prefix results use `classification: PARTIAL` with
   `dimensions.completeness: PREFIX_ANCHORED`. This pair is the migration target for the earlier
   informal `DEGRADED` label; `VERIFIED` is reserved for an authenticated exact head with intact

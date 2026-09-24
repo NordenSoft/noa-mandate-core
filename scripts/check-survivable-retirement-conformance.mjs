@@ -1,10 +1,15 @@
 #!/usr/bin/env node
-/** Build all five verifier ports and require exact result + exit-code parity on the canonical G2 corpus. */
+/**
+ * Build all five verifier ports and require exact result + exit-code parity on the canonical G2
+ * corpus, then check its current-use half: every IMPLEMENTED port must satisfy each case, and every
+ * port declared NOT_IMPLEMENTED is still run and must refuse without ever reporting KEY_RETIRED.
+ */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { currentUseMismatch } from "./lib/current-use-oracle.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CORPUS = join(ROOT, "conformance", "survivable-retirement");
@@ -125,3 +130,45 @@ assert.equal(allOutputs.get("honest-stale-prefix").classification, "PARTIAL");
 assert.equal(allOutputs.get("honest-stale-prefix").dimensions.completeness, "PREFIX_ANCHORED");
 
 process.stdout.write(`survivable-retirement: ${corpus.cases.length} cases x ${Object.keys(implementations).length} ports PASS\n`);
+
+// ── CURRENT USE (default purpose) ─────────────────────────────────────────────────────────────────
+const currentUse = corpus.currentUse;
+assert.equal(currentUse.spec, "noa.current-use-lifecycle-corpus/0.1");
+assert.deepEqual(
+  Object.keys(currentUse.ports).sort(),
+  Object.keys(implementations).sort(),
+  "currentUse.ports must declare every port explicitly (no silent skip)",
+);
+const currentUseCommand = {
+  typescript: (c) => ["node", [join(ROOT, "dist", "src", "cli.js"), "verify", join(CORPUS, c.receipts), "--keyring", join(CORPUS, c.keyring)]],
+  python: (c) => ["python3", [join(ROOT, "impl-py", "noa_verify.py"), join(CORPUS, c.receipts), join(CORPUS, c.keyring)]],
+  go: (c) => [join(ROOT, "impl-go", "noa-verify"), [join(CORPUS, c.receipts), join(CORPUS, c.keyring)]],
+  rust: (c) => [join(ROOT, "impl-rust", "target", noBuild ? "release" : "debug", "noa-verify"), [join(CORPUS, c.receipts), join(CORPUS, c.keyring)]],
+  csharp: (c) => noBuild
+    ? ["dotnet", [join(ROOT, "impl-csharp", "bin", "Release", "net10.0", "noa-verify.dll"), join(CORPUS, c.receipts), join(CORPUS, c.keyring)]]
+    : ["dotnet", ["run", "--project", join(ROOT, "impl-csharp"), "--no-build", "--", join(CORPUS, c.receipts), join(CORPUS, c.keyring)]],
+};
+for (const [name, declaration] of Object.entries(currentUse.ports)) {
+  assert.ok(declaration === "IMPLEMENTED" || declaration === "NOT_IMPLEMENTED", `${name}: unknown declaration ${declaration}`);
+  let checked = 0;
+  for (const c of currentUse.cases) {
+    const [command, args] = currentUseCommand[name](c);
+    if (c.checkpoint !== undefined) args.push("--checkpoint", join(CORPUS, c.checkpoint));
+    if (c.identity !== undefined) args.push("--identity", join(CORPUS, c.identity));
+    const invocation = spawnSync(command, args, { cwd: ROOT, encoding: "utf8" });
+    assert.equal(invocation.error, undefined, `${name}/${c.id}: failed to start`);
+    const run = { stdout: invocation.stdout, stderr: invocation.stderr, exit: invocation.status };
+    if (declaration === "IMPLEMENTED") {
+      const mismatch = currentUseMismatch(c.expected, run);
+      assert.equal(mismatch, null, `${name}/${c.id} (${c.pins}): ${mismatch}`);
+    } else {
+      assert.notEqual(run.exit, 0, `${name}/${c.id}: a NOT_IMPLEMENTED port accepted a lifecycle root`);
+      assert.notEqual(run.exit, 9, `${name}/${c.id}: exits 9 while declared NOT_IMPLEMENTED — flip the declaration`);
+      assert.ok(!run.stdout.includes("KEY_RETIRED"), `${name}/${c.id}: reports KEY_RETIRED while declared NOT_IMPLEMENTED`);
+    }
+    checked++;
+  }
+  process.stdout.write(`${name}: current-use ${declaration} — ${checked}/${currentUse.cases.length} ` +
+    `${declaration === "IMPLEMENTED" ? "match the oracle" : "refused without KEY_RETIRED"}\n`);
+}
+process.stdout.write(`survivable-retirement current-use: ${currentUse.cases.length} cases PASS\n`);

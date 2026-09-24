@@ -38,6 +38,13 @@ policy verdict, universal action digest, or proof that a human reviewed the para
 Verification establishes the integrity of records supplied to the verifier. It cannot prove that no
 record was withheld, especially after the presented tail.
 
+### NC-1.6 — `KEY_RETIRED` does not prove a receipt was signed before its key was retired
+
+`KEY_RETIRED` means the bytes are intact and the signature authenticates against a key the trust
+root has retired. It is a refusal, not an acceptance. Anyone who still holds the retired private key
+can produce such a signature today, and the signer-chosen timestamp is not evidence of when it was
+made. Only historical verification with an independently trusted checkpoint can attribute it.
+
 ## 2. Execution outcomes
 
 ### NC-2.1 — A tool's claim that it failed is not proof that no side effect occurred
