@@ -136,9 +136,9 @@ for (const vec of corpus.vectors) {
 }
 
 test("the gate replay covers the corpus (every vector that can reach an object entry point)", () => {
-  // Pinned exactly: 132 text vectors, of which the 11 that are TRANSFER_PARSE cannot be expressed as
+  // Pinned exactly: 146 text vectors, of which the 11 that are TRANSFER_PARSE cannot be expressed as
   // an object. Move this number only together with the corpus, and say which vectors moved it.
-  assert.equal(replayed, 121, `the gate replayed ${replayed} vectors`);
+  assert.equal(replayed, 135, `the gate replayed ${replayed} vectors`);
   assert.equal(notReplayed.length, 11);
   for (const entry of notReplayed) {
     assert.ok(entry.endsWith(":TRANSFER_PARSE"), `${entry}: only parse-layer vectors may be skipped`);

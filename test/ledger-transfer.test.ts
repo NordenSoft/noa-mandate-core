@@ -162,12 +162,14 @@ test("the corpus is the shape the runner expects and covers every class", () => 
   assert.equal(corpus.generatedFrom, "scripts/gen-ledger-transfer-vectors.ts");
   assert.deepEqual(corpus.refusalCodes, CODES, "the published code list is exactly the eleven codes of /1, in order");
 
-  const counts: Record<string, number> = {};
-  for (const v of paramsVectors) counts[v.group] = (counts[v.group] ?? 0) + 1;
-  assert.deepEqual(counts, {
-    accept: 20, parse: 12, "not-object": 5, amount: 21, from: 21, ledger: 7, to: 7, unit: 8, salt: 8,
-    unrecognized: 14, "same-account": 2, precedence: 9,
-  });
+  // A Map, not an object keyed by corpus strings: a group name read from the file is never used as a
+  // property name (a `__proto__` group would otherwise write through to the prototype).
+  const counts = new Map<string, number>();
+  for (const v of paramsVectors) counts.set(v.group, (counts.get(v.group) ?? 0) + 1);
+  assert.deepEqual(counts, new Map<string, number>([
+    ["accept", 20], ["parse", 12], ["not-object", 5], ["amount", 21], ["from", 21], ["ledger", 10],
+    ["to", 10], ["unit", 8], ["salt", 8], ["unrecognized", 14], ["same-account", 2], ["precedence", 17],
+  ]));
   assert.equal(corpus.vectors.filter(isIdentity).length, 2);
 
   const seen = new Set<string>();
@@ -221,22 +223,34 @@ test("accept vectors bind pairwise-distinct transfers, except the declared equiv
   assert.equal(accepts.filter((v) => v.equivalentTo === "accept-base").length, 3);
 });
 
-/** Remove exactly the violation `code` names from a parsed tuple (this suite's own repair, not the generator's). */
+/**
+ * Remove exactly the violation `code` names from a parsed tuple (this suite's own repair, not the
+ * generator's). The tuple is held in a Map and every write uses a LITERAL member name chosen by a
+ * closed switch, so no property name read from the corpus is ever written to an object.
+ */
 function repairViolation(o: Record<string, unknown>, code: string): Record<string, unknown> {
-  const c: Record<string, unknown> = { ...o };
-  const member = MEMBERS.find((m) => MEMBER_CODE[m] === code);
-  if (member !== undefined) c[member] = baseParams()[member];
-  else if (code === "TRANSFER_UNRECOGNIZED_MEMBER") {
-    for (const k of Object.keys(c)) if (!(MEMBERS as readonly string[]).includes(k)) delete c[k];
-  } else if (code === "TRANSFER_SAME_ACCOUNT") c["toAccount"] = c["fromAccount"] === ACCT_2 ? "acct-example-3" : ACCT_2;
-  else assert.fail(`no repair for ${code}`);
-  return c;
+  const m = new Map<string, unknown>(Object.entries(o));
+  const base = baseParams();
+  switch (code) {
+    case "TRANSFER_AMOUNT_INVALID": m.set("amount", base["amount"]); break;
+    case "TRANSFER_FROM_INVALID": m.set("fromAccount", base["fromAccount"]); break;
+    case "TRANSFER_LEDGER_INVALID": m.set("ledger", base["ledger"]); break;
+    case "TRANSFER_SALT_INVALID": m.set("salt", base["salt"]); break;
+    case "TRANSFER_TO_INVALID": m.set("toAccount", base["toAccount"]); break;
+    case "TRANSFER_UNIT_INVALID": m.set("unit", base["unit"]); break;
+    case "TRANSFER_UNRECOGNIZED_MEMBER":
+      for (const k of [...m.keys()]) if (!(MEMBERS as readonly string[]).includes(k)) m.delete(k);
+      break;
+    case "TRANSFER_SAME_ACCOUNT": m.set("toAccount", m.get("fromAccount") === ACCT_2 ? "acct-example-3" : ACCT_2); break;
+    default: assert.fail(`no repair for ${code}`);
+  }
+  return Object.fromEntries(m);
 }
 
 test("the corpus pins EVERY adjacent pair of the normative refusal order", () => {
   // The chain from the first member rule to the two-member rule, derived from the code order. If every
-  // adjacent pair is pinned, an implementation that checks these rules in any other order inverts at
-  // least one pinned pair and fails the corpus.
+  // adjacent pair is pinned, a reordering of these steps inverts at least one pinned pair and fails the
+  // corpus. (Splitting a step into category passes is a different defect; the cross-phase test below.)
   const chain = CODES.slice(CODE_ORDER.TRANSFER_AMOUNT_INVALID, CODE_ORDER.TRANSFER_SAME_ACCOUNT + 1);
   assert.equal(chain.length, 8);
   const precedence = paramsVectors.filter((v) => v.beats !== undefined);
@@ -309,48 +323,8 @@ test("the conformance tuple binds the published paramsHash, deterministically", 
 
 // ── PROPERTIES THE CORPUS CANNOT STATE ───────────────────────────────────────────────────────────
 
-/** Rows back to members — the offline-verifier procedure of spec §5.2 (deliberately not exported). */
-function rebuild(display: Readonly<Record<string, string>>): Record<string, string> {
-  const amountRow = String(display["Amount"]);
-  const space = amountRow.indexOf(" ");
-  assert.ok(space > 0 && amountRow.indexOf(" ", space + 1) < 0, "Amount is exactly `<digits> <unit>`");
-  return {
-    amount: amountRow.slice(0, space),
-    fromAccount: String(display["From"]),
-    ledger: String(display["Ledger"]),
-    salt: String(display["Salt"]),
-    toAccount: String(display["To"]),
-    unit: amountRow.slice(space + 1),
-  };
-}
-
-test("display completeness: every bound value is visible, nothing unbound is shown, and the rows rebuild the tuple", () => {
-  const tuples = [
-    baseParams(),
-    baseParams({ amount: "1" }),
-    baseParams({ amount: "9".repeat(15), salt: "f".repeat(32) }),
-    baseParams({ fromAccount: "a".repeat(64), toAccount: "a-1-b", ledger: "z" }),
-  ];
-  for (const t of tuples) {
-    const r = run(t);
-    assert.ok(r.ok, JSON.stringify(r));
-    // Mechanical completeness: each bound VALUE appears verbatim in the rendering. A hand-written
-    // expectation stops being a completeness check the day a row is dropped; this arm does not.
-    const rendered = Object.values(r.display).join("\u0000");
-    for (const m of MEMBERS) {
-      assert.ok(rendered.includes(String(t[m])), `bound member \`${m}\` is not visible to the approver`);
-    }
-    assert.deepEqual(Object.keys(r.display).sort(), ["Action", "Amount", "From", "Ledger", "Salt", "To"],
-      "exactly six rows: every bound member visible and nothing unbound shown");
-    assert.equal(r.display["Action"], LEDGER_TRANSFER_CANONICAL);
-    // Completeness in the strong sense: the tuple is recoverable from the rows alone, and the rebuilt
-    // tuple re-projects to the SAME hash — the check an auditor runs on an audit-decrypted display.
-    const rebuilt = rebuild(r.display);
-    assert.deepEqual(rebuilt, { ...r.value });
-    const again = run(rebuilt);
-    assert.ok(again.ok && again.paramsHash === r.paramsHash, "the rebuilt tuple must bind the same hash");
-  }
-});
+// The display-completeness property test lives in `test/ledger-transfer-detectors.test.ts`: it is
+// the named detector of a knockout arm, and that file carries no implementation-digest pin.
 
 test("display injectivity: different transfers never render the same rows", () => {
   const tuples = [
@@ -452,6 +426,34 @@ test("results are inert: value, display and identities are frozen and null-roote
   }
   assert.throws(() => { (r.display as Record<string, string>)["Amount"] = "1 XTS"; }, TypeError);
   assert.throws(() => { (LEDGER_TRANSFER_SCHEMA_ID as { hash: string }).hash = "sha256:" + "0".repeat(64); }, TypeError);
+});
+
+test("cross-phase vectors pin each violation category inside its member's own step, in both directions", () => {
+  // absent / null / empty / wrong type are part of each member's rule (spec §3.3). A separate pass that
+  // checks one category for every member first (presence first, type first) or last (formats first,
+  // missing members afterwards) answers one of these with the LATER member.
+  const cross = paramsVectors.filter((v) => v.name.startsWith("reject-cross-phase-"));
+  assert.equal(cross.length, 8);
+  const unitCategory = new Set<string>();
+  const amountCategory = new Set<string>();
+  const category = (p: Record<string, unknown>, member: "amount" | "unit"): string => {
+    if (!Object.prototype.hasOwnProperty.call(p, member)) return "absent";
+    const v = p[member];
+    return v === null ? "null" : typeof v !== "string" ? "wrong-type" : v === "" ? "empty" : "malformed";
+  };
+  for (const v of cross) {
+    assert.equal(v.expect.reasonCode, "TRANSFER_AMOUNT_INVALID", `${v.name}: the amount step must answer first`);
+    assert.equal(v.beats, "TRANSFER_UNIT_INVALID");
+    const p = JSON.parse(String(v.paramsText)) as Record<string, unknown>;
+    const a = category(p, "amount");
+    const u = category(p, "unit");
+    // Exactly one side is malformed and the other carries one of the four categories.
+    assert.ok((a === "malformed") !== (u === "malformed"), `${v.name}: exactly one side is a format violation`);
+    if (a === "malformed") unitCategory.add(u); else amountCategory.add(a);
+  }
+  const all = ["absent", "empty", "null", "wrong-type"];
+  assert.deepEqual([...unitCategory].sort(), all, "every category must be pinned on the LATER member");
+  assert.deepEqual([...amountCategory].sort(), all, "every category must be pinned on the EARLIER member");
 });
 
 test("for every accept, the pinned canonical bytes equal the template built from the INPUT, not from the output", () => {

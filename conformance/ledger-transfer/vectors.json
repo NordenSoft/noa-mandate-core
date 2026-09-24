@@ -1100,6 +1100,36 @@
       }
     },
     {
+      "name": "reject-ledger-leading-digit",
+      "group": "ledger",
+      "note": "The first character must be a letter.",
+      "paramsText": "{\"amount\":\"12345\",\"fromAccount\":\"acct-example-1\",\"ledger\":\"9ledger-example\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"acct-example-2\",\"unit\":\"XTS\"}",
+      "expect": {
+        "ok": false,
+        "reasonCode": "TRANSFER_LEDGER_INVALID"
+      }
+    },
+    {
+      "name": "reject-ledger-leading-hyphen",
+      "group": "ledger",
+      "note": "The first character must be a letter.",
+      "paramsText": "{\"amount\":\"12345\",\"fromAccount\":\"acct-example-1\",\"ledger\":\"-ledger-example-1\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"acct-example-2\",\"unit\":\"XTS\"}",
+      "expect": {
+        "ok": false,
+        "reasonCode": "TRANSFER_LEDGER_INVALID"
+      }
+    },
+    {
+      "name": "reject-ledger-trailing-hyphen",
+      "group": "ledger",
+      "note": "The last character must be a letter or digit.",
+      "paramsText": "{\"amount\":\"12345\",\"fromAccount\":\"acct-example-1\",\"ledger\":\"ledger-example-1-\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"acct-example-2\",\"unit\":\"XTS\"}",
+      "expect": {
+        "ok": false,
+        "reasonCode": "TRANSFER_LEDGER_INVALID"
+      }
+    },
+    {
       "name": "reject-to-absent",
       "group": "to",
       "note": "`toAccount` missing entirely.",
@@ -1164,6 +1194,36 @@
       "group": "to",
       "note": "An escaped newline.",
       "paramsText": "{\"amount\":\"12345\",\"fromAccount\":\"acct-example-1\",\"ledger\":\"ledger-example-1\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"acct-example-\\n2\",\"unit\":\"XTS\"}",
+      "expect": {
+        "ok": false,
+        "reasonCode": "TRANSFER_TO_INVALID"
+      }
+    },
+    {
+      "name": "reject-to-leading-digit",
+      "group": "to",
+      "note": "The first character must be a letter.",
+      "paramsText": "{\"amount\":\"12345\",\"fromAccount\":\"acct-example-1\",\"ledger\":\"ledger-example-1\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"2acct-example\",\"unit\":\"XTS\"}",
+      "expect": {
+        "ok": false,
+        "reasonCode": "TRANSFER_TO_INVALID"
+      }
+    },
+    {
+      "name": "reject-to-leading-hyphen",
+      "group": "to",
+      "note": "The first character must be a letter.",
+      "paramsText": "{\"amount\":\"12345\",\"fromAccount\":\"acct-example-1\",\"ledger\":\"ledger-example-1\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"-acct-example-2\",\"unit\":\"XTS\"}",
+      "expect": {
+        "ok": false,
+        "reasonCode": "TRANSFER_TO_INVALID"
+      }
+    },
+    {
+      "name": "reject-to-trailing-hyphen",
+      "group": "to",
+      "note": "The last character must be a letter or digit.",
+      "paramsText": "{\"amount\":\"12345\",\"fromAccount\":\"acct-example-1\",\"ledger\":\"ledger-example-1\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"acct-example-2-\",\"unit\":\"XTS\"}",
       "expect": {
         "ok": false,
         "reasonCode": "TRANSFER_TO_INVALID"
@@ -1587,6 +1647,94 @@
         "reasonCode": "TRANSFER_SALT_INVALID"
       },
       "beats": "TRANSFER_SAME_ACCOUNT"
+    },
+    {
+      "name": "reject-cross-phase-malformed-amount-before-absent-unit",
+      "group": "precedence",
+      "note": "A malformed amount and an ABSENT unit: presence is part of the unit step, which comes last.",
+      "paramsText": "{\"amount\":\"0\",\"fromAccount\":\"acct-example-1\",\"ledger\":\"ledger-example-1\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"acct-example-2\"}",
+      "expect": {
+        "ok": false,
+        "reasonCode": "TRANSFER_AMOUNT_INVALID"
+      },
+      "beats": "TRANSFER_UNIT_INVALID"
+    },
+    {
+      "name": "reject-cross-phase-malformed-amount-before-null-unit",
+      "group": "precedence",
+      "note": "A malformed amount and a NULL unit: null is part of the unit step, which comes last.",
+      "paramsText": "{\"amount\":\"0\",\"fromAccount\":\"acct-example-1\",\"ledger\":\"ledger-example-1\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"acct-example-2\",\"unit\":null}",
+      "expect": {
+        "ok": false,
+        "reasonCode": "TRANSFER_AMOUNT_INVALID"
+      },
+      "beats": "TRANSFER_UNIT_INVALID"
+    },
+    {
+      "name": "reject-cross-phase-malformed-amount-before-empty-unit",
+      "group": "precedence",
+      "note": "A malformed amount and an EMPTY unit: emptiness is part of the unit step, which comes last.",
+      "paramsText": "{\"amount\":\"0\",\"fromAccount\":\"acct-example-1\",\"ledger\":\"ledger-example-1\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"acct-example-2\",\"unit\":\"\"}",
+      "expect": {
+        "ok": false,
+        "reasonCode": "TRANSFER_AMOUNT_INVALID"
+      },
+      "beats": "TRANSFER_UNIT_INVALID"
+    },
+    {
+      "name": "reject-cross-phase-malformed-amount-before-number-unit",
+      "group": "precedence",
+      "note": "A malformed amount and a NUMBER as unit: the type check is part of the unit step, which comes last.",
+      "paramsText": "{\"amount\":\"0\",\"fromAccount\":\"acct-example-1\",\"ledger\":\"ledger-example-1\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"acct-example-2\",\"unit\":5}",
+      "expect": {
+        "ok": false,
+        "reasonCode": "TRANSFER_AMOUNT_INVALID"
+      },
+      "beats": "TRANSFER_UNIT_INVALID"
+    },
+    {
+      "name": "reject-cross-phase-absent-amount-before-malformed-unit",
+      "group": "precedence",
+      "note": "An ABSENT amount and a malformed unit: the amount step comes first even when its only violation is absence.",
+      "paramsText": "{\"fromAccount\":\"acct-example-1\",\"ledger\":\"ledger-example-1\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"acct-example-2\",\"unit\":\"USD\"}",
+      "expect": {
+        "ok": false,
+        "reasonCode": "TRANSFER_AMOUNT_INVALID"
+      },
+      "beats": "TRANSFER_UNIT_INVALID"
+    },
+    {
+      "name": "reject-cross-phase-null-amount-before-malformed-unit",
+      "group": "precedence",
+      "note": "A NULL amount and a malformed unit: the amount step comes first.",
+      "paramsText": "{\"amount\":null,\"fromAccount\":\"acct-example-1\",\"ledger\":\"ledger-example-1\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"acct-example-2\",\"unit\":\"USD\"}",
+      "expect": {
+        "ok": false,
+        "reasonCode": "TRANSFER_AMOUNT_INVALID"
+      },
+      "beats": "TRANSFER_UNIT_INVALID"
+    },
+    {
+      "name": "reject-cross-phase-empty-amount-before-malformed-unit",
+      "group": "precedence",
+      "note": "An EMPTY amount and a malformed unit: the amount step comes first.",
+      "paramsText": "{\"amount\":\"\",\"fromAccount\":\"acct-example-1\",\"ledger\":\"ledger-example-1\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"acct-example-2\",\"unit\":\"USD\"}",
+      "expect": {
+        "ok": false,
+        "reasonCode": "TRANSFER_AMOUNT_INVALID"
+      },
+      "beats": "TRANSFER_UNIT_INVALID"
+    },
+    {
+      "name": "reject-cross-phase-number-amount-before-malformed-unit",
+      "group": "precedence",
+      "note": "A NUMBER as amount and a malformed unit: the amount step comes first.",
+      "paramsText": "{\"amount\":12345,\"fromAccount\":\"acct-example-1\",\"ledger\":\"ledger-example-1\",\"salt\":\"000102030405060708090a0b0c0d0e0f\",\"toAccount\":\"acct-example-2\",\"unit\":\"USD\"}",
+      "expect": {
+        "ok": false,
+        "reasonCode": "TRANSFER_AMOUNT_INVALID"
+      },
+      "beats": "TRANSFER_UNIT_INVALID"
     }
   ]
 }

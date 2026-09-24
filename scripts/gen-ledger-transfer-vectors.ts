@@ -18,8 +18,11 @@
  *      vector was generated from — an independent read path, not the implementation's output;
  *   6. every reachable refusal code occurs at least once, and every group has its declared count;
  *   7. every ADJACENT pair of the normative refusal order has a precedence vector whose input
- *      violates both rules (repairing the winning violation yields the losing code), so an
- *      implementation that checks the rules in any other order fails the corpus.
+ *      violates both rules (repairing the winning violation yields the losing code), so a
+ *      reordering of the refusal steps fails the corpus; and cross-phase vectors between the first
+ *      and the last member pin that each violation category (absent, null, empty, wrong type) is
+ *      judged inside its member's own step, so a separate all-members pass for one category, run
+ *      before or after the per-member rules, fails the corpus too.
  * A corpus that no longer matches the code it describes is never committed, and the pins move only
  * in a deliberate commit that says why.
  *
@@ -169,8 +172,8 @@ interface ParamsVector {
 }
 
 const GROUP_COUNTS: Readonly<Record<Group, number>> = {
-  accept: 20, parse: 12, "not-object": 5, amount: 21, from: 21, ledger: 7, salt: 8, to: 7, unit: 8,
-  unrecognized: 14, "same-account": 2, precedence: 9,
+  accept: 20, parse: 12, "not-object": 5, amount: 21, from: 21, ledger: 10, salt: 8, to: 10, unit: 8,
+  unrecognized: 14, "same-account": 2, precedence: 17,
 };
 
 /**
@@ -530,6 +533,10 @@ vectors.push(
   reject("reject-ledger-uppercase", "ledger", "Case variants are refused, never folded.", jsonText(withMembers({ ledger: "Ledger-example-1" })), L),
   reject("reject-ledger-65-chars", "ledger", "65 characters is past the bound.", jsonText(withMembers({ ledger: "l".repeat(65) })), L),
   reject("reject-ledger-escaped-ansi", "ledger", "An escaped ANSI clear-screen sequence.", jsonText(withMembers({ ledger: "ledger-\u001b[2Jexample-1" })), L),
+  // The first/last-character rules, pinned for EVERY identifier member rather than one of them.
+  reject("reject-ledger-leading-digit", "ledger", "The first character must be a letter.", jsonText(withMembers({ ledger: "9ledger-example" })), L),
+  reject("reject-ledger-leading-hyphen", "ledger", "The first character must be a letter.", jsonText(withMembers({ ledger: `-${LEDGER_1}` })), L),
+  reject("reject-ledger-trailing-hyphen", "ledger", "The last character must be a letter or digit.", jsonText(withMembers({ ledger: `${LEDGER_1}-` })), L),
 );
 
 const T: LedgerTransferRefusalCode = "TRANSFER_TO_INVALID";
@@ -539,6 +546,9 @@ vectors.push(
   reject("reject-to-uppercase", "to", "Case variants are refused, never folded.", jsonText(withMembers({ toAccount: ACCT_2.toUpperCase() })), T),
   reject("reject-to-65-chars", "to", "65 characters is past the bound.", jsonText(withMembers({ toAccount: "b".repeat(65) })), T),
   reject("reject-to-escaped-newline", "to", "An escaped newline.", jsonText(withMembers({ toAccount: "acct-example-\n2" })), T),
+  reject("reject-to-leading-digit", "to", "The first character must be a letter.", jsonText(withMembers({ toAccount: "2acct-example" })), T),
+  reject("reject-to-leading-hyphen", "to", "The first character must be a letter.", jsonText(withMembers({ toAccount: `-${ACCT_2}` })), T),
+  reject("reject-to-trailing-hyphen", "to", "The last character must be a letter or digit.", jsonText(withMembers({ toAccount: `${ACCT_2}-` })), T),
 );
 
 // ── REFUSALS: unit ───────────────────────────────────────────────────────────────────────────────
@@ -641,6 +651,39 @@ vectors.push(
     "Bad salt and a self-transfer: member rules run before the two-member rule (a non-adjacent pair).",
     withMembers({ salt: SALT_A.toUpperCase(), toAccount: ACCT_1 }), S, SA),
 );
+
+// CROSS-PHASE: absent, null, empty and wrong type are PART of each member's own rule (spec §3.3),
+// judged in that member's step. An implementation that first checks one of those categories for
+// every member (presence first, as a JSON Schema `required` pass does, or type first), or that
+// checks every value's format first and missing members afterwards, answers these with the LATER
+// member. Each category is pinned in both directions between the first and the last member.
+const crossPhase: Array<[string, string, Record<string, unknown>, LedgerTransferRefusalCode, LedgerTransferRefusalCode]> = [
+  ["reject-cross-phase-malformed-amount-before-absent-unit",
+    "A malformed amount and an ABSENT unit: presence is part of the unit step, which comes last.",
+    { ...withoutMember("unit"), amount: "0" }, A, U],
+  ["reject-cross-phase-malformed-amount-before-null-unit",
+    "A malformed amount and a NULL unit: null is part of the unit step, which comes last.",
+    withMembers({ amount: "0", unit: null }), A, U],
+  ["reject-cross-phase-malformed-amount-before-empty-unit",
+    "A malformed amount and an EMPTY unit: emptiness is part of the unit step, which comes last.",
+    withMembers({ amount: "0", unit: "" }), A, U],
+  ["reject-cross-phase-malformed-amount-before-number-unit",
+    "A malformed amount and a NUMBER as unit: the type check is part of the unit step, which comes last.",
+    withMembers({ amount: "0", unit: 5 }), A, U],
+  ["reject-cross-phase-absent-amount-before-malformed-unit",
+    "An ABSENT amount and a malformed unit: the amount step comes first even when its only violation is absence.",
+    { ...withoutMember("amount"), unit: "USD" }, A, U],
+  ["reject-cross-phase-null-amount-before-malformed-unit",
+    "A NULL amount and a malformed unit: the amount step comes first.",
+    withMembers({ amount: null, unit: "USD" }), A, U],
+  ["reject-cross-phase-empty-amount-before-malformed-unit",
+    "An EMPTY amount and a malformed unit: the amount step comes first.",
+    withMembers({ amount: "", unit: "USD" }), A, U],
+  ["reject-cross-phase-number-amount-before-malformed-unit",
+    "A NUMBER as amount and a malformed unit: the amount step comes first.",
+    withMembers({ amount: 12345, unit: "USD" }), A, U],
+];
+for (const [name, note, fixture, winner, beats] of crossPhase) vectors.push(precedes(name, note, fixture, winner, beats));
 
 // ── CORPUS-WIDE CHECKS ───────────────────────────────────────────────────────────────────────────
 const params = vectors.filter((v): v is ParamsVector => (v as ParamsVector).group !== undefined);

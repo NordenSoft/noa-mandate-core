@@ -4732,17 +4732,19 @@ const KNOCKOUTS = [
   // row). The implementation-digest test hashes that body, so on the whole-file suite it would kill
   // these arms by itself — the arm would then say nothing about the named vector. A `[proof: ID]`
   // binding cannot express this detector: the proof resolver (`scripts/lib/proof-resolve.mjs`,
-  // `proofRecipePackage`) only resolves files under `packages/<name>/test/`, and this suite lives in
-  // the root `test/`. So each of the three runs a script that builds and then executes ONLY its named
-  // detector (`--test-name-pattern`, one test): the digest test is not in the run, and the only way
-  // the arm can be killed is by the vector it names.
+  // `proofRecipePackage`) only resolves files under `packages/<name>/test/`. So the three named
+  // detectors live in `test/ledger-transfer-detectors.test.ts`, a file with no digest pin, run by
+  // `npm run test:ledger-transfer:detectors` — the same build-then-one-`node --test` shape as every
+  // other root arm, which is the only shape the runner's trusted script grammar accepts (a quoted
+  // `--test-name-pattern` is refused as shell syntax, measured). Each mutation turns only its own
+  // detector red, so the arm is killed by the detector it names.
   {
     id: "ledger-transfer-bytes-in-strict-parse",
     control:
       "spec §4.1 — the transfer enters through the kernel's STRICT parser. A lenient parser is " +
       "last-wins on duplicate keys, so `reject-parse-duplicate-amount` ({amount:\"1\", amount:\"100000\"}) " +
       "would be ACCEPTED with the second amount — the value a first reader saw and the value bound differ. " +
-      "The suite runs that one vector only.",
+      "Detector: the duplicate-amount test in the detectors file (no digest pin there).",
     file: "src/ledger-transfer.ts",
     find: '  const parsed = parseDocument(paramsBytes, "params");',
     replace:
@@ -4755,7 +4757,7 @@ const KNOCKOUTS = [
       '    }\n' +
       '  })();',
     kind: "tests",
-    suite: [".", "npm", ["run", "test:ledger-transfer:duplicate-key"]],
+    suite: [".", "npm", ["run", "test:ledger-transfer:detectors"]],
   },
   {
     id: "ledger-transfer-closed-member-set",
@@ -4824,25 +4826,26 @@ const KNOCKOUTS = [
     control:
       "spec §4.2 — paramsHash covers the RE-EMITTED canonical bytes, never the input bytes. Hashing the " +
       "input makes `accept-escaped-spelling` (a \\u0061 spelling of the base tuple) bind a hash that is " +
-      "not the base hash, so one transfer would carry two commitments. The suite runs that one vector only.",
+      "not the base hash, so one transfer would carry two commitments. Detector: the escaped-spelling " +
+      "test in the detectors file (no digest pin there).",
     file: "src/ledger-transfer.ts",
     find: "  const paramsHash = sha256Prefixed(canonical);",
     replace: '  const paramsHash = sha256Prefixed(typeof paramsBytes === "string" ? paramsBytes : canonical);',
     kind: "tests",
-    suite: [".", "npm", ["run", "test:ledger-transfer:escaped-spelling"]],
+    suite: [".", "npm", ["run", "test:ledger-transfer:detectors"]],
   },
   {
     id: "ledger-transfer-display-shows-salt",
     control:
       "spec §5.1 — the display is complete: every bound member is visible, so an auditor can rebuild the " +
       "tuple from the rows and re-project it. Dropping the Salt row leaves a display that still looks " +
-      "complete; the mechanical `display completeness` test (not a hand-written expectation) must go " +
-      "red, and the suite runs that one test only.",
+      "complete; the mechanical display-completeness test in the detectors file (not a hand-written " +
+      "expectation, and no digest pin there) must go red.",
     file: "src/ledger-transfer.ts",
     find: "      Salt: b.salt,",
     replace: "",
     kind: "tests",
-    suite: [".", "npm", ["run", "test:ledger-transfer:completeness"]],
+    suite: [".", "npm", ["run", "test:ledger-transfer:detectors"]],
   },
   {
     id: "ledger-transfer-implementation-pin",
