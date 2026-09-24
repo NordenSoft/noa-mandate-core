@@ -42,7 +42,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION,
-  baselineEvidenceSummary, planKnockoutShards, PASSING,
+  baselineEvidenceSummary, KNOCKOUT_SHARD_LIMITS, knockoutShardTimingVerdict,
+  planKnockoutShards, PASSING,
   ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS, runIsolatedKnockoutSweep, validateKnockoutRegistry,
 } from "./lib/knockout-runner.mjs";
 import {
@@ -763,6 +764,12 @@ if (SHARD_ARG !== null) {
   const total = Number(parsed[2]);
   if (!Number.isSafeInteger(index) || !Number.isSafeInteger(total) || total < 1 || index >= total) {
     console.error(`--shard ${SHARD_ARG}: index must be an integer in [0, total) and total >= 1`);
+    process.exit(1);
+  }
+  if (total > KNOCKOUT_SHARD_LIMITS.maxTotal) {
+    console.error(
+      `--shard ${SHARD_ARG}: total must be at most ${KNOCKOUT_SHARD_LIMITS.maxTotal} legs`,
+    );
     process.exit(1);
   }
   // AMBIGUOUS SELECTORS REFUSE. `--only` names one control, while a shard names one complete
@@ -4734,15 +4741,18 @@ const KNOCKOUTS = [
  * that suite in two complete 32-leg CI runs, 35964797924 (pull request 14) and 35920358016 (main
  * 6810051), rounded UP to the next half minute. A gap that closes several lines at once is divided
  * among them, and an entry with a setup-integrity postcheck counts twice. `samples` is the number
- * of gaps behind a row; 0 would mark an estimate, which must carry its reason beside the row.
+ * of gaps behind a row; a row with 0 samples is an ESTIMATE and must say why in `basis`.
  *
  * `fixedMinutes` covers what every job pays around its arms: checkout, install, build, capture
  * and the runner selftest. It is the smallest whole minute at which every job of those two runs
  * whose suites all have a measured row projects at least its measured duration; the largest
- * shortfall it absorbs is 15.4 minutes. `budgetMinutes` is the planning ceiling, 60 minutes under
- * the 180-minute `timeout-minutes` of the knockout-shards job, so a job may run half again as slow
- * as its projection before it reaches the limit. Recalibrate from fresh complete runs when a
- * suite's command or a row's measurements change.
+ * shortfall it absorbs is 15.4 minutes. `budgetMinutes` is the planning ceiling for PROJECTED
+ * minutes, not a guarantee of any job's duration: it sits 60 minutes under the 180-minute
+ * `timeout-minutes` of the knockout-shards job, so a job may run half again as slow as its
+ * projection before it reaches the limit. Every leg prints its elapsed against its projected
+ * minutes at the end, warns when it ran more than 15 minutes past the projection and FAILS past
+ * 150 (KNOCKOUT_SHARD_LIMITS). Recalibrate from fresh complete runs when that warning appears, a
+ * suite's command changes, or a row's measurements change.
  */
 export const KNOCKOUT_SHARD_COSTS = Object.freeze({
   budgetMinutes: 120,
@@ -5112,5 +5122,19 @@ if (DIRECT_ENTRY) {
         process.exitCode = 1;
       }
     }
+  }
+
+  if (SHARD) {
+    // MEASURED AGAINST THE PROJECTION, on every leg and whatever the sweep's outcome, so a stale
+    // cost row shows up as a warning long before a cancel. Elapsed is this process's own time; the
+    // job setup before it (about 1.5 minutes measured) is not counted, so the failure ceiling
+    // still fires more than 25 minutes before the job limit.
+    const timing = knockoutShardTimingVerdict({
+      elapsedMinutes: performance.now() / 60_000,
+      projectedMinutes: shardPlan.projectedMinutes,
+      shard: SHARD,
+    });
+    for (const line of timing.lines) console.log(line);
+    if (timing.failed) process.exitCode = 1;
   }
 }

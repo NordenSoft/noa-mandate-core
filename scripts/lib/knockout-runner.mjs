@@ -596,15 +596,44 @@ export function partitionByDependency(registry, repoRoot, probes) {
 }
 
 /**
+ * The limits around the shard plan, in one place. Every minute figure in the plan is a
+ * PROJECTION from measured costs, never a guarantee; these limits are how a leg that outruns its
+ * projection is caught before the job limit cancels it with its controls unmeasured.
+ *   maxTotal                  the most legs a plan is made for. A larger total is a mistyped
+ *                             matrix and would only buy planning work, so it refuses.
+ *   timeoutHeadroomFactor     the job limit in ci.yml must be at least this multiple of the
+ *                             planning budget (the selftest reads the limit), so a leg can run
+ *                             half again as slow as its projection before the limit.
+ *   recalibrateMarginMinutes  a leg that runs this far past its projection warns that the cost
+ *                             table is stale and must be recalibrated.
+ *   failElapsedMinutes        a leg still running at this point FAILS, 30 minutes before the
+ *                             180-minute job limit: a leg that close to the limit is re-planned,
+ *                             not waved through until the day it is cancelled.
+ */
+export const KNOCKOUT_SHARD_LIMITS = Object.freeze({
+  failElapsedMinutes: 150,
+  maxTotal: 256,
+  recalibrateMarginMinutes: 15,
+  timeoutHeadroomFactor: 1.5,
+});
+
+function assertKnockoutShardTotal(total) {
+  if (!Number.isInteger(total) || total < 1 || total > KNOCKOUT_SHARD_LIMITS.maxTotal) {
+    throw new Error(
+      `shard total must be an integer in [1, ${KNOCKOUT_SHARD_LIMITS.maxTotal}], ` +
+      `got ${JSON.stringify(total)}`,
+    );
+  }
+}
+
+/**
  * Split an already dependency-filtered registry into `total` disjoint shards and return shard
  * `index` (0-based, matching GitHub's `strategy.job-index` so no arithmetic is needed in YAML).
  * `costTable` is the reviewed per-suite cost data kept beside the registry; see
  * `planKnockoutShards` for the whole plan and the reasoning.
  */
 export function partitionIntoShards(entries, index, total, costTable) {
-  if (!Number.isInteger(total) || total < 1) {
-    throw new Error(`shard total must be an integer >= 1, got ${JSON.stringify(total)}`);
-  }
+  assertKnockoutShardTotal(total);
   if (!Number.isInteger(index) || index < 0 || index >= total) {
     throw new Error(`shard index must be an integer in [0, ${total}), got ${JSON.stringify(index)}`);
   }
@@ -612,7 +641,11 @@ export function partitionIntoShards(entries, index, total, costTable) {
 }
 
 const KNOCKOUT_SHARD_COST_TABLE_KEYS = Object.freeze(["budgetMinutes", "fixedMinutes", "suites"]);
-const KNOCKOUT_SHARD_COST_ROW_KEYS = Object.freeze(["armMinutes", "kind", "samples", "suite"]);
+// A MEASURED row names how many CI gaps back it. An ESTIMATE (samples 0) must also say why its
+// number is believable in `basis`; a bare guess is not a reviewable row.
+const KNOCKOUT_SHARD_MEASURED_ROW_KEYS = Object.freeze(["armMinutes", "kind", "samples", "suite"]);
+const KNOCKOUT_SHARD_ESTIMATE_ROW_KEYS =
+  Object.freeze(["armMinutes", "basis", "kind", "samples", "suite"]);
 
 /** The one suite key shared by the shard plan, its cost table and the selftest. */
 export function knockoutShardSuiteKey(entry) {
@@ -645,7 +678,7 @@ function knockoutShardClosedKeys(value, expected, label) {
 /**
  * Validate the closed cost-table shape and return its per-arm minutes keyed by suite. Refuses
  * unknown or missing keys, minutes that are not positive and finite, a fixed cost that leaves no
- * budget, a malformed row and a suite listed twice.
+ * budget, a malformed row, an estimate without its basis and a suite listed twice.
  */
 export function validateKnockoutShardCostTable(costTable) {
   knockoutShardClosedKeys(costTable, KNOCKOUT_SHARD_COST_TABLE_KEYS, "the table");
@@ -663,7 +696,18 @@ export function validateKnockoutShardCostTable(costTable) {
   const armMinutesByKey = new Map();
   costTable.suites.forEach((row, rowIndex) => {
     const label = `suites[${rowIndex}]`;
-    knockoutShardClosedKeys(row, KNOCKOUT_SHARD_COST_ROW_KEYS, label);
+    const estimate = row !== null && typeof row === "object" && row.samples === 0;
+    if (estimate && (typeof row.basis !== "string" || row.basis.trim().length === 0)) {
+      throw new Error(
+        `knockout shard cost table: ${label} has samples 0, so it is an estimate and needs a ` +
+        "basis string saying why its minutes are believable",
+      );
+    }
+    knockoutShardClosedKeys(
+      row,
+      estimate ? KNOCKOUT_SHARD_ESTIMATE_ROW_KEYS : KNOCKOUT_SHARD_MEASURED_ROW_KEYS,
+      label,
+    );
     if (typeof row.kind !== "string" || row.kind.length === 0 || !Array.isArray(row.suite)) {
       throw new Error(`knockout shard cost table: ${label} needs a kind string and a suite array`);
     }
@@ -720,9 +764,7 @@ export function validateKnockoutShardCostTable(costTable) {
  * `--shard 0/2` still runs; the selftest holds the live registry to it at the CI leg count.
  */
 export function planKnockoutShards(entries, total, costTable) {
-  if (!Number.isInteger(total) || total < 1) {
-    throw new Error(`shard total must be an integer >= 1, got ${JSON.stringify(total)}`);
-  }
+  assertKnockoutShardTotal(total);
   if (!Array.isArray(entries)) {
     throw new Error("knockout shard plan: entries must be an array");
   }
@@ -776,6 +818,10 @@ export function planKnockoutShards(entries, total, costTable) {
     }
   }
   let pieces = [...groups.values()].flatMap(piecesOf);
+  // Which group this step splits affects balance only, never coverage (each entry is still in
+  // exactly one piece) or the budget (every leg is still projected and held to it). Splitting the
+  // group that holds the most expensive piece is deliberately simple; a finer balancing choice was
+  // reviewed and left out because it changes neither property.
   while (pieces.length < total) {
     let widest = null;
     for (const piece of pieces) {
@@ -815,6 +861,49 @@ export function planKnockoutShards(entries, total, costTable) {
     });
   });
   return Object.freeze({ budgetMinutes, fixedMinutes, shards: Object.freeze(shards) });
+}
+
+/**
+ * The end-of-leg comparison of measured against projected minutes, so a stale or wrong cost row
+ * is noticed the first time it matters rather than at the 180-minute cancel. Returns the lines to
+ * print (GitHub reads `::warning::` / `::error::` at the start of a stdout line as annotations)
+ * and whether the leg must fail:
+ *   - always: one line with elapsed and projected minutes;
+ *   - elapsed more than `recalibrateMarginMinutes` past the projection: a warning to recalibrate;
+ *   - elapsed past `failElapsedMinutes`: an error, and the leg FAILS even if every control passed,
+ *     because the next run of the same plan may be cancelled with its controls unmeasured.
+ */
+export function knockoutShardTimingVerdict({ elapsedMinutes, projectedMinutes, shard }) {
+  for (const [name, value] of [["elapsedMinutes", elapsedMinutes], ["projectedMinutes", projectedMinutes]]) {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      throw new Error(`knockout shard timing: ${name} must be a finite non-negative number`);
+    }
+  }
+  if (
+    shard === null || typeof shard !== "object" ||
+    !Number.isInteger(shard.index) || !Number.isInteger(shard.total)
+  ) {
+    throw new Error("knockout shard timing: shard must carry an integer index and total");
+  }
+  const { failElapsedMinutes, recalibrateMarginMinutes } = KNOCKOUT_SHARD_LIMITS;
+  const label = `knockout shard ${shard.index}/${shard.total}`;
+  const elapsed = elapsedMinutes.toFixed(1);
+  const lines = [`${label} timing: elapsed ${elapsed} of ${projectedMinutes} projected minutes`];
+  if (elapsedMinutes > projectedMinutes + recalibrateMarginMinutes) {
+    lines.push(
+      `::warning::${label} ran ${elapsed} minutes, more than ${recalibrateMarginMinutes} past its ` +
+      `${projectedMinutes}-minute projection: recalibrate KNOCKOUT_SHARD_COSTS from this run`,
+    );
+  }
+  const failed = elapsedMinutes > failElapsedMinutes;
+  if (failed) {
+    lines.push(
+      `::error::${label} ran ${elapsed} minutes, past the ${failElapsedMinutes}-minute ceiling ` +
+      "kept 30 minutes clear of the job limit: re-plan it (recalibrate KNOCKOUT_SHARD_COSTS, " +
+      "split or speed up its suite, or add legs)",
+    );
+  }
+  return Object.freeze({ failed, lines: Object.freeze(lines) });
 }
 
 const sha = (s) => crypto.createHash("sha256").update(s).digest("hex");

@@ -36,6 +36,7 @@ import {
   BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION,
   CONTAINED_EVENTS_ROOT,
   CONTAINED_SCRATCH_ROOT,
+  KNOCKOUT_SHARD_LIMITS,
   LEGACY_TOMBSTONE_PROTOCOL,
   PASSING,
   SETUP_NODE_ATTESTED_REVISION,
@@ -71,6 +72,7 @@ import {
   observeSuite,
   parseBoundaryArmTerminalEvidence,
   knockoutShardSuiteKey,
+  knockoutShardTimingVerdict,
   partitionByDependency,
   partitionIntoShards,
   planKnockoutShards,
@@ -1403,16 +1405,32 @@ check("the registry shards deterministically: exact union, no overlap, and every
       `shard ${JSON.stringify(index)}/${JSON.stringify(total)} was accepted instead of refused`);
   }
 
-  // AN EMPTY SLICE IS RETURNED AS EMPTY, so the caller can refuse rather than report a green job.
-  assert.deepEqual(partitionIntoShards(registry, 900, 999, costs), [],
+  // AN EMPTY SLICE IS RETURNED AS EMPTY, so the caller can refuse rather than report a green job:
+  // three entries cannot fill eight legs.
+  assert.deepEqual(partitionIntoShards(registry.slice(0, 3), 7, 8, costs), [],
     "a shard beyond the registry did not come back empty");
+
+  // A TOTAL PAST THE CAP refuses before any planning work; the cap itself is still planned.
+  const maxTotal = KNOCKOUT_SHARD_LIMITS.maxTotal;
+  assert.throws(() => partitionIntoShards(registry, 0, maxTotal + 1, costs),
+    /shard total must be an integer in \[1, /, "a shard total past the cap was planned");
+  assert.doesNotThrow(() => partitionIntoShards(registry, maxTotal - 1, maxTotal, costs));
 
   // ── THE CLI REFUSES, END TO END, BEFORE MEASURING ANYTHING ────────────────────────────────────
   // Each of these exits non-zero without running an arm, which is the property that stops a
   // misconfigured matrix from reporting green while measuring zero controls.
   const cli = (args) => spawnSync(process.execPath, ["scripts/lint-control-knockout.mjs", ...args],
     { cwd: REPO, encoding: "utf8", timeout: 300_000, env: PUBLIC_ONLY_ENVIRONMENT });
+  // An EMPTY leg is reachable from the CLI only while the live registry has fewer entries than the
+  // total cap: at or above it, every allowed total fills every leg. The case runs whenever it is
+  // reachable; the entry point's refusal is unchanged, and its pure-function half is proven above.
+  const liveEntries = knockoutRegistrySnapshot().registry.length;
+  const emptyLegCases = liveEntries < maxTotal
+    ? [["empty slice", ["--shard", `${maxTotal - 1}/${maxTotal}`], /0 runnable entries in this slice/]]
+    : [];
   for (const [label, args, expected] of [
+    ...emptyLegCases,
+    ["total over the cap", ["--shard", "900/999"], new RegExp(`total must be at most ${maxTotal} legs`)],
     ["unknown option", ["--not-a-knockout-option"], /unknown or unconsumed argument/],
     ["orphan value", ["orphan-value"], /unknown or unconsumed argument/],
     ["no value", ["--shard"], /--shard requires one non-option value/],
@@ -1422,7 +1440,6 @@ check("the registry shards deterministically: exact union, no overlap, and every
     ["fractional index", ["--shard", "1.5/4"], /--shard must be <index>\/<total>/],
     ["zero total", ["--shard", "1/0"], /index must be an integer in \[0, total\)/],
     ["index equals total", ["--shard", "8/8"], /index must be an integer in \[0, total\)/],
-    ["empty slice", ["--shard", "900/999"], /0 runnable entries in this slice/],
     ["duplicate selector", ["--shard", "0/4", "--shard", "1/4"], /supplied exactly once/],
     ["duplicate only", ["--only", "one", "--only", "two"], /supplied exactly once/],
     ["with --only", ["--shard", "0/4", "--only", "any-id"], /cannot be combined with --only/],
@@ -1582,6 +1599,76 @@ check("the shard plan holds every leg to the cost budget where equal-count slice
     "reproduce the measured failure");
 });
 
+check("a suite group that alone exceeds the budget is split even when every leg already has a piece", () => {
+  // The fixture above cannot tell whether the budget split ran: its legs outnumber its suite
+  // groups, so the fill step splits the expensive group anyway. Here the legs do NOT outnumber the
+  // groups, the fill step never runs, and only the budget split keeps a leg inside the projection
+  // budget: eight expensive arms and one cheap one on two legs.
+  const expensive = [".", "node", ["expensive-selftest.mjs"]];
+  const cheap = ["packages/cheap", "npm", ["test"]];
+  const costs = {
+    budgetMinutes: 120,
+    fixedMinutes: 16,
+    suites: [
+      { armMinutes: 14.5, kind: "gate", samples: 1, suite: expensive },
+      { armMinutes: 1, kind: "tests", samples: 1, suite: cheap },
+    ],
+  };
+  const registry = [
+    ...Array.from({ length: 8 }, (_, index) => ({ id: `expensive-${index}`, kind: "gate", suite: expensive })),
+    { id: "cheap-0", kind: "tests", suite: cheap },
+  ];
+  // ANTI-VACUITY, from the model's definition: unsplit, the expensive group alone projects
+  // fixed + one baseline + eight arms = 16 + 14.5 x 9 = 146.5 minutes, past the budget.
+  assert.ok(costs.fixedMinutes + 14.5 * 9 > costs.budgetMinutes,
+    "the fixture's expensive group fits the budget unsplit, so it cannot show the split");
+
+  const plan = planKnockoutShards(registry, 2, costs);
+  assert.deepEqual(plan.shards.map((shard) => shard.projectedMinutes), [90.5, 88.5],
+    "the budget split did not divide the expensive group into two pieces of four arms");
+  for (const shard of plan.shards) {
+    assert.ok(shard.projectedMinutes <= costs.budgetMinutes,
+      `leg ${shard.index} projects ${shard.projectedMinutes} minutes, over the ${costs.budgetMinutes}-minute budget`);
+    assert.ok(shard.entries.some((entry) => entry.kind === "gate"),
+      `leg ${shard.index} holds no expensive arm, so the group over the budget was not split`);
+  }
+});
+
+check("every leg compares its elapsed with its projected minutes, warns past the margin and fails past the ceiling", () => {
+  // The plan's minutes are a PROJECTION. A stale or wrong cost row must show up on the first leg it
+  // slows, as a warning past the recalibration margin, and a leg that ran past the failure ceiling
+  // must fail even if every control passed: the next run of the same plan may be cancelled.
+  const { failElapsedMinutes: ceiling, recalibrateMarginMinutes: margin } = KNOCKOUT_SHARD_LIMITS;
+  const shard = { index: 3, total: 32 };
+  const verdict = (elapsedMinutes, projectedMinutes) =>
+    knockoutShardTimingVerdict({ elapsedMinutes, projectedMinutes, shard });
+  for (const [elapsed, projected, warn, fail] of [
+    [100, 120, false, false],
+    [120 + margin, 120, false, false],
+    [120 + margin + 0.1, 120, true, false],
+    [ceiling, 120, true, false],
+    [ceiling + 0.1, 120, true, true],
+    [ceiling + 0.1, ceiling - margin + 5, false, true],
+  ]) {
+    const result = verdict(elapsed, projected);
+    const label = `elapsed ${elapsed} against projected ${projected}`;
+    assert.equal(result.lines[0],
+      `knockout shard 3/32 timing: elapsed ${elapsed.toFixed(1)} of ${projected} projected minutes`, label);
+    const warning = result.lines.filter((line) => line.startsWith("::warning::"));
+    const error = result.lines.filter((line) => line.startsWith("::error::"));
+    assert.equal(warning.length, warn ? 1 : 0, `${label}: wrong warning`);
+    assert.equal(error.length, fail ? 1 : 0, `${label}: wrong error`);
+    assert.equal(result.failed, fail, `${label}: wrong failure verdict`);
+    if (warn) assert.match(warning[0], /recalibrate KNOCKOUT_SHARD_COSTS/, `${label}: the warning names no fix`);
+  }
+  for (const bad of [Number.NaN, -1, Infinity, "90"]) {
+    assert.throws(() => verdict(bad, 120), /elapsedMinutes must be a finite non-negative number/);
+    assert.throws(() => verdict(90, bad), /projectedMinutes must be a finite non-negative number/);
+  }
+  assert.throws(() => knockoutShardTimingVerdict({ elapsedMinutes: 1, projectedMinutes: 1, shard: null }),
+    /shard must carry an integer index and total/);
+});
+
 check("a suite without a cost row, a repeated row or a malformed cost table refuses the plan", () => {
   // A guessed cost is a timeout found hours later, so an entry whose suite has no row refuses
   // before any leg is planned, naming the suite and the entry. The table's shape is closed.
@@ -1598,7 +1685,15 @@ check("a suite without a cost row, a repeated row or a malformed cost table refu
   // The kind is part of the suite key, exactly as it is for the baseline an arm is judged against.
   assert.throws(() => planKnockoutShards(registry, 2, { ...good, suites: [rowP, { ...rowQ, kind: "gate" }] }),
     /no row for suite/, "a row for another kind of the same command was accepted as this suite's cost");
+  // An ESTIMATE (samples 0) is accepted only with its written basis.
+  const estimateP = { ...rowP, basis: "build plus one test file, like a measured sibling", samples: 0 };
+  assert.doesNotThrow(() => planKnockoutShards(registry, 2, { ...good, suites: [estimateP, rowQ] }));
   for (const [label, table, pattern] of [
+    ["estimate without a basis", { ...good, suites: [{ ...rowP, samples: 0 }, rowQ] }, /samples 0, so it is an estimate and needs a basis/],
+    ["estimate with a blank basis", { ...good, suites: [{ ...estimateP, basis: "  " }, rowQ] }, /needs a basis/],
+    ["estimate with a non-string basis", { ...good, suites: [{ ...estimateP, basis: 1 }, rowQ] }, /needs a basis/],
+    ["measured row with a basis", { ...good, suites: [{ ...rowP, basis: "x" }, rowQ] }, /keys must be exactly/],
+    ["estimate with an extra key", { ...good, suites: [{ ...estimateP, note: "x" }, rowQ] }, /keys must be exactly/],
     ["absent table", undefined, /the table must be an object/],
     ["array table", [], /the table must be an object/],
     ["unknown key", { ...good, margin: 1 }, /keys must be exactly/],
@@ -1651,8 +1746,27 @@ check("the live registry and its shard cost table cover each other, and the CI m
     `the knockout-shards matrix legs are empty or repeated: ${JSON.stringify(legs)}`);
   const timeout = /\n    timeout-minutes: ([0-9]+)\n/.exec(job);
   assert.notEqual(timeout, null, "the knockout-shards job has no timeout-minutes");
-  assert.ok(KNOCKOUT_SHARD_COSTS.budgetMinutes < Number(timeout[1]),
-    `the planning budget ${KNOCKOUT_SHARD_COSTS.budgetMinutes} is not below the job limit ${timeout[1]}`);
+  const limitMinutes = Number(timeout[1]);
+  // HEADROOM, as relations and not a label: the budget is a PROJECTION, so the job limit must
+  // leave room for a leg to run slower than projected, and the failure ceiling must sit between
+  // the budget and the limit with 30 minutes to spare.
+  const headroomProblems = (budgetMinutes) => {
+    const { failElapsedMinutes, maxTotal, timeoutHeadroomFactor } = KNOCKOUT_SHARD_LIMITS;
+    const problems = [];
+    if (limitMinutes < timeoutHeadroomFactor * budgetMinutes) {
+      problems.push(`the ${limitMinutes}-minute job limit is under ${timeoutHeadroomFactor} x the ${budgetMinutes}-minute budget`);
+    }
+    if (budgetMinutes >= failElapsedMinutes) {
+      problems.push(`the ${budgetMinutes}-minute budget is not below the ${failElapsedMinutes}-minute failure ceiling`);
+    }
+    if (limitMinutes - failElapsedMinutes < 30) {
+      problems.push(`the ${failElapsedMinutes}-minute failure ceiling is not 30 minutes clear of the ${limitMinutes}-minute job limit`);
+    }
+    if (legs.length > maxTotal) problems.push(`${legs.length} legs exceed the ${maxTotal}-leg cap`);
+    return problems;
+  };
+  assert.deepEqual(headroomProblems(KNOCKOUT_SHARD_COSTS.budgetMinutes), [],
+    "the projection budget does not leave the required headroom under the job limit");
 
   const budgetProblems = (entries, table) => {
     const plan = planKnockoutShards(entries, legs.length, table);
@@ -1663,15 +1777,20 @@ check("the live registry and its shard cost table cover each other, and the CI m
     }
     for (const shard of plan.shards) {
       if (shard.entries.length === 0) problems.push(`leg ${shard.index} is empty and would refuse`);
-      if (shard.projectedMinutes > table.budgetMinutes) {
-        problems.push(`leg ${shard.index} projects ${shard.projectedMinutes} of ${table.budgetMinutes} budget minutes`);
-      }
+      if (shard.projectedMinutes <= table.budgetMinutes) continue;
+      // The advice follows the cause: one entry that alone overruns cannot be split any further,
+      // so more legs would not help it.
+      problems.push(shard.entries.length === 1
+        ? `leg ${shard.index} holds the single entry ${JSON.stringify(shard.entries[0].id)}, which alone ` +
+          `projects ${shard.projectedMinutes} of ${table.budgetMinutes} budget minutes and cannot be ` +
+          "split: speed up its suite or correct its cost row"
+        : `leg ${shard.index} projects ${shard.projectedMinutes} of ${table.budgetMinutes} budget minutes: ` +
+          "split or speed up a suite, or add legs (which also needs the ruleset's required checks changed)");
     }
     return problems;
   };
   assert.deepEqual(budgetProblems(registry, KNOCKOUT_SHARD_COSTS), [],
-    `the live registry does not fit ${legs.length} legs within budget: split or speed up a suite, ` +
-    "or add legs, which also needs the ruleset's required checks changed");
+    `the live registry's projection does not fit ${legs.length} legs within the budget; each problem names its fix`);
 
   // ANTI-VACUITY: each detector above fires on a real-shaped change.
   const [firstRow, ...otherRows] = KNOCKOUT_SHARD_COSTS.suites;
@@ -1681,17 +1800,48 @@ check("the live registry and its shard cost table cover each other, and the CI m
     ...KNOCKOUT_SHARD_COSTS,
     suites: [...KNOCKOUT_SHARD_COSTS.suites, { ...firstRow, suite: ["packages/unused", "npm", ["test"]] }],
   }).some((problem) => problem.startsWith("cost row for unused")), "an unused cost row was not reported");
+  // Overload sized from the budget, not from today's registry: more arm minutes than every leg's
+  // whole budget together, so some leg must project past it whatever the table's rows become.
   const costliest = [...KNOCKOUT_SHARD_COSTS.suites].sort((a, b) => b.armMinutes - a.armMinutes)[0];
   const template = registry.find((entry) => knockoutShardSuiteKey(entry) === knockoutShardSuiteKey(costliest));
   const { expectedSetupIntegrity: _postcheck, ...plainArm } = template;
+  const overloadCount = Math.ceil((legs.length * KNOCKOUT_SHARD_COSTS.budgetMinutes) / costliest.armMinutes) + 1;
   const overloaded = [
     ...registry,
-    ...Array.from({ length: 200 }, (_, index) => ({ ...plainArm, id: `overload-${index}` })),
+    ...Array.from({ length: overloadCount }, (_, index) => ({ ...plainArm, id: `overload-${index}` })),
   ];
   assert.ok(budgetProblems(overloaded, KNOCKOUT_SHARD_COSTS)
-    .some((problem) => problem.includes("budget minutes")), "an over-budget registry was not reported");
+    .some((problem) => problem.includes("or add legs")), "an over-budget registry was not reported");
   assert.ok(budgetProblems(registry.slice(0, legs.length - 1), KNOCKOUT_SHARD_COSTS)
     .some((problem) => problem.includes("is empty")), "a registry too small for every leg was not reported");
+  // One entry that alone projects past the budget, beside one cheap entry per remaining leg; built
+  // here so it does not depend on which live row is costliest. The advice must not say "add legs".
+  const slowSuite = [".", "node", ["slow-selftest.mjs"]];
+  const cheapSuite = ["packages/cheap", "npm", ["test"]];
+  const slowTable = {
+    budgetMinutes: KNOCKOUT_SHARD_COSTS.budgetMinutes,
+    fixedMinutes: KNOCKOUT_SHARD_COSTS.fixedMinutes,
+    suites: [
+      { armMinutes: KNOCKOUT_SHARD_COSTS.budgetMinutes, kind: "gate", samples: 1, suite: slowSuite },
+      { armMinutes: 1, kind: "tests", samples: 1, suite: cheapSuite },
+    ],
+  };
+  const slowProblems = budgetProblems([
+    { id: "slow-0", kind: "gate", suite: slowSuite },
+    ...Array.from({ length: legs.length - 1 }, (_, index) => ({ id: `cheap-${index}`, kind: "tests", suite: cheapSuite })),
+  ], slowTable);
+  assert.ok(slowProblems.some((problem) => problem.includes("cannot be split")),
+    "a single entry past the budget was not reported as unsplittable");
+  assert.equal(slowProblems.some((problem) => problem.includes("cannot be split") && problem.includes("add legs")), false,
+    "an unsplittable entry was told to add legs");
+  // A budget that leaves the limit less than the headroom factor, one at the failure ceiling, and a
+  // failure ceiling too close to the limit are each reported.
+  assert.ok(headroomProblems(179).some((problem) => problem.includes("x the 179-minute budget")),
+    "a 179-minute budget under a 180-minute limit was accepted");
+  assert.ok(headroomProblems(121).some((problem) => problem.includes("x the 121-minute budget")),
+    "a budget one minute past the headroom factor was accepted");
+  assert.ok(headroomProblems(KNOCKOUT_SHARD_LIMITS.failElapsedMinutes)
+    .some((problem) => problem.includes("failure ceiling")), "a budget at the failure ceiling was accepted");
 });
 
 check("the preparation planner orders a synthetic file: chain, and fails closed on every bad plan", () => {
