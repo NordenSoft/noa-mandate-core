@@ -5054,6 +5054,19 @@ export const KNOCKOUT_SHARD_COSTS = Object.freeze({
       armMinutes: 5.5,
       samples: 10,
     },
+    {
+      kind: "tests",
+      suite: [".", "npm", ["run", "test:ledger-transfer"]],
+      armMinutes: 4.5,
+      samples: 6,
+    },
+    {
+      kind: "tests",
+      suite: [".", "npm", ["run", "test:ledger-transfer:detectors"]],
+      armMinutes: 4.5,
+      samples: 0,
+      basis: "build plus one test file, like test:ledger-transfer",
+    },
   ].map((row) => Object.freeze(row))),
 });
 
