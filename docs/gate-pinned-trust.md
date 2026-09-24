@@ -83,8 +83,9 @@ Every member is required and the member set is closed at every level. An undefin
 - **Times:** RFC 3339 instants, read under the key-manifest schema's grammar with nanosecond
   precision (never `Date.parse`). `revokedAt` is `null` or an instant.
 - **Ed25519 keys:** accepted exactly when the decision verifier would accept them
-  (`isStrictEd25519PublicKey`): canonical base64, canonical DER, canonical y, no x = 0 point spelled
-  with the sign bit set (RFC 8032 §5.1.3), and not small-order.
+  (`isStrictEd25519PublicKey`): canonical base64, canonical DER, canonical y, a y that decodes to a
+  point on the curve, no x = 0 point spelled with the sign bit set (RFC 8032 §5.1.3), and not
+  small-order.
 - **X25519 keys:** canonical base64 of a 44-byte DER SubjectPublicKeyInfo of type `x25519` that
   re-encodes byte for byte, whose u-coordinate is a canonical field element (bit 255 clear, u < p).
   RFC 7748 decoding masks bit 255 and reduces mod p, so any other spelling is the same key under a
@@ -126,7 +127,9 @@ The roster is not signed. It is trusted because of three things:
    - It must be owned by root, or by a uid **other than the gate's effective uid**. A roster the
      gate's own uid can rewrite could be rewritten by a compromised gate, or by an agent sharing its
      uid, and would survive a restart.
-   - The configured path must be absolute and free of `.` and `..` segments. Its directory is resolved
+   - The configured path must be absolute and free of `.` and `..` segments, and so must every symlink
+     target met while resolving it (a relative target such as `../archive` or `./admin` is refused
+     with `symlink-ancestor`). Its directory is resolved
      one component at a time with `lstat`. Every symlink met on the way (in the configured path or
      inside a link target) must be owned by root or by the roster's owner, and every directory above
      it must pass the rule below. A symlink in a directory the gate can write would otherwise re-point
@@ -180,8 +183,12 @@ It follows the key file's owner rule: the gate's uid or root, no group or other 
 The read, the comparison and the write happen under one exclusive lock,
 `<NOA_GATE_KEY_FILE>.roster-state.lock`. The lock is created `O_EXCL | O_NOFOLLOW` at mode 0600 and
 holds the booting process's pid. A second boot on the same key file while a live process holds the lock
-is `STATE_LOCKED`. A lock whose holder has died is removed once and retried. A lock that names no
-readable pid is `STATE_LOCKED` until an administrator removes it. At commit the state is read and
+is `STATE_LOCKED`. A lock whose holder has died is taken over once, by identity: it is renamed aside
+and deleted only if it is the same file (device and inode) that was read, and otherwise put back and
+refused `STATE_LOCKED`. A boot releases only the lock file it created. A lock that names no readable
+pid is `STATE_LOCKED` until an administrator removes it. The key file's directory must be writable by
+the gate, because the lock and the state file live there; if it is not, the boot is refused with
+`STATE_DIR_NOT_WRITABLE`. At commit the state is read and
 compared again under the lock, so a floor written in the meantime by anything that ignores the lock
 is never lowered.
 
@@ -215,7 +222,7 @@ The first failure wins. Every code exits 1 before the gate listens, printing
 | 8 | Clock | `ROSTER_NOT_YET_VALID`, `ROSTER_EXPIRED`, `ROSTER_VALIDITY_TOO_LONG`, `ROSTER_APPROVER_NOT_YET_VALID`, `ROSTER_TIME_INVALID` (future revocation) |
 | 9 | Key file | `GATE_KEY_FILE_MISSING`, `GATE_KEY_FILE_UNSAFE`, `GATE_KEY_INCONSISTENT`, `GATE_KEY_NOT_PINNED` |
 | 10 | Signer posture | `ROSTER_EXEC_SIGNER_MISMATCH`: the roster's `executionSigner` is null exactly when `NOA_GATE_GRANT_SIGNER_SOCKET` is set, or the other way round |
-| 11 | State | `STATE_LOCKED`, `STATE_FILE_UNSAFE`, `STATE_FILE_CORRUPT`, `ROSTER_ROLLBACK`, `ROSTER_EQUIVOCATION`; at commit, the same comparison again, then `STATE_FILE_WRITE_FAILED` |
+| 11 | State | `STATE_DIR_NOT_WRITABLE`, `STATE_LOCKED`, `STATE_FILE_UNSAFE`, `STATE_FILE_CORRUPT`, `ROSTER_ROLLBACK`, `ROSTER_EQUIVOCATION`; at commit, the same comparison again, then `STATE_FILE_WRITE_FAILED` |
 
 When the roster pins an `executionSigner`, the out-of-process signer's expected identity is taken
 from the roster. The in-process grant key still requires `NOA_GATE_UNSAFE_IN_PROCESS_GRANT_KEY=1`.

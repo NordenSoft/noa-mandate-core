@@ -32,6 +32,10 @@ test("isStrictEd25519PublicKey accepts exactly the keys verifyEd25519 accepts", 
     // (y = 1 and y = p - 1) under a second spelling the small-order set did not list.
     ["y = 1 with the sign bit set (x = 0)", spki(Buffer.from("01" + "00".repeat(30) + "80", "hex"))],
     ["y = p - 1 with the sign bit set (x = 0)", spki(Buffer.from("ec" + "ff".repeat(31), "hex"))],
+    // RFC 8032 §5.1.3 step 3: these y have no x on the curve, so the encoding names no point at all.
+    ["off-curve y = 2", spki(Buffer.from("02" + "00".repeat(31), "hex"))],
+    ["off-curve y = 7", spki(Buffer.from("07" + "00".repeat(31), "hex"))],
+    ["off-curve y = 8 with the sign bit", spki(Buffer.from("08" + "00".repeat(30) + "80", "hex"))],
     ["a non-canonical y coordinate", spki(nonCanonicalY)],
     ["trailing garbage after the SPKI", Buffer.concat([Buffer.from(kp.publicKey, "base64"), Buffer.from([0])]).toString("base64")],
     ["non-canonical base64 padding", kp.publicKey.replace(/=$/, "")],

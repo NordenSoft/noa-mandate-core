@@ -22,7 +22,7 @@ import { SIGNING_KEY_LIFECYCLE_SPEC, isHex64, intrinsics, type SigningKeyLifecyc
 import { loadOrCreateKeyFile } from "noa-mcp-adapter-core";
 import { describeThrown, thrownCode } from "noa-mcp-adapter-core/safe-throw";
 import { encodeDocument } from "./bytes.js";
-import { readPinnedFile, removeStaleLock, tryCreateLock, writeFileAtomic } from "./pinned-file.js";
+import { readPinnedFile, takeOverStaleLock, tryCreateLock, writeFileAtomic } from "./pinned-file.js";
 import {
   checkRosterClock,
   isRosterId,
@@ -592,6 +592,7 @@ export type PinnedBootCode =
   | "ROSTER_EXEC_SIGNER_MISMATCH"
   | "PINNED_ROOT_GATE"
   | "STATE_LOCKED"
+  | "STATE_DIR_NOT_WRITABLE"
   | "STATE_FILE_UNSAFE"
   | "STATE_FILE_CORRUPT"
   | "ROSTER_ROLLBACK"
@@ -1019,20 +1020,28 @@ function processAlive(pid: number): boolean {
 }
 
 /**
- * The high-water lock: exclusive create; an existing lock whose holder is alive is STATE_LOCKED; a
- * lock whose holder is dead is removed ONCE and the create retried.
+ * The high-water lock: exclusive create. A lock whose holder is alive is STATE_LOCKED. A lock whose
+ * holder is dead is taken over ONCE by identity (`takeOverStaleLock`) and the create retried; if the
+ * lock changed hands meanwhile, STATE_LOCKED. A directory the gate cannot create files in is
+ * STATE_DIR_NOT_WRITABLE: the lock and the state file live beside the key file, so its directory must be
+ * writable by the gate.
  */
 function acquireStateLock(lockPath: string, isAlive: (pid: number) => boolean): { ok: true; release: () => void } | PinnedRefusal {
   for (let attempt = 0; attempt < 2; attempt++) {
     const a = tryCreateLock(lockPath);
     if (a.ok) return { ok: true, release: () => a.release() };
-    if (a.holderPid === null) {
+    if (a.kind === "unwritable") {
+      return bootRefusal("STATE_DIR_NOT_WRITABLE", `${a.detail}; the key file's directory must be writable by the gate (the high-water state and its lock live there)`);
+    }
+    if (a.holderPid === null || a.holderId === null) {
       return bootRefusal("STATE_LOCKED", `${a.detail} and names no readable holder; an administrator must inspect and remove it`);
     }
     if (isAlive(a.holderPid)) {
       return bootRefusal("STATE_LOCKED", `the roster high-water state is locked by live process ${a.holderPid}; another gate is starting on this key file`);
     }
-    if (attempt === 0 && !removeStaleLock(lockPath)) break;
+    if (attempt === 0 && takeOverStaleLock(lockPath, a.holderId) === "changed") {
+      return bootRefusal("STATE_LOCKED", `${JSON.stringify(lockPath)} changed hands while its dead holder's lock was being taken over; another gate is starting on this key file`);
+    }
   }
   return bootRefusal("STATE_LOCKED", `${JSON.stringify(lockPath)}: a stale lock could not be replaced`);
 }

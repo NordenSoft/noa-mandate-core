@@ -76,6 +76,34 @@ const SMALL_ORDER_PUBKEYS: ReadonlySet<string> = new Set([
   "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
 ]);
 
+const FIELD_P = (1n << 255n) - 19n;
+function modPow(base: bigint, exp: bigint): bigint {
+  let r = 1n;
+  let b = ((base % FIELD_P) + FIELD_P) % FIELD_P;
+  let e = exp;
+  while (e > 0n) {
+    if ((e & 1n) === 1n) r = (r * b) % FIELD_P;
+    b = (b * b) % FIELD_P;
+    e >>= 1n;
+  }
+  return r;
+}
+/** Edwards25519's d = -121665 / 121666 (mod p). */
+const EDWARDS_D = (((-121665n % FIELD_P) + FIELD_P) * modPow(121666n, FIELD_P - 2n)) % FIELD_P;
+
+/**
+ * Whether a canonical y (0 <= y < p) belongs to a point: x^2 = (y^2 - 1) / (d y^2 + 1) is zero or a
+ * quadratic residue (Euler's criterion). The denominator is never zero for edwards25519 (d is not a
+ * square).
+ */
+function hasCurvePoint(y: bigint): boolean {
+  const y2 = (y * y) % FIELD_P;
+  const u = (y2 - 1n + FIELD_P) % FIELD_P;
+  const v = (EDWARDS_D * y2 + 1n) % FIELD_P;
+  const x2 = (u * modPow(v, FIELD_P - 2n)) % FIELD_P;
+  return x2 === 0n || modPow(x2, (FIELD_P - 1n) / 2n) === 1n;
+}
+
 /** Generate an Ed25519 keypair in the ecosystem's base64(DER) shape. */
 export function generateKeyPair(kid: string): KeyPair {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -130,6 +158,10 @@ function strictEd25519PublicKey(publicKeyB64: unknown): KeyObject | null {
     // small-order points as the canonical entries below, so they were a second spelling the set
     // lookup could not see (QA round 1, reproduced as accepted roster approver keys).
     if (signBit && (y === 1n || y === Q - 1n)) return null;
+    // RFC 8032 §5.1.3 step 3: x^2 = (y^2 - 1) / (d y^2 + 1) must have a square root, or the encoding
+    // names no point at all. OpenSSL imports such a key and every verification under it fails, so
+    // accepting it provisions an approver that can never sign (QA round 2: y = 2 was accepted).
+    if (!hasCurvePoint(y)) return null;
     if (SMALL_ORDER_PUBKEYS.has(raw.toString("hex"))) return null;
     return key;
   } catch {

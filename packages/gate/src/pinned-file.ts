@@ -36,6 +36,7 @@ import {
   constants as fsConstants,
   fstatSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   openSync,
   readlinkSync,
@@ -77,8 +78,15 @@ export interface PinnedReadPolicy {
 }
 
 export type PinnedRead =
-  | { readonly ok: true; readonly bytes: Uint8Array; readonly uid: number; readonly mode: number }
+  | { readonly ok: true; readonly bytes: Uint8Array; readonly uid: number; readonly mode: number; readonly id: FileId }
   | { readonly ok: false; readonly token: PinnedFileToken; readonly detail: string };
+
+/** A file's identity: the device and inode `fstat`/`lstat` report. A path can be re-pointed; this cannot. */
+export interface FileId {
+  readonly dev: number;
+  readonly ino: number;
+}
+const sameFile = (a: FileId, b: { dev: number; ino: number }): boolean => a.dev === b.dev && a.ino === b.ino;
 
 const O_NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0;
 const O_NONBLOCK = fsConstants.O_NONBLOCK ?? 0;
@@ -149,11 +157,11 @@ function segments(p: string): string[] | null {
  * refused: without it, every directory this resolution passes through is either on the final chain or
  * an ancestor of a recorded link's directory, and both are inspected. Never throws.
  */
-export function resolveConfiguredDirectory(dir: string): DirectoryResolution {
+export function resolveConfiguredDirectory(dir: string, configured: string = dir): DirectoryResolution {
   const refuse = (token: PinnedFileToken, detail: string): DirectoryResolution => ({ ok: false, token, detail: `${token}: ${detail}` });
-  if (!isAbsolute(dir)) return refuse("path-form", `${JSON.stringify(dir)} is not an absolute path`);
+  if (!isAbsolute(dir)) return refuse("path-form", `the configured path ${JSON.stringify(configured)} is not an absolute path`);
   let queue = segments(dir);
-  if (queue === null) return refuse("path-form", `${JSON.stringify(dir)} contains a . or .. segment`);
+  if (queue === null) return refuse("path-form", `the configured path ${JSON.stringify(configured)} contains a . or .. segment`);
   let cur = "/";
   let expansions = 0;
   const links: ResolvedLink[] = [];
@@ -214,7 +222,7 @@ export function readPinnedFile(filePath: string, policy: PinnedReadPolicy): Pinn
     if (base === "" || base === "." || base === ".." || filePath.endsWith("/")) {
       return fileRefusal("path-form", `${JSON.stringify(filePath)} does not name a file`);
     }
-    const resolved = resolveConfiguredDirectory(dir);
+    const resolved = resolveConfiguredDirectory(dir, filePath);
     if (!resolved.ok) return { ok: false, token: resolved.token, detail: resolved.detail };
     dir = resolved.real;
     links = resolved.links;
@@ -263,7 +271,7 @@ export function readPinnedFile(filePath: string, policy: PinnedReadPolicy): Pinn
     if (total !== size) {
       return fileRefusal("short-read", `${JSON.stringify(filePath)}: read ${total} bytes where fstat reported ${size}; the file changed while it was read`);
     }
-    return { ok: true, bytes: new Uint8Array(buf.buffer, buf.byteOffset, size), uid: st.uid, mode: st.mode };
+    return { ok: true, bytes: new Uint8Array(buf.buffer, buf.byteOffset, size), uid: st.uid, mode: st.mode, id: { dev: st.dev, ino: st.ino } };
   } catch (err) {
     return fileRefusal("unreadable", `${JSON.stringify(filePath)} could not be read (${describeThrown(err)})`);
   } finally {
@@ -319,24 +327,31 @@ export function writeFileAtomic(filePath: string, bytes: Uint8Array): { ok: true
 
 /**
  * An exclusive lock file: created `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW` at 0600 and holding the
- * creating process's pid. Existence IS the lock; `release` removes it. When the file already exists the
- * holder's pid is returned so the caller can decide whether the holder is still alive. Never throws.
+ * creating process's pid. Existence IS the lock. `release` removes ONLY the file this attempt created
+ * (same device and inode): if the path now names another boot's lock, that lock is left alone. When the
+ * file already exists its holder's pid and identity are returned, so the caller can decide whether the
+ * holder is alive and take a dead holder's lock over by identity. Never throws.
  */
 export type LockAttempt =
   | { readonly ok: true; release(): void }
-  | { readonly ok: false; readonly holderPid: number | null; readonly detail: string };
+  | { readonly ok: false; readonly kind: "held"; readonly holderPid: number | null; readonly holderId: FileId | null; readonly detail: string }
+  | { readonly ok: false; readonly kind: "unwritable"; readonly detail: string };
 
 export function tryCreateLock(lockPath: string): LockAttempt {
   let fd: number;
   try {
     fd = openSync(lockPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW, 0o600);
   } catch (err) {
-    if (thrownCode(err) !== "EEXIST") {
-      return { ok: false, holderPid: null, detail: `${JSON.stringify(lockPath)} could not be created (${describeThrown(err)})` };
+    if (thrownCode(err) === "EEXIST") {
+      const holder = readLockHolder(lockPath);
+      return { ok: false, kind: "held", holderPid: holder?.pid ?? null, holderId: holder?.id ?? null, detail: `${JSON.stringify(lockPath)} exists` };
     }
-    return { ok: false, holderPid: readLockHolder(lockPath), detail: `${JSON.stringify(lockPath)} exists` };
+    return { ok: false, kind: "unwritable", detail: `${JSON.stringify(lockPath)} could not be created (${describeThrown(err)})` };
   }
+  let id: FileId;
   try {
+    const st = fstatSync(fd);
+    id = { dev: st.dev, ino: st.ino };
     writeSync(fd, `${process.pid}\n`);
     fsyncSync(fd);
   } catch (err) {
@@ -346,7 +361,7 @@ export function tryCreateLock(lockPath: string): LockAttempt {
     } catch {
       // the lock was never usable; nothing else to undo
     }
-    return { ok: false, holderPid: null, detail: `${JSON.stringify(lockPath)} could not be written (${describeThrown(err)})` };
+    return { ok: false, kind: "unwritable", detail: `${JSON.stringify(lockPath)} could not be written (${describeThrown(err)})` };
   }
   closeSync(fd);
   let released = false;
@@ -356,7 +371,9 @@ export function tryCreateLock(lockPath: string): LockAttempt {
       if (released) return;
       released = true;
       try {
-        unlinkSync(lockPath);
+        // Only the inode this attempt created: after a takeover race the path may name another boot's
+        // live lock, and deleting THAT would let a third boot in.
+        if (sameFile(id, lstatSync(lockPath))) unlinkSync(lockPath);
       } catch {
         // already gone: an administrator removed it, and the next holder will re-check the state
       }
@@ -364,8 +381,8 @@ export function tryCreateLock(lockPath: string): LockAttempt {
   };
 }
 
-/** The pid recorded in an existing lock file, or `null` when it cannot be read as one. */
-function readLockHolder(lockPath: string): number | null {
+/** The pid and identity of an existing lock file, or `null` when it cannot be read as one. */
+function readLockHolder(lockPath: string): { pid: number; id: FileId } | null {
   const r = readPinnedFile(lockPath, { maxBytes: 64, forbiddenModeBits: 0o022, requireSingleLink: true, ownerAllowed: null, checkAncestors: false });
   if (!r.ok) return null;
   const text = new TextDecoder().decode(r.bytes).trim();
@@ -375,15 +392,47 @@ function readLockHolder(lockPath: string): number | null {
     if (c < 0x30 || c > 0x39) return null;
   }
   const pid = Number(text);
-  return pid > 0 ? pid : null;
+  return pid > 0 ? { pid, id: r.id } : null;
 }
 
-/** Remove a lock file whose holder was found dead. Never throws; returns whether it is gone. */
-export function removeStaleLock(lockPath: string): boolean {
+/**
+ * Take over a lock whose holder was found DEAD, atomically: rename it aside under a unique name, then
+ * check that the file now aside IS the one that was read (same device and inode). Only then is it
+ * deleted. If it is not — another boot replaced the stale lock with its own live one between our read
+ * and our rename — it is put back (a hard link, which never overwrites a newer lock) and the takeover
+ * reports "changed". Removing the stale lock by PATH instead let two boots that both saw the dead
+ * holder each delete the other's fresh lock and both proceed. Never throws.
+ */
+export function takeOverStaleLock(lockPath: string, expected: FileId): "taken" | "gone" | "changed" {
+  const aside = `${lockPath}.stale-${randomBytes(8).toString("hex")}`;
   try {
-    unlinkSync(lockPath);
-    return true;
+    renameSync(lockPath, aside);
   } catch (err) {
-    return thrownCode(err) === "ENOENT";
+    return thrownCode(err) === "ENOENT" ? "gone" : "changed";
   }
+  let moved;
+  try {
+    moved = lstatSync(aside);
+  } catch {
+    return "changed";
+  }
+  if (sameFile(expected, moved)) {
+    try {
+      unlinkSync(aside);
+    } catch {
+      // the stale lock is already out of the way under its unique name
+    }
+    return "taken";
+  }
+  try {
+    linkSync(aside, lockPath);
+  } catch {
+    // a newer lock already holds the path; the directory stays locked by it
+  }
+  try {
+    unlinkSync(aside);
+  } catch {
+    // nothing further to undo
+  }
+  return "changed";
 }

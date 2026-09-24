@@ -211,15 +211,17 @@ test("K18 — a small-order Ed25519 approver key is ROSTER_KEY_INVALID at load; 
 
   // The two x = 0 points spelled with the sign bit set (RFC 8032 §5.1.3: decoding fails): the same
   // small-order points as the canonical entries, under a second spelling.
-  for (const hexKey of ["01" + "00".repeat(30) + "80", "ec" + "ff".repeat(31)]) {
+  for (const hexKey of ["01" + "00".repeat(30) + "80", "ec" + "ff".repeat(31), "02" + "00".repeat(31)]) {
     const signed = rosterDoc(world, NOW);
     (signed["approvers"] as Record<string, Record<string, unknown>>)[world.approver.kid]!["publicKey"] =
       Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(hexKey, "hex")]).toString("base64");
-    refusedWith(parseGateRoster(rosterBytes(signed)), "ROSTER_KEY_INVALID", `x = 0 with the sign bit: ${hexKey}`);
+    refusedWith(parseGateRoster(rosterBytes(signed)), "ROSTER_KEY_INVALID", `x = 0 with the sign bit, or off-curve: ${hexKey}`);
   }
-  // An X25519 u-coordinate at or above p is a second spelling of u - p: p itself (u = 0), and p + 9,
-  // which is the base point u = 9 — a perfectly valid key under a second string.
-  for (const hexKey of ["ed" + "ff".repeat(30) + "7f", "f6" + "ff".repeat(30) + "7f"]) {
+  // An X25519 u-coordinate at or above p is a second spelling of u - p. u = p + 9 is the base point
+  // u = 9, a perfectly valid key under a second string: the canonical-field-element rule is its ONLY
+  // barrier, so it runs first. u = p (u = 0) is refused by the low-order trial as well and stays a plain
+  // negative test.
+  for (const hexKey of ["f6" + "ff".repeat(30) + "7f", "ed" + "ff".repeat(30) + "7f"]) {
     const big = rosterDoc(world, NOW, {
       audit: { kid: "audit-example-1", hpkePublicKey: Buffer.concat([Buffer.from("302a300506032b656e032100", "hex"), Buffer.from(hexKey, "hex")]).toString("base64") },
     });
@@ -822,4 +824,59 @@ test("K4 — a quorum of 2 refuses the boot itself (the engine's own re-check, K
   const world = newWorld();
   const r = loadPinnedTrust(onDisk(world, rosterDoc(world, NOW, { quorum: { HIGH: 2 } })).input);
   refusedWith(r, "QUORUM_UNSUPPORTED");
+});
+
+test("K13 lock takeover — two boots that both find the same dead holder: exactly one takes the lock (the other is STATE_LOCKED)", () => {
+  const world = newWorld();
+  const disk = onDisk(world, rosterDoc(world, NOW, { rosterVersion: 4 }));
+  const v5 = writeRoster(disk.dir, rosterDoc(world, NOW, { rosterVersion: 5 }), "roster-v5.json");
+  const lockPath = `${disk.keyFile}.roster-state.lock`;
+  writeFileSync(lockPath, "424242\n", { mode: 0o600 });
+  // B has read the dead holder; before B acts, A also finds it dead, takes it over and creates its own.
+  let first: ReturnType<typeof loadPinnedTrust> | null = null;
+  const second = loadPinnedTrust({
+    ...disk.input,
+    isProcessAlive: () => {
+      first = loadPinnedTrust({ ...disk.input, rosterFile: v5, isProcessAlive: () => false });
+      return false;
+    },
+  });
+  const a = first as ReturnType<typeof loadPinnedTrust> | null;
+  assert.ok(a !== null, "fixture: the interleaved boot ran");
+  assert.equal(Boolean(a.ok && second.ok), false, "consequence: two boots must never both hold the high-water lock");
+  booted(a);
+  refusedWith(second, "STATE_LOCKED");
+  assert.equal(a.commitState(), null);
+  assert.equal(existsSync(lockPath), false, "the holder released its own lock");
+});
+
+test("K13 lock release — a boot releases only the lock file it created, never another boot's", () => {
+  const world = newWorld();
+  const disk = onDisk(world, rosterDoc(world, NOW));
+  const lockPath = `${disk.keyFile}.roster-state.lock`;
+  const boot = loadPinnedTrust(disk.input);
+  booted(boot);
+  // The path now names someone else's lock (an administrator replaced it, or a takeover race).
+  rmSync(lockPath);
+  writeFileSync(lockPath, "31337\n", { mode: 0o600 });
+  boot.release();
+  assert.equal(existsSync(lockPath), true, "consequence: another boot's lock must survive this boot's release");
+  assert.equal(readPrivate(lockPath).text, "31337\n");
+  rmSync(lockPath);
+});
+
+test("stage 11 — a key directory the gate cannot write is STATE_DIR_NOT_WRITABLE, not a lock someone must remove", { skip: process.geteuid?.() === 0 ? "root ignores directory permissions" : false }, () => {
+  const world = newWorld();
+  const disk = onDisk(world, rosterDoc(world, NOW));
+  const keyDir = join(disk.dir, "keys");
+  mkdirSync(keyDir);
+  const keyFile = writeKeyFile(keyDir, world.gate);
+  chmodSync(keyDir, 0o555);
+  try {
+    const r = loadPinnedTrust({ ...disk.input, keyFile });
+    refusedWith(r, "STATE_DIR_NOT_WRITABLE");
+    assert.match(r.ok ? "" : r.detail, /must be writable by the gate/);
+  } finally {
+    chmodSync(keyDir, 0o755);
+  }
 });

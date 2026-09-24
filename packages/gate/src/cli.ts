@@ -516,25 +516,29 @@ async function holdAndRun(args: string[]): Promise<number> {
 }
 
 /**
- * The subcommands this binary knows, as a closed table: a handler returns an exit code, or `null` when
- * the process keeps running (a listening gate). Nothing outside the table starts anything.
+ * The subcommands this binary knows, as a closed switch: each case returns an exit code, or `null` when
+ * the process keeps running (a listening gate). Anything else exits 2 and starts nothing.
  */
-type Subcommand = (rest: string[]) => Promise<number | null>;
-const SUBCOMMANDS: Readonly<Record<string, Subcommand>> = Object.freeze(Object.assign(Object.create(null) as Record<string, Subcommand>, {
-  serve: (rest: string[]) => serve(rest),
-  "hold-and-run": (rest: string[]) => holdAndRun(rest),
-  keygen: async (rest: string[]) => keygen(rest),
-  "roster-check": async (rest: string[]) => rosterCheck(rest),
-}));
-
 async function main(): Promise<void> {
   const [, , sub = "serve", ...rest] = process.argv;
-  const handler = Object.prototype.hasOwnProperty.call(SUBCOMMANDS, sub) ? SUBCOMMANDS[sub] : undefined;
-  if (handler === undefined) {
-    process.stderr.write(`noa-gate: UNKNOWN_SUBCOMMAND: ${JSON.stringify(sub)}; known: ${Object.keys(SUBCOMMANDS).join(", ")}\n`);
-    process.exit(2);
+  let exitCode: number | null;
+  switch (sub) {
+    case "serve":
+      exitCode = await serve(rest);
+      break;
+    case "hold-and-run":
+      exitCode = await holdAndRun(rest);
+      break;
+    case "keygen":
+      exitCode = keygen(rest);
+      break;
+    case "roster-check":
+      exitCode = rosterCheck(rest);
+      break;
+    default:
+      process.stderr.write(`noa-gate: UNKNOWN_SUBCOMMAND: ${JSON.stringify(sub)}; known: serve, hold-and-run, keygen, roster-check\n`);
+      process.exit(2);
   }
-  const exitCode = await handler(rest);
   if (exitCode !== null) process.exit(exitCode);
 }
 

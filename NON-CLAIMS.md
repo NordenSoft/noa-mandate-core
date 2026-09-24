@@ -489,6 +489,13 @@ uncertainties for holds and grants it authorized earlier, under the same gate ke
 after the roster's `expiresAt` shows what was recorded; it does not show that the roster was current,
 and no grant, reservation or new hold is ever signed then.
 
+### NC-S8.18 — A rotation to a new epoch strands the old epoch's reserved grants
+
+Recording still requires the hold's envelope to carry this trust root's epoch. With a durable store, a
+roster rotation to a new key-manifest epoch therefore means grants reserved under the old epoch can
+no longer be recorded: a report or uncertainty for them is refused (`EPOCH_CHANGED`), and their
+executions stay unrecorded. Drain or report outstanding grants before rotating the epoch.
+
 ## 7. Changing this document
 
 Removing or weakening a non-claim creates a stronger claim. Such a change requires an exact normative

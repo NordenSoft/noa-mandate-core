@@ -60,8 +60,8 @@ All notable changes to `noa-receipt` are documented here. The format follows
   (`noa.gate-roster/1`, `docs/gate-pinned-trust.md`): no single-use enforcement at the effect, no
   signed or remotely revocable roster, limited rollback detection, no clock-rollback detection, a
   quorum of exactly 1, kid-only audience and recipient checks, no protected posture for a gate running
-  as root, records signed after roster expiry that are not authority, and no conformance claim for the
-  roster format. The gate itself (`noa-gate`)
+  as root, records signed after roster expiry that are not authority, reserved grants stranded by an
+  epoch rotation, and no conformance claim for the roster format. The gate itself (`noa-gate`)
   is not part of this package; the entry records the change to a document this package ships.
 - Historical prefix results use `classification: PARTIAL` with
   `dimensions.completeness: PREFIX_ANCHORED`. This pair is the migration target for the earlier
