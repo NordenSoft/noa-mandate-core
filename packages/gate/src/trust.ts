@@ -22,7 +22,7 @@ import { SIGNING_KEY_LIFECYCLE_SPEC, isHex64, intrinsics, type SigningKeyLifecyc
 import { loadOrCreateKeyFile } from "noa-mcp-adapter-core";
 import { describeThrown, thrownCode } from "noa-mcp-adapter-core/safe-throw";
 import { encodeDocument } from "./bytes.js";
-import { readPinnedFile, takeOverStaleLock, tryCreateLock, writeFileAtomic } from "./pinned-file.js";
+import { readPinnedFile, replaceDeadLock, tryCreateLock, writeFileAtomic, type LockAttempt } from "./pinned-file.js";
 import {
   checkRosterClock,
   isRosterId,
@@ -592,6 +592,7 @@ export type PinnedBootCode =
   | "ROSTER_EXEC_SIGNER_MISMATCH"
   | "PINNED_ROOT_GATE"
   | "STATE_LOCKED"
+  | "STATE_TAKEOVER_STALE"
   | "STATE_DIR_NOT_WRITABLE"
   | "STATE_FILE_UNSAFE"
   | "STATE_FILE_CORRUPT"
@@ -882,7 +883,7 @@ export function loadPinnedRoster(input: LoadPinnedRosterInput): PinnedRoster | P
  *
  *    9 key file GATE_KEY_FILE_MISSING · GATE_KEY_FILE_UNSAFE · GATE_KEY_INCONSISTENT · GATE_KEY_NOT_PINNED
  *   10 signer   ROSTER_EXEC_SIGNER_MISMATCH
- *   11 state    STATE_LOCKED · STATE_FILE_UNSAFE · STATE_FILE_CORRUPT · ROSTER_ROLLBACK · ROSTER_EQUIVOCATION
+ *   11 state    STATE_LOCKED · STATE_TAKEOVER_STALE · STATE_FILE_UNSAFE · STATE_FILE_CORRUPT · ROSTER_ROLLBACK · ROSTER_EQUIVOCATION
  *               (and, from `commitState`, the same comparison again plus STATE_FILE_WRITE_FAILED)
  *
  * There is no retry and no fallback: a caller that receives a refusal must not start a gate.
@@ -1021,27 +1022,46 @@ function processAlive(pid: number): boolean {
 
 /**
  * The high-water lock: exclusive create. A lock whose holder is alive is STATE_LOCKED. A lock whose
- * holder is dead is taken over ONCE by identity (`takeOverStaleLock`) and the create retried; if the
- * lock changed hands meanwhile, STATE_LOCKED. A directory the gate cannot create files in is
+ * holder is dead is taken over only under a second exclusive file, the takeover mutex
+ * `<lock>.takeover`, so takeovers never run concurrently: under it the lock is read again and replaced
+ * only if it is still exactly the dead holder's lock (`replaceDeadLock`); otherwise STATE_LOCKED. A
+ * mutex held by a live process is STATE_LOCKED (another gate is taking over; retry later). A mutex left
+ * by a dead process, or naming no readable holder, is never removed automatically: STATE_TAKEOVER_STALE,
+ * an administrator removes it. Nothing here ever moves or removes a lock that was not verified dead.
+ * Liveness is a pid probe, so every gate using this key file must share one pid namespace (the key
+ * file's directory is never shared across containers). A directory the gate cannot create files in is
  * STATE_DIR_NOT_WRITABLE: the lock and the state file live beside the key file, so its directory must be
  * writable by the gate.
  */
 function acquireStateLock(lockPath: string, isAlive: (pid: number) => boolean): { ok: true; release: () => void } | PinnedRefusal {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const a = tryCreateLock(lockPath);
-    if (a.ok) return { ok: true, release: () => a.release() };
-    if (a.kind === "unwritable") {
-      return bootRefusal("STATE_DIR_NOT_WRITABLE", `${a.detail}; the key file's directory must be writable by the gate (the high-water state and its lock live there)`);
-    }
-    if (a.holderPid === null || a.holderIdentity === null) {
-      return bootRefusal("STATE_LOCKED", `${a.detail} and names no readable holder; an administrator must inspect and remove it`);
-    }
-    if (isAlive(a.holderPid)) {
-      return bootRefusal("STATE_LOCKED", `the roster high-water state is locked by live process ${a.holderPid}; another gate is starting on this key file`);
-    }
-    if (attempt === 0 && takeOverStaleLock(lockPath, a.holderIdentity) === "changed") {
-      return bootRefusal("STATE_LOCKED", `${JSON.stringify(lockPath)} changed hands while its dead holder's lock was being taken over; another gate is starting on this key file`);
-    }
+  const notWritable = (detail: string): PinnedRefusal =>
+    bootRefusal("STATE_DIR_NOT_WRITABLE", `${detail}; the key file's directory must be writable by the gate (the high-water state and its lock live there)`);
+  const a = tryCreateLock(lockPath);
+  if (a.ok) return { ok: true, release: () => a.release() };
+  if (a.kind === "unwritable") return notWritable(a.detail);
+  if (a.holderPid === null || a.holderIdentity === null) {
+    return bootRefusal("STATE_LOCKED", `${a.detail} and names no readable holder; an administrator must inspect and remove it`);
   }
-  return bootRefusal("STATE_LOCKED", `${JSON.stringify(lockPath)}: a stale lock could not be replaced`);
+  if (isAlive(a.holderPid)) {
+    return bootRefusal("STATE_LOCKED", `the roster high-water state is locked by live process ${a.holderPid}; another gate is starting on this key file`);
+  }
+
+  // The holder is dead. Serialize the takeover.
+  const mutexPath = `${lockPath}.takeover`;
+  const mutex: LockAttempt = tryCreateLock(mutexPath);
+  if (!mutex.ok) {
+    if (mutex.kind === "unwritable") return notWritable(mutex.detail);
+    if (mutex.holderPid !== null && isAlive(mutex.holderPid)) {
+      return bootRefusal("STATE_LOCKED", `${JSON.stringify(lockPath)}'s dead holder is being taken over by live process ${mutex.holderPid}; retry once it has finished`);
+    }
+    return bootRefusal("STATE_TAKEOVER_STALE", `${JSON.stringify(mutexPath)} was left by a process that is no longer running (or names no readable holder); it is never removed automatically: an administrator must confirm that no gate is starting on this key file and remove it`);
+  }
+  try {
+    const r = replaceDeadLock(lockPath, a.holderIdentity);
+    if (r.ok) return { ok: true, release: () => r.release() };
+    if (r.kind === "unwritable") return notWritable(r.detail);
+    return bootRefusal("STATE_LOCKED", `${JSON.stringify(lockPath)} changed hands while its dead holder's lock was being taken over; another gate is starting on this key file`);
+  } finally {
+    if (mutex.ok) mutex.release();
+  }
 }

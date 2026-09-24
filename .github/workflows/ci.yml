@@ -536,7 +536,8 @@ jobs:
         # each entry as the runner does, and fails in seconds; its selftest plants rotted, ambiguous,
         # no-op, missing-file, also[], partner, self-cancelling, symlinked, non-regular, companion and
         # setup-integrity defects and requires each to fail naming exactly the planted entries.
-        run: npm run lint:knockout-anchors
+        # --ignore-scripts: npm runs no pre/post hook around it (the knockout selftest also refuses one).
+        run: npm run --ignore-scripts lint:knockout-anchors
       - name: L11 inert-before-write on trusted decision paths
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # BLOCKING, and it runs its own selftest first. L2 and L8 model dispatch as a CALL or a READ

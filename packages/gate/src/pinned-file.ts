@@ -36,7 +36,6 @@ import {
   constants as fsConstants,
   fstatSync,
   fsyncSync,
-  linkSync,
   lstatSync,
   openSync,
   readlinkSync,
@@ -447,39 +446,32 @@ function readLockHolder(lockPath: string): { pid: number; identity: LockIdentity
 }
 
 /**
- * Take over a lock whose holder was found DEAD, atomically: rename it aside under a unique name, then
- * check that the file now aside IS the one that was read (same device, inode AND bytes). Only then is
- * it deleted. If it is not — another boot replaced the stale lock with its own live one between our
- * read and our rename, possibly under the stale lock's recycled inode number — it is put back (a hard
- * link, which never overwrites a newer lock) and the takeover reports "changed". Removing the stale
- * lock by PATH instead let two boots that both saw the dead holder each delete the other's fresh lock
- * and both proceed. Never throws.
+ * Replace a DEAD holder's lock. The caller must hold the takeover mutex (`<lock>.takeover`, created
+ * with `tryCreateLock`), so takeovers never run concurrently. Under it the lock is read again and
+ * removed only if it is still exactly the lock whose holder was found dead (device, inode AND bytes);
+ * then this caller creates its own lock with `O_EXCL`. Nothing is ever renamed aside or put back: a
+ * lock that has not been verified dead is never moved or removed, because moving a live lock even for
+ * an instant let a third boot create a lock in the vacant path while the first still held its own.
+ *
+ * "changed": the path names another lock now (a live one, or one that replaced the dead one). After
+ * the removal, a failed create means another boot created a lock in the meantime, legitimately, through
+ * the ordinary exclusive create: the caller must refuse. Never throws.
  */
-export function takeOverStaleLock(lockPath: string, expected: LockIdentity): "taken" | "gone" | "changed" {
-  const aside = `${lockPath}.stale-${randomBytes(8).toString("hex")}`;
-  try {
-    renameSync(lockPath, aside);
-  } catch (err) {
-    return thrownCode(err) === "ENOENT" ? "gone" : "changed";
-  }
-  const moved = readLockIdentity(aside);
-  if (moved !== null && sameLock(expected, moved)) {
-    try {
-      unlinkSync(aside);
-    } catch {
-      // the stale lock is already out of the way under its unique name
+export type DeadLockReplacement = LockAttempt | { readonly ok: false; readonly kind: "changed"; readonly detail: string };
+
+export function replaceDeadLock(lockPath: string, dead: LockIdentity): DeadLockReplacement {
+  const now = readLockIdentity(lockPath);
+  if (now !== null) {
+    if (!sameLock(dead, now)) {
+      return { ok: false, kind: "changed", detail: `${JSON.stringify(lockPath)} is no longer the dead holder's lock` };
     }
-    return "taken";
+    try {
+      unlinkSync(lockPath);
+    } catch (err) {
+      if (thrownCode(err) !== "ENOENT") {
+        return { ok: false, kind: "unwritable", detail: `${JSON.stringify(lockPath)} could not be removed (${describeThrown(err)})` };
+      }
+    }
   }
-  try {
-    linkSync(aside, lockPath);
-  } catch {
-    // a newer lock already holds the path; the directory stays locked by it
-  }
-  try {
-    unlinkSync(aside);
-  } catch {
-    // nothing further to undo
-  }
-  return "changed";
+  return tryCreateLock(lockPath);
 }

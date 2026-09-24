@@ -1259,12 +1259,15 @@ check("the node-options pin is the only thing keeping a mixed-case spelling out 
 });
 
 // ── THE ONE `lint:knockout*` STEP THAT IS NOT A SWEEP ───────────────────────────────────────────
-// `npm run lint:knockout-anchors` shares the `lint:knockout` prefix but measures nothing: it runs the
-// anchor lint's selftest and the anchor lint, which import the registry as a MODULE (so this
-// script's DIRECT_ENTRY sweep never starts) and read source files only. It is pinned by its EXACT
-// step text, exactly once, in the `test` job; its package script and both files it runs are pinned
-// so that none of them can start a sweep. Every other `lint:knockout` launch is the sweep.
-const ANCHOR_LINT_RUN = "run: npm run lint:knockout-anchors";
+// `npm run --ignore-scripts lint:knockout-anchors` shares the `lint:knockout` prefix but measures
+// nothing: it runs the anchor lint's selftest and the anchor lint, which import the registry as a
+// MODULE (so this script's DIRECT_ENTRY sweep never starts) and read source files only. It is pinned
+// by its EXACT step text, exactly once, in the `test` job; `--ignore-scripts` makes npm skip any
+// `pre`/`post` hook (npm 10.9.7, measured), and the pin also refuses such hooks outright; its package
+// script and both files it runs are pinned so that none of them can start a sweep. A sweep launch is
+// any `run:` line naming the `lint:knockout` script as a whole token.
+const ANCHOR_LINT_RUN = "run: npm run --ignore-scripts lint:knockout-anchors";
+const SWEEP_SCRIPT_TOKEN = /(?:^|\s)lint:knockout(?=\s|$)/;
 const ANCHOR_LINT_SCRIPT = "node scripts/lint-knockout-anchors.selftest.mjs && node scripts/lint-knockout-anchors.mjs";
 function anchorLintRuns(ciText) {
   const found = [];
@@ -1278,29 +1281,52 @@ function anchorLintRuns(ciText) {
   });
   return found;
 }
-function assertAnchorLintLaunchesNoSweep(repo) {
-  const runs = anchorLintRuns(fs.readFileSync(path.join(repo, ".github/workflows/ci.yml"), "utf8"));
+function anchorLintInputs(repo) {
+  const read = (rel) => fs.readFileSync(path.join(repo, rel), "utf8");
+  return {
+    ciText: read(".github/workflows/ci.yml"),
+    scripts: JSON.parse(read("package.json")).scripts,
+    lint: read("scripts/lint-knockout-anchors.mjs"),
+    selftest: read("scripts/lint-knockout-anchors.selftest.mjs"),
+  };
+}
+function assertAnchorLintLaunchesNoSweep(inputs) {
+  const runs = anchorLintRuns(inputs.ciText);
   assert.deepEqual(runs.map((run) => [run.job, run.text]), [["test", ANCHOR_LINT_RUN]],
     `expected exactly one anchor-lint step, \`${ANCHOR_LINT_RUN}\` in the test job, found ${JSON.stringify(runs)}`);
-  const scripts = JSON.parse(fs.readFileSync(path.join(repo, "package.json"), "utf8")).scripts;
-  assert.equal(scripts["lint:knockout-anchors"], ANCHOR_LINT_SCRIPT,
+  assert.equal(inputs.scripts["lint:knockout-anchors"], ANCHOR_LINT_SCRIPT,
     "the anchor-lint package script changed; it may run only the anchor lint's selftest and the anchor lint");
+  for (const hook of ["prelint:knockout-anchors", "postlint:knockout-anchors"]) {
+    assert.equal(Object.hasOwn(inputs.scripts, hook), false, `${hook} would run as a second script under the pinned step`);
+  }
   const IMPORT = 'import { knockoutRegistrySnapshot } from "./lint-control-knockout.mjs";';
-  for (const file of ["scripts/lint-knockout-anchors.mjs", "scripts/lint-knockout-anchors.selftest.mjs"]) {
-    const text = fs.readFileSync(path.join(repo, file), "utf8");
+  for (const [file, text] of [["scripts/lint-knockout-anchors.mjs", inputs.lint], ["scripts/lint-knockout-anchors.selftest.mjs", inputs.selftest]]) {
     const mentions = text.split("\n").filter((line) => line.includes("lint-control-knockout"));
     assert.deepEqual(mentions, [IMPORT], `${file} reaches lint-control-knockout.mjs other than as a module import`);
     assert.doesNotMatch(text, /["'`]--shard/, `${file} passes a shard selector`);
     assert.doesNotMatch(text, /lint:knockout["'` ]/, `${file} launches the knockout sweep script`);
   }
   // The selftest's only child is the anchor lint itself; the lint starts no child at all.
-  const lint = fs.readFileSync(path.join(repo, "scripts/lint-knockout-anchors.mjs"), "utf8");
-  assert.doesNotMatch(lint, /child_process/, "the anchor lint starts a child process");
-  const selftest = fs.readFileSync(path.join(repo, "scripts/lint-knockout-anchors.selftest.mjs"), "utf8");
-  assert.deepEqual(selftest.match(/spawnSync\([^)]*/g), ["spawnSync(process.execPath, [LINT, \"--registry-json\", file, ...extraArgs], { cwd: ROOT, encoding: \"utf8\" }"],
+  assert.doesNotMatch(inputs.lint, /child_process/, "the anchor lint starts a child process");
+  assert.deepEqual(inputs.selftest.match(/spawnSync\([^)]*/g), ["spawnSync(process.execPath, [LINT, \"--registry-json\", file, ...extraArgs], { cwd: ROOT, encoding: \"utf8\" }"],
     "the anchor-lint selftest starts a child other than the anchor lint");
-  assert.match(selftest, /^const LINT = path\.join\(ROOT, "scripts", "lint-knockout-anchors\.mjs"\);$/m,
+  assert.match(inputs.selftest, /^const LINT = path\.join\(ROOT, "scripts", "lint-knockout-anchors\.mjs"\);$/m,
     "the anchor-lint selftest's child is not the anchor lint");
+}
+/** ANTI-VACUITY for the pin above: every way the pinned step could still start a sweep is refused. */
+function assertAnchorLintPinBites(inputs) {
+  // npm runs `pre<name>` and `post<name>` around `npm run <name>`: a hook is a second script under the
+  // pinned step, so a planted hook that starts the sweep must be refused.
+  for (const hook of ["prelint:knockout-anchors", "postlint:knockout-anchors"]) {
+    const planted = { ...inputs, scripts: { ...inputs.scripts, [hook]: "node scripts/lint-control-knockout.mjs" } };
+    assert.throws(() => assertAnchorLintLaunchesNoSweep(planted), { name: "AssertionError" },
+      `a ${hook} script that starts the sweep was admitted by the anchor-lint pin`);
+  }
+  // Without `--ignore-scripts` npm would run such a hook: the step text is pinned WITH the flag.
+  const unflagged = { ...inputs, ciText: inputs.ciText.replace(ANCHOR_LINT_RUN, "run: npm run lint:knockout-anchors") };
+  assert.notEqual(unflagged.ciText, inputs.ciText, "the anchor-lint step is absent, so the unflagged plant is vacuous");
+  assert.throws(() => assertAnchorLintLaunchesNoSweep(unflagged), { name: "AssertionError" },
+    "an anchor-lint step without --ignore-scripts was admitted by the anchor-lint pin");
 }
 
 check("the sole knockout launch is sharded by GitHub's own job index, and nothing else is", () => {
@@ -1319,12 +1345,14 @@ check("the sole knockout launch is sharded by GitHub's own job index, and nothin
   for (const file of files) {
     fs.readFileSync(path.join(REPO, file), "utf8").split("\n").forEach((line, index) => {
       // The anchor-lint step is excluded by its EXACT text only, and pinned below as launching no sweep.
-      if (line.trimStart().startsWith("run: ") && line.includes("npm run lint:knockout") && line.trim() !== ANCHOR_LINT_RUN) {
+      if (line.trimStart().startsWith("run: ") && line.includes("npm") && SWEEP_SCRIPT_TOKEN.test(line) && line.trim() !== ANCHOR_LINT_RUN) {
         sweepLaunches.push({ file, line: index + 1, text: line.trimEnd() });
       }
     });
   }
-  assertAnchorLintLaunchesNoSweep(REPO);
+  const anchorInputs = anchorLintInputs(REPO);
+  assertAnchorLintLaunchesNoSweep(anchorInputs);
+  assertAnchorLintPinBites(anchorInputs);
   assert.equal(sweepLaunches.length, 1,
     `expected exactly one knockout sweep launch, found ${sweepLaunches.length}: ${JSON.stringify(sweepLaunches.map((l) => `${l.file}:${l.line}`))}`);
 
@@ -2138,9 +2166,11 @@ check("the proof and knockout consumers prepare through the ONE runner before th
   // The anchor-lint step is not a knockout consumer (it launches no sweep and needs no prepared tree);
   // it is excluded by its exact command in its one job, and pinned by assertAnchorLintLaunchesNoSweep.
   const consumers = commands.filter(({ job, text }) =>
-    /node scripts\/lib\/proof-resolve\.selftest\.mjs|node scripts\/lint-resolver-parity\.mjs|npm run lint:knockout/.test(text) &&
+    (/node scripts\/lib\/proof-resolve\.selftest\.mjs|node scripts\/lint-resolver-parity\.mjs/.test(text) || SWEEP_SCRIPT_TOKEN.test(text)) &&
     !(job === "test" && `run: ${text}` === ANCHOR_LINT_RUN));
-  assertAnchorLintLaunchesNoSweep(REPO);
+  const anchorInputs = anchorLintInputs(REPO);
+  assertAnchorLintLaunchesNoSweep(anchorInputs);
+  assertAnchorLintPinBites(anchorInputs);
 
   // ONE CALL PER JOB THAT NEEDS A PREPARED TREE, and both of them call the same line.
   const byJob = new Map();

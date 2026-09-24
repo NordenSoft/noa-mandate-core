@@ -1873,6 +1873,18 @@
     "GATE-LOCK-IDENTITY-BYTES": {
       "file": "packages/gate/test/pinned-roster.test.ts",
       "marker": "[PROOF:GATE-LOCK-IDENTITY-BYTES]"
+    },
+    "GATE-LOCK-TAKEOVER-RECHECK": {
+      "file": "packages/gate/test/pinned-lock-interleave.test.ts",
+      "marker": "[PROOF:GATE-LOCK-TAKEOVER-RECHECK]"
+    },
+    "GATE-LOCK-TAKEOVER-SERIALIZED": {
+      "file": "packages/gate/test/pinned-lock-interleave.test.ts",
+      "marker": "[PROOF:GATE-LOCK-TAKEOVER-SERIALIZED]"
+    },
+    "GATE-LOCK-STALE-MUTEX": {
+      "file": "packages/gate/test/pinned-lock-interleave.test.ts",
+      "marker": "[PROOF:GATE-LOCK-STALE-MUTEX]"
     }
   },
   "exceptions": {

@@ -99,7 +99,8 @@ All notable changes to `noa-receipt` are documented here. The format follows
   signed or remotely revocable roster, limited rollback detection, no clock-rollback detection, a
   quorum of exactly 1, kid-only audience and recipient checks, no protected posture for a gate running
   as root, records signed after roster expiry that are not authority, reserved grants stranded by an
-  epoch rotation, and no conformance claim for the roster format. The gate itself (`noa-gate`)
+  epoch rotation, the one-pid-namespace assumption of the high-water lock, and no conformance claim for
+  the roster format. The gate itself (`noa-gate`)
   is not part of this package; the entry records the change to a document this package ships.
 - **Behaviour change (refusal labels only): an authentic signature by a lifecycle-retired key is now
   `KEY_RETIRED`, not `TAMPERED`, on the default `verifyChain` path, and the CLI exits `9`, not `2`.**

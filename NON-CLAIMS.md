@@ -577,6 +577,15 @@ roster rotation to a new key-manifest epoch therefore means grants reserved unde
 no longer be recorded: a report or uncertainty for them is refused (`EPOCH_CHANGED`), and their
 executions stay unrecorded. Drain or report outstanding grants before rotating the epoch.
 
+### NC-S8.19 — The high-water lock assumes one pid namespace
+
+Whether a lock's (or a takeover mutex's) holder is alive is decided by a signal-0 probe of the pid
+recorded in the file. Two gates in different pid namespaces (separate containers or hosts sharing the
+key file's directory) cannot see each other's pids, so one can find the other's live lock "dead" and
+take it over. The pinned mode makes no claim for a key-file directory shared that way. A takeover
+mutex left by a process that died is not removed automatically (`STATE_TAKEOVER_STALE`): liveness is
+restored by an administrator, not by the gate.
+
 ## 7. Changing this document
 
 Removing or weakening a non-claim creates a stronger claim. Such a change requires an exact normative
