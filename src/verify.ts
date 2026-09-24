@@ -889,8 +889,12 @@ function verifyParsedChain(receipts: unknown, o: InertVerifyOptions): VerifyResu
       // (which agent.id signed); this states the TRUNCATION consequence, which is the sharper
       // one and was previously unstated at runtime. Additive: no verdict, no tailChecked value,
       // and no existing warning changes.
-      arrayPush(warnings,
-        "checkpoint authenticated but no identityManifest supplied: the tail check is KID-LEVEL — any keyring-trusted key can mint a checkpoint over any head, so a co-trusted key holder can truncate the tail and still produce tailChecked:true (supply an identityManifest to bind checkpoint authority to the chain opener)",
+      //
+      // `retiredSeq` is final here, so a run that will end KEY_RETIRED (tailChecked false) gets the
+      // same caveat without the sentence about producing tailChecked:true, which it never does.
+      arrayPush(warnings, retiredSeq >= 0
+        ? "checkpoint authenticated but no identityManifest supplied: checkpoint authority is KID-LEVEL — any keyring-trusted key can mint a checkpoint over any head, so this checkpoint does not show that the chain opener certified the tail (supply an identityManifest to bind checkpoint authority to the chain opener)"
+        : "checkpoint authenticated but no identityManifest supplied: the tail check is KID-LEVEL — any keyring-trusted key can mint a checkpoint over any head, so a co-trusted key holder can truncate the tail and still produce tailChecked:true (supply an identityManifest to bind checkpoint authority to the chain opener)",
       );
     }
   } else {
@@ -910,7 +914,11 @@ function verifyParsedChain(receipts: unknown, o: InertVerifyOptions): VerifyResu
     arrayPush(warnings, "no keyring supplied: signatures were NOT authenticated (status UNVERIFIED, not VALID)");
   }
   if (!haveManifest) {
-    arrayPush(warnings, "no identityManifest supplied: attribution is kid-level — a VALID result proves a keyring-trusted key signed, NOT which agent.id (cross-agent impersonation undefended in a multi-key keyring)");
+    // A KEY_RETIRED run is not VALID, so its copy of this caveat speaks of the authenticated
+    // signature rather than of "a VALID result"; the VALID/UNVERIFIED text is unchanged.
+    arrayPush(warnings, retiredSeq >= 0
+      ? "no identityManifest supplied: attribution is kid-level — an authenticated signature proves a keyring-trusted key signed, NOT which agent.id (cross-agent impersonation undefended in a multi-key keyring)"
+      : "no identityManifest supplied: attribution is kid-level — a VALID result proves a keyring-trusted key signed, NOT which agent.id (cross-agent impersonation undefended in a multi-key keyring)");
   } else if (!haveKeyring) {
     arrayPush(warnings, "identityManifest supplied but no keyring: identity NOT bound — signatures are unauthenticated, so the (agent.id, kid) pairing was not enforced (status stays UNVERIFIED, never UNTRUSTED)");
   }

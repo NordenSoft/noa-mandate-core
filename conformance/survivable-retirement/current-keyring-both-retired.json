@@ -5,8 +5,8 @@
       "publicKey": "MCowBQYDK2VwAyEA0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
       "retiredAt": "2026-01-02T00:00:00.000000002Z"
     },
-    "g2-checkpoint-current": {
-      "publicKey": "MCowBQYDK2VwAyEAoJql9HpnWYAv+VX43C0qFKXJnSO+l/hkEn/5ODRVpPA=",
+    "g2-current-use-witness": {
+      "publicKey": "MCowBQYDK2VwAyEAxoImN8fTEOxXYnvgC6JZ0lN0n0qvZERwz/vlOjX3MkI=",
       "retiredAt": "2026-01-02T00:00:00.000000002Z"
     }
   }

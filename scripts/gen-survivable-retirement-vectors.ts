@@ -10,10 +10,10 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildCheckpoint, buildReceipt, type BuildInput, type Signer } from "../src/builder.js";
-import { checkpointHashInput } from "../src/canonicalize.js";
+import { checkpointHashInput, receiptHashInput } from "../src/canonicalize.js";
 import { sha256Prefixed } from "../src/hash.js";
 import { signEd25519 } from "../src/keys.js";
-import { signingMessage, CHECKPOINT_SIG_DOMAIN } from "../src/signing.js";
+import { signingMessage, CHECKPOINT_SIG_DOMAIN, RECEIPT_SIG_DOMAIN } from "../src/signing.js";
 import {
   HISTORICAL_VERIFICATION_SPEC,
   verifyChain,
@@ -41,11 +41,14 @@ const receiptKey = keyFromSeed("g2-receipt-retired", "11".repeat(32));
 const witnessKey = keyFromSeed("g2-checkpoint-current", "22".repeat(32));
 const wrongKey = keyFromSeed("g2-wrong-root", "33".repeat(32));
 // Current-use corpus only: a second receipt signer that stays current, so a chain can place its
-// FIRST retired signature somewhere other than seq 0.
+// FIRST retired signature somewhere other than seq 0, and a checkpoint signer whose kid says nothing
+// about its state (the same key is retired in one current-use root and current in another).
 const currentReceiptKey = keyFromSeed("g2-receipt-current", "44".repeat(32));
+const currentUseWitnessKey = keyFromSeed("g2-current-use-witness", "55".repeat(32));
 const receiptSigner: Signer = { kid: receiptKey.kid, privateKey: receiptKey.privateKey };
 const witnessSigner: Signer = { kid: witnessKey.kid, privateKey: witnessKey.privateKey };
 const currentReceiptSigner: Signer = { kid: currentReceiptKey.kid, privateKey: currentReceiptKey.privateKey };
+const currentUseWitnessSigner: Signer = { kid: currentUseWitnessKey.kid, privateKey: currentUseWitnessKey.privateKey };
 
 function input(seq: number): BuildInput {
   return {
@@ -142,6 +145,22 @@ for (let seq = 0; seq < 3; seq++) {
 }
 // A receipt that NAMES the retired kid but carries another key's signature: intact hash, forged signature.
 const forgedRetiredKid = [buildReceipt(input(0), null, { kid: receiptKey.kid, privateKey: wrongKey.privateKey })];
+// Retired seq 0-1 followed by a seq 2 from a CURRENT signer (another agent.id) that fails one later
+// per-receipt phase each: identity binding (via a manifest), signature, or linkage. Each pins that an
+// earlier retired finding never stops the walk before a later receipt's own checks.
+const tailInput: BuildInput = { ...input(2), id: "g2-tail-receipt-2", agent: { ...input(2).agent, id: "g2-current-agent" } };
+const tailHonest = buildReceipt(tailInput, chain[1]!, currentReceiptSigner);
+const tailForged = buildReceipt(tailInput, chain[1]!, { kid: currentReceiptKey.kid, privateKey: wrongKey.privateKey });
+const tailRelinked = structuredClone(tailHonest);
+tailRelinked.chain.prevHash = chain[0]!.chain.hash;
+tailRelinked.chain.hash = sha256Prefixed(receiptHashInput(tailRelinked));
+tailRelinked.sig.value = signEd25519(currentReceiptKey.privateKey, signingMessage(RECEIPT_SIG_DOMAIN, receiptHashInput(tailRelinked)));
+// Current-use checkpoints, signed by the neutrally named current-use witness key.
+const currentUseHead = buildCheckpoint(chain[2]!, BEFORE_RETIREMENT, currentUseWitnessSigner);
+const currentUsePrefixHead = buildCheckpoint(chain[1]!, BEFORE_RETIREMENT, currentUseWitnessSigner);
+const currentUseTruncated = buildCheckpoint(chain[0]!, BEFORE_RETIREMENT, currentUseWitnessSigner);
+const currentUseForged = structuredClone(currentUseHead);
+currentUseForged.sig.value = Buffer.alloc(64).toString("base64");
 
 const receiptStatic = { [receiptKey.kid]: receiptKey.publicKey };
 const receiptRetired = lifecycle(RETIRED_AT);
@@ -193,13 +212,21 @@ write("checkpoints/conflict.json", conflict);
 write("checkpoints/forged-signature.json", forged);
 write("checkpoints/same-key-alias.json", sameKey);
 write("checkpoints/not-an-object.json", []);
+write("checkpoints/current-use-head.json", currentUseHead);
+write("checkpoints/current-use-prefix-head.json", currentUsePrefixHead);
+write("checkpoints/current-use-truncated.json", currentUseTruncated);
+write("checkpoints/current-use-forged.json", currentUseForged);
 write("chain-mixed.json", mixed);
 write("chain-forged-retired-kid.json", forgedRetiredKid);
+write("chain-retired-then-other-agent.json", [chain[0], chain[1], tailHonest]);
+write("chain-retired-then-forged.json", [chain[0], chain[1], tailForged]);
+write("chain-retired-then-relinked.json", [chain[0], chain[1], tailRelinked]);
 write("current-keyring-mixed.json", lifecycleOf([[receiptKey, RETIRED_AT], [currentReceiptKey, null]]));
-write("current-keyring-checkpoint-retired.json", lifecycleOf([[receiptKey, null], [witnessKey, RETIRED_AT]]));
-write("current-keyring-both-retired.json", lifecycleOf([[receiptKey, RETIRED_AT], [witnessKey, RETIRED_AT]]));
+write("current-keyring-receipt-retired.json", lifecycleOf([[receiptKey, RETIRED_AT], [currentUseWitnessKey, null]]));
+write("current-keyring-checkpoint-retired.json", lifecycleOf([[receiptKey, null], [currentUseWitnessKey, RETIRED_AT]]));
+write("current-keyring-both-retired.json", lifecycleOf([[receiptKey, RETIRED_AT], [currentUseWitnessKey, RETIRED_AT]]));
 write("identity-receipt-unauthorized.json", { "g2-historical-agent": [wrongKey.kid] });
-write("identity-checkpoint-unauthorized.json", { "g2-historical-agent": [receiptKey.kid] });
+write("identity-receipt-kid-only.json", { "g2-historical-agent": [receiptKey.kid] });
 
 type Availability = HistoricalVerificationDimensions["evidence"]["availability"];
 type Retirement = HistoricalVerificationDimensions["evidence"]["retirement"];
@@ -452,9 +479,12 @@ const cases: CorpusCase[] = [
 
 // ── CURRENT USE (default purpose) under the same lifecycle roots ──────────────────────────────────
 // `verifyChain` refuses every retired key. An AUTHENTIC retired signature is KEY_RETIRED (exit 9),
-// and only when nothing else is wrong: each case below pins one adjacent pair of that refusal order
+// and only when nothing else is wrong: each case below pins one pair of that refusal order
 // (KEY_RETIRED below signature/hash/linkage/checkpoint TAMPERED, below UNTRUSTED, below MALFORMED;
 // the first retired signature is the one reported; a receipt finding outranks a checkpoint finding).
+// The walk has phases, so the pairs are pinned across phases too: a retired RECEIPT against each
+// checkpoint phase (authentication, head match, opener binding) and against each LATER receipt's own
+// phases (signature, identity, linkage) — a same-step pair alone misses a phase-wise reorder.
 // `scripts/check-survivable-retirement-knockout.mjs` swaps each pair in a disposable copy of the
 // built verifier and requires the named case to turn red, so the corpus — not prose — defines it.
 interface CurrentUseExpected {
@@ -532,15 +562,15 @@ const currentUseCases: CurrentUseCase[] = [
     pins: "an authentic checkpoint by a retired key and nothing else wrong -> KEY_RETIRED (checkpoint)",
     receipts: "chain.json",
     keyring: "current-keyring-checkpoint-retired.json",
-    checkpoint: "checkpoints/exact-before-retirement.json",
-    expected: retiredKey(2, witnessKey.kid, "checkpoint"),
+    checkpoint: "checkpoints/current-use-head.json",
+    expected: retiredKey(2, currentUseWitnessKey.kid, "checkpoint"),
   },
   {
     id: "current-retired-checkpoint-forged",
     pins: "KEY_RETIRED below checkpoint authentication: a retired checkpoint kid over bytes it did not sign is TAMPERED",
     receipts: "chain.json",
     keyring: "current-keyring-checkpoint-retired.json",
-    checkpoint: "checkpoints/forged-signature.json",
+    checkpoint: "checkpoints/current-use-forged.json",
     expected: refused("TAMPERED", null),
   },
   {
@@ -548,7 +578,7 @@ const currentUseCases: CurrentUseCase[] = [
     pins: "KEY_RETIRED below TAMPERED: an authentic retired checkpoint over a truncated head",
     receipts: "chain.json",
     keyring: "current-keyring-checkpoint-retired.json",
-    checkpoint: "checkpoints/prefix-before-retirement.json",
+    checkpoint: "checkpoints/current-use-truncated.json",
     expected: refused("TAMPERED", 2),
   },
   {
@@ -556,8 +586,8 @@ const currentUseCases: CurrentUseCase[] = [
     pins: "KEY_RETIRED below UNTRUSTED: the retired checkpoint kid is not authorized for the chain opener",
     receipts: "chain.json",
     keyring: "current-keyring-checkpoint-retired.json",
-    checkpoint: "checkpoints/exact-before-retirement.json",
-    identity: "identity-checkpoint-unauthorized.json",
+    checkpoint: "checkpoints/current-use-head.json",
+    identity: "identity-receipt-kid-only.json",
     expected: refused("UNTRUSTED", 2),
   },
   {
@@ -565,8 +595,57 @@ const currentUseCases: CurrentUseCase[] = [
     pins: "a retired receipt finding (seq 0) is reported before a retired checkpoint finding (head seq 2)",
     receipts: "chain.json",
     keyring: "current-keyring-both-retired.json",
-    checkpoint: "checkpoints/exact-before-retirement.json",
+    checkpoint: "checkpoints/current-use-head.json",
     expected: retiredKey(0, receiptKey.kid, "receipt"),
+  },
+  // Cross-phase: a retired RECEIPT finding ranks below every checkpoint phase and every later
+  // receipt's own phases, not only below the checks that share its step.
+  {
+    id: "current-retired-receipts-forged-checkpoint",
+    pins: "retired receipts rank below checkpoint AUTHENTICATION: a forged current-key checkpoint is TAMPERED",
+    receipts: "chain.json",
+    keyring: "current-keyring-receipt-retired.json",
+    checkpoint: "checkpoints/current-use-forged.json",
+    expected: refused("TAMPERED", null),
+  },
+  {
+    id: "current-retired-receipts-truncated-head",
+    pins: "retired receipts rank below the checkpoint HEAD match: an authentic checkpoint over a truncated head is TAMPERED",
+    receipts: "chain-prefix.json",
+    keyring: "current-keyring-receipt-retired.json",
+    checkpoint: "checkpoints/current-use-truncated.json",
+    expected: refused("TAMPERED", 1),
+  },
+  {
+    id: "current-retired-receipts-checkpoint-unauthorized-opener",
+    pins: "retired receipts rank below the checkpoint OPENER binding: an unauthorized checkpoint kid is UNTRUSTED",
+    receipts: "chain-prefix.json",
+    keyring: "current-keyring-receipt-retired.json",
+    checkpoint: "checkpoints/current-use-prefix-head.json",
+    identity: "identity-receipt-kid-only.json",
+    expected: refused("UNTRUSTED", 1),
+  },
+  {
+    id: "current-retired-then-later-untrusted",
+    pins: "retired receipts rank below a LATER receipt's identity binding: an unauthorized seq 2 is UNTRUSTED",
+    receipts: "chain-retired-then-other-agent.json",
+    keyring: "current-keyring-mixed.json",
+    identity: "identity-receipt-kid-only.json",
+    expected: refused("UNTRUSTED", 2),
+  },
+  {
+    id: "current-retired-then-later-forged-signature",
+    pins: "retired receipts rank below a LATER receipt's signature check: a forged seq 2 is TAMPERED",
+    receipts: "chain-retired-then-forged.json",
+    keyring: "current-keyring-mixed.json",
+    expected: refused("TAMPERED", 2),
+  },
+  {
+    id: "current-retired-then-later-broken-linkage",
+    pins: "retired receipts rank below a LATER receipt's linkage check: an authentic but relinked seq 2 is TAMPERED",
+    receipts: "chain-retired-then-relinked.json",
+    keyring: "current-keyring-mixed.json",
+    expected: refused("TAMPERED", 2),
   },
 ];
 
@@ -591,7 +670,7 @@ write("cases.json", {
 write("README.json", {
   status: "NORMATIVE CONFORMANCE FIXTURE",
   note: "Historical attribution uses an independently authenticated checkpoint inside each covered receipt signer's explicit [validFrom, retiredAt) interval and at or after the witness key's explicit validFrom. The lower bounds are inclusive, the receipt retirement bound is exclusive, and an absent/null validFrom stays unbounded rather than being fabricated. A retired witness key remains refused: its own checkpoint timestamp cannot establish pre-retirement existence. RFC 3339 T/Z are case-insensitive. Signer-authored receipt timestamps are never lifecycle evidence. PARTIAL + PREFIX_ANCHORED replaces the earlier informal DEGRADED label. PROVEN_SUPPRESSED is not emitted without presenter-possession/omission proof.",
-  currentUseNote: "cases.json currentUse pins the default (current-use) purpose under the same lifecycle roots. An authentic retired-key signature is KEY_RETIRED (exit 9) only when every other check passes; each case pins one adjacent pair of that refusal order, and only a KEY_RETIRED result names --purpose historical. currentUse.ports declares which verifiers implement lifecycle roots on the current-use path; NOT_IMPLEMENTED ports are still run on every case and must refuse without ever reporting KEY_RETIRED.",
+  currentUseNote: "cases.json currentUse pins the default (current-use) purpose under the same lifecycle roots. An authentic retired-key signature is KEY_RETIRED (exit 9) only when every other check passes; each case pins one pair of that refusal order, including across the checkpoint phases and later receipts, and only a KEY_RETIRED result names --purpose historical. currentUse.ports declares which verifiers implement lifecycle roots on the current-use path; NOT_IMPLEMENTED ports are still run on every case and must refuse without ever reporting KEY_RETIRED.",
 });
 
 const receiptRoots: Readonly<Record<string, unknown>> = {

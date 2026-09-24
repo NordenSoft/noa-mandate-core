@@ -111,7 +111,7 @@ test("the corpus pins evidence monotonicity and never infers deliberate suppress
 test("every current-use lifecycle case reproduces its refusal order through the library", () => {
   const corpus = JSON.parse(readFileSync(join(CORPUS, "cases.json"), "utf8")) as Corpus;
   assert.equal(corpus.currentUse.spec, "noa.current-use-lifecycle-corpus/0.1");
-  assert.equal(corpus.currentUse.cases.length, 11);
+  assert.equal(corpus.currentUse.cases.length, 17);
   assert.deepEqual(Object.keys(corpus.currentUse.ports).sort(), ["csharp", "go", "python", "rust", "typescript"]);
   assert.equal(corpus.currentUse.ports.typescript, "IMPLEMENTED");
   for (const c of corpus.currentUse.cases) {

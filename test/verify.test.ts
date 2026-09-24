@@ -984,6 +984,8 @@ test("G2-R1: default path reports an authentic retired-key signature as KEY_RETI
     assert.match(steer, /--purpose historical/, label);
     assert.match(steer, /verifyHistoricalChain/, label);
     assert.match(steer, /does not establish when/, `${label}: the steer must not imply the signature predates retirement`);
+    // Caveat texts written for a VALID result (tailChecked:true, "a VALID result proves") are scoped.
+    assert.ok(!res.warnings.some((w) => /a VALID result|tailChecked:true/.test(w)), `${label}: VALID-only caveat text: ${JSON.stringify(res.warnings)}`);
     // The run was complete, so the completeness caveats a VALID result would carry are carried too.
     assert.ok(res.warnings.some((w) => w.startsWith("fork/equivocation is not detectable offline")), `${label}: fork caveat dropped`);
     assert.equal(
@@ -1157,6 +1159,16 @@ test("G2-R1: every label transition created by authenticating retired keys first
   altered[1]!.action.paramsHash = sha256Prefixed("altered");
   const forgedCheckpoint = JSON.parse(JSON.stringify(buildCheckpoint(currentChain[0]!, "2026-01-01T00:00:05.000Z", byRetired))) as Checkpoint;
   forgedCheckpoint.ts = "2026-01-01T00:00:06.000Z";
+  // Cross-phase rows: retired RECEIPTS with a CURRENT-key checkpoint, and retired receipts followed
+  // by a current-key receipt (another agent.id) that fails its own identity, signature or linkage.
+  const currentCheckpoint = (head: Receipt) => b(buildCheckpoint(head, "2026-01-01T00:00:05.000Z", byCurrent));
+  const forgedCurrentCheckpoint = JSON.parse(JSON.stringify(buildCheckpoint(r1, "2026-01-01T00:00:05.000Z", byCurrent))) as Checkpoint;
+  forgedCurrentCheckpoint.ts = "2026-01-01T00:00:06.000Z";
+  const tail = buildReceipt(input("t-2", 2, "agent-u"), r1, byCurrent);
+  const tailForged = buildReceipt(input("t-2", 2, "agent-u"), r1, { kid: current.kid, privateKey: attacker.privateKey });
+  const tailRelinked = JSON.parse(JSON.stringify(tail)) as Receipt;
+  tailRelinked.chain.prevHash = r0.chain.hash;
+  reseal(tailRelinked, current.privateKey);
 
   const rows: ReadonlyArray<{
     name: string; before: string; after: string; badSeq: number | undefined; reason: RegExp;
@@ -1182,6 +1194,18 @@ test("G2-R1: every label transition created by authenticating retired keys first
       run: () => verifyChain(b(currentChain), { keyring: lifecycle, checkpoint: b(forgedCheckpoint) }) },
     { name: "authentic retired checkpoint over a truncated head", before: "TAMPERED badSeq head (retired)", after: "TAMPERED", badSeq: 1, reason: /tail truncated/,
       run: () => verifyChain(b(currentChain2), { keyring: lifecycle, checkpoint: retiredCheckpoint(currentChain2[0]!) }) },
+    { name: "retired receipts, forged current-key checkpoint", before: "TAMPERED badSeq 0 (retired)", after: "TAMPERED", badSeq: undefined, reason: /checkpoint not authenticated against keyring \(bad checkpoint signature\)/,
+      run: () => verifyChain(b(retiredChain), { keyring: lifecycle, checkpoint: b(forgedCurrentCheckpoint) }) },
+    { name: "retired receipts, authentic current-key checkpoint over a truncated head", before: "TAMPERED badSeq 0 (retired)", after: "TAMPERED", badSeq: 1, reason: /tail truncated/,
+      run: () => verifyChain(b(retiredChain), { keyring: lifecycle, checkpoint: currentCheckpoint(r0) }) },
+    { name: "retired receipts, current-key checkpoint not authorized for the opener", before: "TAMPERED (exit 2)", after: "UNTRUSTED", badSeq: 1, reason: /checkpoint signing key "g2r1t-current" is not authorized for chain opener/,
+      run: () => verifyChain(b(retiredChain), { keyring: lifecycle, checkpoint: currentCheckpoint(r1), identityManifest: b({ "agent-t": [retired.kid] }) }) },
+    { name: "retired receipts, later receipt not authorized by the manifest", before: "TAMPERED (exit 2)", after: "UNTRUSTED", badSeq: 2, reason: /agent "agent-u" is not authorized for signing key "g2r1t-current"/,
+      run: () => verifyChain(b([r0, r1, tail]), { keyring: lifecycle, identityManifest: b({ "agent-t": [retired.kid] }) }) },
+    { name: "retired receipts, later receipt with another key's signature", before: "TAMPERED badSeq 0 (retired)", after: "TAMPERED", badSeq: 2, reason: /^invalid signature \(kid g2r1t-current\)$/,
+      run: () => verifyChain(b([r0, r1, tailForged]), { keyring: lifecycle }) },
+    { name: "retired receipts, later authentic receipt with broken linkage", before: "TAMPERED badSeq 0 (retired)", after: "TAMPERED", badSeq: 2, reason: /^broken linkage at seq 2$/,
+      run: () => verifyChain(b([r0, r1, tailRelinked]), { keyring: lifecycle }) },
   ];
   for (const row of rows) {
     const res = row.run();

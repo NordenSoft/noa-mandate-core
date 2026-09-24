@@ -125,21 +125,26 @@ nobody has to discover it from a failing pipeline:
 
 This one changes label compatibility only. Under the optional `noa.signing-key-lifecycle/0.1`
 keyring, `verifyChain` now authenticates a retired key's signature against its retained public
-material *before* refusing it, and refuses an authentic one last, as `KEY_RETIRED`. Moving that
-refusal later lets checks that used to be unreachable answer first, so these inputs were relabelled
-(every "before" was measured on the parent commit; each row is pinned by a test):
+material *before* refusing it, and refuses an authentic one last, as `KEY_RETIRED`.
+
+**The general rule:** when the input also fails some other check — anywhere in the walk, including
+a LATER receipt or ANY phase of the checkpoint — that later failing check now answers, where the
+retired key used to answer first. So the table below is a classification of that rule, not a
+closed list; every row was measured on the parent commit and is pinned by a test (and, where the CLI
+can express it, by a `currentUse` vector in `conformance/survivable-retirement/cases.json`):
 
 | Input (lifecycle keyring supplied) | Before | Now |
 | --- | --- | --- |
 | Authentic retired receipt or checkpoint signature, nothing else wrong | `TAMPERED` (exit 2) | `KEY_RETIRED` (exit 9) |
 | Retired seq-0 receipt whose kid the identity manifest does not authorize | `TAMPERED` (2) | `UNTRUSTED` (5) |
-| Authentic retired checkpoint whose kid is not authorized for the chain opener | `TAMPERED` (2) | `UNTRUSTED` (5) |
-| Retired receipt, `requireNFC: true`, a non-NFC string in a later receipt (library option) | `TAMPERED` (2) | `MALFORMED` (3) |
+| Retired receipt followed by a LATER receipt the identity manifest does not authorize | `TAMPERED` (2) | `UNTRUSTED` (5) |
+| Retired receipts with a checkpoint whose kid is not authorized for the chain opener (checkpoint key retired or current) | `TAMPERED` (2) | `UNTRUSTED` (5) |
+| Retired receipt followed by a LATER `MALFORMED` receipt (e.g. `requireNFC: true` and a non-NFC string) | `TAMPERED` (2) | `MALFORMED` (3) |
 | Retired receipt, checkpoint document that is not a JSON object (e.g. `[]`, `null`) | `TAMPERED` (2) | `MALFORMED` (3) |
 | Retired kid carrying another key's signature | `TAMPERED`, reason "retired" | `TAMPERED`, reason "invalid signature" |
-| Authentic retired receipt, altered bytes later in the chain | `TAMPERED` at the retired seq | `TAMPERED` at the altered seq |
-| Retired checkpoint kid with a bad signature | `TAMPERED`, reason "retired" | `TAMPERED`, "checkpoint not authenticated" |
-| Authentic retired checkpoint over a truncated head | `TAMPERED`, reason "retired" | `TAMPERED`, "tail truncated" |
+| Retired receipt, LATER receipt with altered bytes, a forged signature or broken linkage | `TAMPERED` at the retired seq | `TAMPERED` at the later seq |
+| Retired receipts with a forged checkpoint (checkpoint key retired or current) | `TAMPERED`, reason "retired" | `TAMPERED`, "checkpoint not authenticated" |
+| Retired receipts, or a retired checkpoint, with an authentic checkpoint over a truncated head | `TAMPERED`, reason "retired" | `TAMPERED`, "tail truncated" |
 
 No receipt moved into or out of `VALID`, the static-keyring algorithm and every conformance vector
 under `conformance/vectors` are unchanged, and the change is stated in

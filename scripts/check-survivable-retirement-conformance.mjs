@@ -162,8 +162,12 @@ for (const [name, declaration] of Object.entries(currentUse.ports)) {
       const mismatch = currentUseMismatch(c.expected, run);
       assert.equal(mismatch, null, `${name}/${c.id} (${c.pins}): ${mismatch}`);
     } else {
-      assert.notEqual(run.exit, 0, `${name}/${c.id}: a NOT_IMPLEMENTED port accepted a lifecycle root`);
-      assert.notEqual(run.exit, 9, `${name}/${c.id}: exits 9 while declared NOT_IMPLEMENTED — flip the declaration`);
+      // A crash (signal: exit null) or a usage error is not a refusal: require one of the port's
+      // documented refusal exits (1 UNVERIFIED, 2 TAMPERED, 3 MALFORMED, 5 UNTRUSTED).
+      assert.ok(
+        Number.isInteger(run.exit) && [1, 2, 3, 5].includes(run.exit),
+        `${name}/${c.id}: exit ${run.exit} is not a refusal verdict (want 1, 2, 3 or 5)\n${run.stderr}`,
+      );
       assert.ok(!run.stdout.includes("KEY_RETIRED"), `${name}/${c.id}: reports KEY_RETIRED while declared NOT_IMPLEMENTED`);
     }
     checked++;

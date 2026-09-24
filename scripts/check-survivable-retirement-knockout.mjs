@@ -154,48 +154,91 @@ try {
   };
   const early = (subject, kid, seq) =>
     `return keyRetired(${subject}, ${kid}, chainId, list.length, ${seq}, [keyRetiredWarning(${subject}, ${kid}, ${seq})]);`;
+  // Cross-phase swaps in LABELED-BREAK form: once a receipt signature is found retired, skip the rest
+  // of the checkpoint step from one phase onward, then finish normally, so every warning survives
+  // and only the ordering differs. A later receipt's own phases are skipped the same way ("later").
+  const LABEL = ["if (checkpointSnap !== undefined) {", "cpblock: if (checkpointSnap !== undefined) {"];
+  const skipFrom = (marker) => [marker, `if (retiredSeq >= 0) break cpblock; ${marker}`];
+  const later = "!(retiredSeq >= 0 && retiredSeq < seq)";
   const orderMutants = [
     {
       name: "KEY_RETIRED above receipt signature authentication",
       caseIds: ["current-retired-kid-forged-signature", "current-retired-then-altered"],
-      before: "const pub = keyring[r.sig.kid];",
-      after: `if (verification.retiredKids[r.sig.kid] === true) ${early('"receipt"', "r.sig.kid", "seq")} const pub = keyring[r.sig.kid];`,
+      edits: [["const pub = keyring[r.sig.kid];",
+        `if (verification.retiredKids[r.sig.kid] === true) ${early('"receipt"', "r.sig.kid", "seq")} const pub = keyring[r.sig.kid];`]],
     },
     {
       name: "KEY_RETIRED above receipt identity binding (UNTRUSTED)",
       caseIds: ["current-retired-receipt-unauthorized-identity"],
-      before: "if (retiredSeq < 0 && verification.retiredKids[r.sig.kid] === true) {",
-      after: `if (verification.retiredKids[r.sig.kid] === true) ${early('"receipt"', "r.sig.kid", "seq")} if (false) {`,
+      edits: [["if (retiredSeq < 0 && verification.retiredKids[r.sig.kid] === true) {",
+        `if (verification.retiredKids[r.sig.kid] === true) ${early('"receipt"', "r.sig.kid", "seq")} if (false) {`]],
     },
     {
       name: "KEY_RETIRED above the checkpoint MALFORMED check",
       caseIds: ["current-retired-checkpoint-not-an-object"],
-      before: "let tailChecked = false;",
-      after: `if (retiredSeq >= 0) ${early("retiredSubject", "retiredKid", "retiredSeq")} let tailChecked = false;`,
+      edits: [["let tailChecked = false;",
+        `if (retiredSeq >= 0) ${early("retiredSubject", "retiredKid", "retiredSeq")} let tailChecked = false;`]],
     },
     {
       name: "the LAST retired signature reported instead of the first",
       caseIds: ["current-first-retired-signature-mid-chain"],
-      before: "if (retiredSeq < 0 && verification.retiredKids[r.sig.kid] === true) {",
-      after: "if (verification.retiredKids[r.sig.kid] === true) {",
+      edits: [["if (retiredSeq < 0 && verification.retiredKids[r.sig.kid] === true) {",
+        "if (verification.retiredKids[r.sig.kid] === true) {"]],
     },
     {
       name: "a checkpoint finding outranks a receipt finding",
       caseIds: ["current-receipt-finding-outranks-checkpoint"],
-      before: "if (checkpointKeyRetired && retiredSeq < 0) {",
-      after: "if (checkpointKeyRetired) {",
+      edits: [["if (checkpointKeyRetired && retiredSeq < 0) {", "if (checkpointKeyRetired) {"]],
     },
     {
       name: "KEY_RETIRED above checkpoint signature authentication",
       caseIds: ["current-retired-checkpoint-forged"],
-      before: "cpVerify = verifyCheckpointParsed(cp, retainedPublicMaterial(verification));",
-      after: 'cpVerify = "ok";',
+      edits: [["cpVerify = verifyCheckpointParsed(cp, retainedPublicMaterial(verification));", 'cpVerify = "ok";']],
     },
     {
       name: "KEY_RETIRED above the checkpoint head and opener checks",
       caseIds: ["current-retired-checkpoint-truncated-head", "current-retired-checkpoint-unauthorized-identity"],
-      before: 'checkpointKeyRetired = cpVerify === "ok";',
-      after: `checkpointKeyRetired = cpVerify === "ok"; if (checkpointKeyRetired) ${early('"checkpoint"', "cp.sig.kid", "head.chain.seq")}`,
+      edits: [['checkpointKeyRetired = cpVerify === "ok";',
+        `checkpointKeyRetired = cpVerify === "ok"; if (checkpointKeyRetired) ${early('"checkpoint"', "cp.sig.kid", "head.chain.seq")}`]],
+    },
+    {
+      name: "B2: a retired receipt skips the checkpoint from AUTHENTICATION onward",
+      caseIds: ["current-retired-receipts-forged-checkpoint"],
+      edits: [LABEL, skipFrom("let cpVerify = verifyCheckpointParsed(cp, verification);")],
+    },
+    {
+      name: "C2: a retired receipt skips the checkpoint from the HEAD match onward",
+      caseIds: ["current-retired-receipts-truncated-head"],
+      edits: [LABEL, skipFrom("if (cp.chain !== chainId)")],
+    },
+    {
+      name: "D2: a retired receipt skips the checkpoint OPENER binding",
+      caseIds: ["current-retired-receipts-checkpoint-unauthorized-opener"],
+      edits: [LABEL, skipFrom("const genesis = ordered[0];")],
+    },
+    {
+      name: "W: later receipts skip signature, identity and linkage after a retired signature",
+      caseIds: ["current-retired-then-later-untrusted", "current-retired-then-later-forged-signature", "current-retired-then-later-broken-linkage"],
+      edits: [["if (haveKeyring) {\n                const pub = keyring[r.sig.kid];",
+        "if (retiredSeq >= 0 && retiredSeq < seq) { prev = r; continue; } if (haveKeyring) {\n                const pub = keyring[r.sig.kid];"]],
+    },
+    {
+      name: "W-signature: later receipts skip only the signature check",
+      caseIds: ["current-retired-then-later-forged-signature"],
+      edits: [["if (haveKeyring) {\n                const pub = keyring[r.sig.kid];",
+        `if (haveKeyring && ${later}) {\n                const pub = keyring[r.sig.kid];`]],
+    },
+    {
+      name: "W-identity: later receipts skip only the identity binding",
+      caseIds: ["current-retired-then-later-untrusted"],
+      edits: [["if (haveKeyring && haveManifest) {\n                const allowed = mapGet(manifest, r.agent.id);",
+        `if (haveKeyring && haveManifest && ${later}) {\n                const allowed = mapGet(manifest, r.agent.id);`]],
+    },
+    {
+      name: "W-linkage: later receipts skip only the linkage check",
+      caseIds: ["current-retired-then-later-broken-linkage"],
+      edits: [["else if (r.chain.prevHash !== prev.chain.hash) {",
+        `else if (${later} && r.chain.prevHash !== prev.chain.hash) {`]],
     },
   ];
   for (const c of corpus.currentUse.cases) {
@@ -206,7 +249,9 @@ try {
     const mutantRoot = join(temp, `order-mutant-${i}`);
     const mutantSrc = join(mutantRoot, "src");
     cpSync(sourceDir, mutantSrc, { recursive: true });
-    writeFileSync(join(mutantSrc, "verify.js"), replaceOnce(pristine, mutant.before, mutant.after, mutant.name));
+    let mutated = pristine;
+    for (const [before, after] of mutant.edits) mutated = replaceOnce(mutated, before, after, mutant.name);
+    writeFileSync(join(mutantSrc, "verify.js"), mutated);
     for (const id of mutant.caseIds) {
       const mismatch = runCurrent(join(mutantSrc, "cli.js"), id);
       assert.notEqual(mismatch, null, `${mutant.name}: swapping the pair left ${id} matching the oracle`);

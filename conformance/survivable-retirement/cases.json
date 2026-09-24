@@ -875,14 +875,14 @@
         "pins": "an authentic checkpoint by a retired key and nothing else wrong -> KEY_RETIRED (checkpoint)",
         "receipts": "chain.json",
         "keyring": "current-keyring-checkpoint-retired.json",
-        "checkpoint": "checkpoints/exact-before-retirement.json",
+        "checkpoint": "checkpoints/current-use-head.json",
         "expected": {
           "status": "KEY_RETIRED",
           "exit": 9,
           "badSeq": 2,
           "keyRetired": {
             "seq": 2,
-            "kid": "g2-checkpoint-current",
+            "kid": "g2-current-use-witness",
             "subject": "checkpoint"
           },
           "historicalPointer": true
@@ -893,7 +893,7 @@
         "pins": "KEY_RETIRED below checkpoint authentication: a retired checkpoint kid over bytes it did not sign is TAMPERED",
         "receipts": "chain.json",
         "keyring": "current-keyring-checkpoint-retired.json",
-        "checkpoint": "checkpoints/forged-signature.json",
+        "checkpoint": "checkpoints/current-use-forged.json",
         "expected": {
           "status": "TAMPERED",
           "exit": 2,
@@ -907,7 +907,7 @@
         "pins": "KEY_RETIRED below TAMPERED: an authentic retired checkpoint over a truncated head",
         "receipts": "chain.json",
         "keyring": "current-keyring-checkpoint-retired.json",
-        "checkpoint": "checkpoints/prefix-before-retirement.json",
+        "checkpoint": "checkpoints/current-use-truncated.json",
         "expected": {
           "status": "TAMPERED",
           "exit": 2,
@@ -921,8 +921,8 @@
         "pins": "KEY_RETIRED below UNTRUSTED: the retired checkpoint kid is not authorized for the chain opener",
         "receipts": "chain.json",
         "keyring": "current-keyring-checkpoint-retired.json",
-        "checkpoint": "checkpoints/exact-before-retirement.json",
-        "identity": "identity-checkpoint-unauthorized.json",
+        "checkpoint": "checkpoints/current-use-head.json",
+        "identity": "identity-receipt-kid-only.json",
         "expected": {
           "status": "UNTRUSTED",
           "exit": 5,
@@ -936,7 +936,7 @@
         "pins": "a retired receipt finding (seq 0) is reported before a retired checkpoint finding (head seq 2)",
         "receipts": "chain.json",
         "keyring": "current-keyring-both-retired.json",
-        "checkpoint": "checkpoints/exact-before-retirement.json",
+        "checkpoint": "checkpoints/current-use-head.json",
         "expected": {
           "status": "KEY_RETIRED",
           "exit": 9,
@@ -947,6 +947,89 @@
             "subject": "receipt"
           },
           "historicalPointer": true
+        }
+      },
+      {
+        "id": "current-retired-receipts-forged-checkpoint",
+        "pins": "retired receipts rank below checkpoint AUTHENTICATION: a forged current-key checkpoint is TAMPERED",
+        "receipts": "chain.json",
+        "keyring": "current-keyring-receipt-retired.json",
+        "checkpoint": "checkpoints/current-use-forged.json",
+        "expected": {
+          "status": "TAMPERED",
+          "exit": 2,
+          "badSeq": null,
+          "keyRetired": null,
+          "historicalPointer": false
+        }
+      },
+      {
+        "id": "current-retired-receipts-truncated-head",
+        "pins": "retired receipts rank below the checkpoint HEAD match: an authentic checkpoint over a truncated head is TAMPERED",
+        "receipts": "chain-prefix.json",
+        "keyring": "current-keyring-receipt-retired.json",
+        "checkpoint": "checkpoints/current-use-truncated.json",
+        "expected": {
+          "status": "TAMPERED",
+          "exit": 2,
+          "badSeq": 1,
+          "keyRetired": null,
+          "historicalPointer": false
+        }
+      },
+      {
+        "id": "current-retired-receipts-checkpoint-unauthorized-opener",
+        "pins": "retired receipts rank below the checkpoint OPENER binding: an unauthorized checkpoint kid is UNTRUSTED",
+        "receipts": "chain-prefix.json",
+        "keyring": "current-keyring-receipt-retired.json",
+        "checkpoint": "checkpoints/current-use-prefix-head.json",
+        "identity": "identity-receipt-kid-only.json",
+        "expected": {
+          "status": "UNTRUSTED",
+          "exit": 5,
+          "badSeq": 1,
+          "keyRetired": null,
+          "historicalPointer": false
+        }
+      },
+      {
+        "id": "current-retired-then-later-untrusted",
+        "pins": "retired receipts rank below a LATER receipt's identity binding: an unauthorized seq 2 is UNTRUSTED",
+        "receipts": "chain-retired-then-other-agent.json",
+        "keyring": "current-keyring-mixed.json",
+        "identity": "identity-receipt-kid-only.json",
+        "expected": {
+          "status": "UNTRUSTED",
+          "exit": 5,
+          "badSeq": 2,
+          "keyRetired": null,
+          "historicalPointer": false
+        }
+      },
+      {
+        "id": "current-retired-then-later-forged-signature",
+        "pins": "retired receipts rank below a LATER receipt's signature check: a forged seq 2 is TAMPERED",
+        "receipts": "chain-retired-then-forged.json",
+        "keyring": "current-keyring-mixed.json",
+        "expected": {
+          "status": "TAMPERED",
+          "exit": 2,
+          "badSeq": 2,
+          "keyRetired": null,
+          "historicalPointer": false
+        }
+      },
+      {
+        "id": "current-retired-then-later-broken-linkage",
+        "pins": "retired receipts rank below a LATER receipt's linkage check: an authentic but relinked seq 2 is TAMPERED",
+        "receipts": "chain-retired-then-relinked.json",
+        "keyring": "current-keyring-mixed.json",
+        "expected": {
+          "status": "TAMPERED",
+          "exit": 2,
+          "badSeq": 2,
+          "keyRetired": null,
+          "historicalPointer": false
         }
       }
     ]
