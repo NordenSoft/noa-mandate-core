@@ -13,14 +13,14 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generateKeyPair, type KeyPair } from "noa-approval-artifacts";
+import { generateKeyPair, verifyArtifact, type KeyPair } from "noa-approval-artifacts";
 import { GateEngine, type DisplaySealer } from "../src/engine.js";
 import { resolveGateConfig } from "../src/config.js";
 import { InMemoryStore, type Store } from "../src/store.js";
 import { hashSecret } from "../src/auth.js";
 import { loadSchemas } from "../src/schemas.js";
 import { getProjection } from "../src/projections.js";
-import type { GateTrust } from "../src/trust.js";
+import { createAlphaTrust, type GateTrust } from "../src/trust.js";
 import type { AgentRecord, HoldEnvelope } from "../src/types.js";
 import { body, makeClock, sampleCommandParams, setupGate, signPhoneDecision, testSealer, type Clock } from "./helpers.js";
 import {
@@ -31,6 +31,7 @@ import {
   newWorld,
   pinnedTrustFrom,
   rosterDoc,
+  x25519Pair,
   type ApproverKeys,
   type RosterWorld,
 } from "./helpers/pinned.js";
@@ -103,6 +104,18 @@ function decision(trust: GateTrust, store: Store, holdId: string, signer: Approv
 
 const errorOf = (r: { body: unknown }): string | undefined => (r.body as { error?: string }).error;
 
+/**
+ * THE CONSEQUENCE, asserted before any code: no grant exists, and the hold is exactly as it was —
+ * still PENDING, with no resolution signed for it. A knockout that removes a control must turn THIS
+ * red, not merely change which refusal code a later check prints.
+ */
+function nothingHappened(store: Store, holdId: string, what: string): void {
+  assert.equal(store.listGrants().length, 0, `consequence: ${what} — no grant may exist`);
+  const h = store.getHold(holdId)!;
+  assert.equal(h.status, "PENDING", `consequence: ${what} — the hold must stay PENDING`);
+  assert.equal(h.holdResolution, null, `consequence: ${what} — no resolution may be signed`);
+}
+
 // ── positive paths ──────────────────────────────────────────────────────────────────────────────
 
 test("CONTROL — a pinned gate freezes, seals to the roster's approver + audit, and grants on the roster approver's decision", () => {
@@ -157,10 +170,9 @@ test("K1 — a hold frozen under epoch v2 cannot be decided by a gate at epoch v
   const hold = holdOf(store, createHold(a, "epoch"));
   const d = decision(a.trust, store, hold.id, world.approver);
   const r = b.engine.decide(hold.id, d);
+  nothingHappened(store, hold.id, "a gate at another epoch");
   assert.equal(r.status, 409, JSON.stringify(r.body));
   assert.equal(errorOf(r), "EPOCH_CHANGED");
-  assert.equal(store.getHold(hold.id)!.status, "PENDING");
-  assert.equal(store.listGrants().length, 0);
   // Positive control: the same bytes are accepted by the gate whose epoch the hold carries.
   assert.equal(a.engine.decide(hold.id, d).status, 200);
 });
@@ -176,10 +188,9 @@ test("K2 — a gate for another tenant cannot grant on this tenant's envelope: 4
   const hold = holdOf(store, createHold(a, "audience"));
   const d = decision(a.trust, store, hold.id, world.approver);
   const r = b.engine.decide(hold.id, d);
+  nothingHappened(store, hold.id, "a gate for another tenant");
   assert.equal(r.status, 409, JSON.stringify(r.body));
   assert.equal(errorOf(r), "GATE_AUDIENCE_MISMATCH");
-  assert.equal(store.getHold(hold.id)!.status, "PENDING");
-  assert.equal(store.listGrants().length, 0);
   assert.equal(a.engine.decide(hold.id, d).status, 200);
 });
 
@@ -191,9 +202,9 @@ test("audience — a gate with another gate key is refused by kid before any sig
   const b = engineFor(pinned({ ...world, gate: generateKeyPair("gate-example-2") }, clock), store, clock);
   const hold = holdOf(store, createHold(a, "audience-key"));
   const r = b.engine.decide(hold.id, decision(a.trust, store, hold.id, world.approver));
+  nothingHappened(store, hold.id, "a gate with another gate key");
   assert.equal(r.status, 409, JSON.stringify(r.body));
   assert.equal(errorOf(r), "GATE_AUDIENCE_MISMATCH");
-  assert.equal(store.listGrants().length, 0);
 });
 
 test("K3 — an approver who was never sent the display cannot approve it: 422 APPROVER_NOT_DISPLAY_RECIPIENT (same epoch, same gate key)", () => {
@@ -208,10 +219,9 @@ test("K3 — an approver who was never sent the display cannot approve it: 422 A
   const hold = holdOf(store, createHold(a, "recipient"));
   assert.deepEqual((hold.encryptedDisplay.recipients ?? []).map((r) => r.kid), [world.approver.kid, AUDIT_KID]);
   const r = b.engine.decide(hold.id, decision(b.trust, store, hold.id, y));
+  nothingHappened(store, hold.id, "an approver who never received the display");
   assert.equal(r.status, 422, JSON.stringify(r.body));
   assert.equal(errorOf(r), "APPROVER_NOT_DISPLAY_RECIPIENT");
-  assert.equal(store.getHold(hold.id)!.status, "PENDING");
-  assert.equal(store.listGrants().length, 0);
 });
 
 test("alpha too: two alpha trust roots sharing one store — the second cannot decide the first's hold (EPOCH_CHANGED)", () => {
@@ -227,6 +237,7 @@ test("alpha too: two alpha trust roots sharing one store — the second cannot d
   const hold = holdOf(fxA.store, created);
   const signed = signPhoneDecision({ trust: fxA.trust, deferredReceipt: hold.deferredReceipt, holdEnvelope: hold.holdEnvelope, decision: "APPROVE" });
   const r = fxB.engine.decide(hold.id, body(signed));
+  nothingHappened(fxA.store, hold.id, "a second alpha trust root");
   assert.equal(r.status, 409, JSON.stringify(r.body));
   assert.equal(errorOf(r), "EPOCH_CHANGED");
   assert.equal(fxA.engine.decide(hold.id, body(signed)).status, 200);
@@ -245,9 +256,9 @@ test("K5 — an injected trust whose roster quorum is 2 refuses at decide: 500 Q
   const b = engineFor(injected, store, clock);
   const hold = holdOf(store, createHold(a, "quorum"));
   const r = b.engine.decide(hold.id, decision(a.trust, store, hold.id, world.approver));
+  nothingHappened(store, hold.id, "one approval where the roster asks for two");
   assert.equal(r.status, 500, JSON.stringify(r.body));
   assert.equal(errorOf(r), "QUORUM_UNSUPPORTED");
-  assert.equal(store.listGrants().length, 0);
 });
 
 test("K6 — a class the roster does not name is refused at createHold, and at decide on a gate whose roster dropped it", () => {
@@ -259,18 +270,18 @@ test("K6 — a class the roster does not name is refused at createHold, and at d
   const store = new InMemoryStore();
   const highOnly = engineFor(pinned(world, clock, { quorum: { HIGH: 1 } }), store, clock);
   const refused = createHold(highOnly, "class-create", CRITICAL_PARAMS);
+  assert.equal(store.listHolds({}).length, 0, "consequence: nobody is asked to approve a class this gate cannot accept");
   assert.equal(refused.status, 422, JSON.stringify(refused.body));
   assert.equal(errorOf(refused), "RISK_CLASS_NOT_IN_ROSTER");
-  assert.equal(store.listHolds({}).length, 0, "nobody is asked to approve a class this gate cannot accept");
 
   const store2 = new InMemoryStore();
   const full = engineFor(pinned(world, clock, { quorum: { HIGH: 1, CRITICAL: 1, IRREVERSIBLE: 1 } }), store2, clock);
   const narrowed = engineFor(pinned(world, clock, { quorum: { HIGH: 1 } }), store2, clock);
   const hold = holdOf(store2, createHold(full, "class-decide", CRITICAL_PARAMS));
   const r = narrowed.engine.decide(hold.id, decision(full.trust, store2, hold.id, world.approver));
+  nothingHappened(store2, hold.id, "a class the deciding gate's roster does not name");
   assert.equal(r.status, 422, JSON.stringify(r.body));
   assert.equal(errorOf(r), "RISK_CLASS_NOT_IN_ROSTER");
-  assert.equal(store2.listGrants().length, 0);
 });
 
 test("K7 — past the roster's expiresAt the gate authorizes nothing: 503 ROSTER_EXPIRED at createHold, decide and reserve", () => {
@@ -288,16 +299,18 @@ test("K7 — past the roster's expiresAt the gate authorizes nothing: 503 ROSTER
   clock.advance(4 * MIN); // t0+5min: the roster expired at t0+4min; the hold and the grant have not.
 
   const c = createHold(a, "exp-new");
+  assert.equal(store.listHolds({}).length, 2, "consequence: an expired roster freezes no new hold");
   assert.equal(c.status, 503, JSON.stringify(c.body));
   assert.equal(errorOf(c), "ROSTER_EXPIRED");
   const d = a.engine.decide(pending.id, late);
+  assert.equal(store.listGrants().length, 1, "consequence: an expired roster issues no grant");
+  assert.equal(store.getHold(pending.id)!.status, "PENDING", "consequence: the pending hold is left untouched");
   assert.equal(d.status, 503, JSON.stringify(d.body));
   assert.equal(errorOf(d), "ROSTER_EXPIRED");
-  assert.equal(store.getHold(pending.id)!.status, "PENDING");
   const r = a.engine.reserve(grantId, AGENT);
+  assert.equal(store.getGrant(grantId)!.status, "UNUSED", "consequence: an expired roster reserves nothing");
   assert.equal(r.status, 503, JSON.stringify(r.body));
   assert.equal(errorOf(r), "ROSTER_EXPIRED");
-  assert.equal(store.getGrant(grantId)!.status, "UNUSED");
 });
 
 // ── keys the roster does not vouch for ──────────────────────────────────────────────────────────
@@ -313,6 +326,15 @@ test("a revoked roster approver is refused as revoked; a key the roster never na
   const store = new InMemoryStore();
   const a = engineFor(pinned(world, clock, { approvers }), store, clock);
   const hold = holdOf(store, createHold(a, "revoked"));
+  // The live keyring's own consumer, first: a decision the revoked key signed must not verify.
+  const revokedDecision = signPhoneDecision({
+    trust: a.trust, deferredReceipt: hold.deferredReceipt, holdEnvelope: hold.holdEnvelope, decision: "APPROVE",
+    signer: { kid: old.kid, privateKey: old.ed.privateKey },
+  }).decisionArtifact;
+  const verdict = verifyArtifact(body(revokedDecision), body({
+    schemas, keyring: a.trust.keyring, now: new Date(clock.t).toISOString(), authorizationTime: new Date(clock.t).toISOString(), riskClass: "HIGH",
+  }));
+  assert.equal(verdict.ok, false, "consequence: the live keyring must refuse a decision signed by a revoked approver");
   const revoked = a.engine.decide(hold.id, decision(a.trust, store, hold.id, old));
   assert.equal(revoked.status, 422, JSON.stringify(revoked.body));
   assert.equal(errorOf(revoked), "DECISION_ARTIFACT_INVALID");
@@ -357,9 +379,9 @@ test("K16 — a sealer that ADDS a recipient (or repeats one) is refused: 422 DI
       params: HIGH_PARAMS,
       chain: `egress-${name}`,
     }));
+    assert.equal(fx.store.listHolds({}).length, 0, `consequence: ${name} — no hold is frozen with a display a party the gate never named can open`);
     assert.equal(r.status, 422, `${name}: ${JSON.stringify(r.body)}`);
     assert.equal(errorOf(r), "DISPLAY_EGRESS_AAD_MISMATCH");
-    assert.equal(fx.store.listHolds({}).length, 0);
   }
   // The pinned gate runs the same egress check.
   const world = newWorld();
@@ -367,6 +389,7 @@ test("K16 — a sealer that ADDS a recipient (or repeats one) is refused: 422 DI
   const store = new InMemoryStore();
   const p = engineFor(pinned(world, clock), store, clock, appending);
   const r = createHold(p, "egress-pinned");
+  assert.equal(store.listHolds({}).length, 0, "consequence: the pinned gate freezes nothing either");
   assert.equal(errorOf(r), "DISPLAY_EGRESS_AAD_MISMATCH");
 });
 
@@ -418,7 +441,127 @@ test("[PROOF:RES-PAR-GATE-PINNED-KEYRING] live engine: an approver whose declare
   const a = engineFor(trust, store, clock);
   const hold = holdOf(store, createHold(a, "future-approver"));
   const r = a.engine.decide(hold.id, decision(trust, store, hold.id, world.approver));
+  assert.equal(store.listGrants().length, 0, "consequence: an approver before its declared activation mints no grant");
   assert.equal(r.status, 422, JSON.stringify(r.body));
   assert.match(JSON.stringify(r.body), /before its validFrom/);
-  assert.equal(store.listGrants().length, 0);
+});
+
+// ── QA round 1: nothing is signed for a hold this trust root does not own ─────────────────────────
+
+test("a foreign gate on a shared store signs nothing for another gate's holds: decide, sweep, read, cancel, report and uncertainty all leave them untouched", () => {
+  const world = newWorld();
+  const clock = makeClock();
+  const store = new InMemoryStore();
+  const a = engineFor(pinned(world, clock), store, clock);
+  const b = engineFor(pinned(world, clock, { tenant: "tenant-example-2", epoch: { keyManifestVersion: 3, keyManifestHash: "sha256:" + "3".repeat(64) } }), store, clock);
+  const pending = holdOf(store, createHold(a, "foreign-pending"));
+  const granted = holdOf(store, createHold(a, "foreign-granted"));
+  const unreserved = holdOf(store, createHold(a, "foreign-unreserved"));
+  assert.equal(a.engine.decide(granted.id, decision(a.trust, store, granted.id, world.approver)).status, 200);
+  assert.equal(a.engine.decide(unreserved.id, decision(a.trust, store, unreserved.id, world.approver)).status, 200);
+  const grantId = store.getHold(granted.id)!.grantId!;
+  const openGrantId = store.getHold(unreserved.id)!.grantId!;
+  assert.equal(a.engine.reserve(grantId, AGENT).status, 200);
+  // A foreign gate may not burn another gate's single use, even while the grant is still valid.
+  const foreignReserve = b.engine.reserve(openGrantId, AGENT);
+  assert.equal(store.getGrant(openGrantId)!.status, "UNUSED", "consequence: a foreign gate reserves nothing");
+  assert.equal(foreignReserve.status, 409, JSON.stringify(foreignReserve.body));
+  clock.advance(24 * HOUR); // the pending hold is overdue and the reserved grant is stuck
+
+  const d = b.engine.decide(pending.id, body({}));
+  const e = store.getHold(pending.id)!;
+  assert.equal(e.status, "PENDING", "consequence: decide by a foreign gate must not expire the hold");
+  assert.equal(e.holdResolution, null, "consequence: decide by a foreign gate must not sign a resolution");
+  assert.equal(d.status, 409, JSON.stringify(d.body));
+
+  assert.equal(b.engine.sweepExpired(), 0, "consequence: a foreign sweep expires nothing");
+  assert.equal(b.engine.getHold(pending.id, AGENT).status, 200);
+  const c = b.engine.cancelLocalStateLost(pending.id, AGENT);
+  const afterForeign = store.getHold(pending.id)!;
+  assert.equal(afterForeign.status, "PENDING", "consequence: no foreign sweep, read or cancel changes the hold");
+  assert.equal(afterForeign.holdResolution, null, "consequence: no foreign sweep, read or cancel signs for it");
+  assert.equal(c.status, 409, JSON.stringify(c.body));
+
+  const rep = b.engine.report(grantId, body({ result: "DISPATCHED" }), AGENT);
+  assert.equal(store.getGrant(grantId)!.consumption, null, "consequence: a foreign gate signs no consumption");
+  assert.equal(store.getGrant(grantId)!.reportedAt, null, "consequence: a foreign report changes no grant state");
+  assert.equal(rep.status, 409, JSON.stringify(rep.body));
+  assert.equal(b.engine.sweepUncertainty(), 0, "consequence: a foreign sweep signs no uncertainty");
+  assert.equal(store.getGrant(grantId)!.uncertainty, null, "consequence: a foreign sweep signs no uncertainty");
+
+  // Transition the reorder creates: an already-resolved hold now meets the binding check first.
+  const resolved = b.engine.decide(granted.id, decision(a.trust, store, granted.id, world.approver));
+  assert.equal(errorOf(resolved), "GATE_AUDIENCE_MISMATCH", "a foreign gate is refused as foreign even for a resolved hold");
+
+  // Positive control: the owning gate does sign these.
+  assert.equal(a.engine.sweepExpired(), 1);
+  assert.equal(store.getHold(pending.id)!.status, "EXPIRED");
+  assert.equal(a.engine.sweepUncertainty(), 1);
+});
+
+test("expiry stops authority, not recording: after the roster expires, decide refuses without expiring, but a timeout, a cancellation and a reported execution are still recorded", () => {
+  const world = newWorld();
+  const clock = makeClock();
+  const t0 = clock.t;
+  const store = new InMemoryStore();
+  const a = engineFor(pinned(world, clock, { expiresAt: new Date(t0 + 2 * MIN).toISOString() }), store, clock);
+  const overdue = holdOf(store, createHold(a, "exp-overdue"));
+  const toCancel = holdOf(store, createHold(a, "exp-cancel"));
+  const resolved = holdOf(store, createHold(a, "exp-resolved"));
+  assert.equal(a.engine.decide(resolved.id, decision(a.trust, store, resolved.id, world.approver)).status, 200);
+  const grantId = store.getHold(resolved.id)!.grantId!;
+  assert.equal(a.engine.reserve(grantId, AGENT).status, 200, "authorized and reserved before the roster expired");
+  clock.advance(3 * MIN); // the roster expired at t0+2min; the holds (15 min) have not
+
+  // AUTHORITY stops: decide refuses before it touches the hold, and a decided hold meets ROSTER_EXPIRED first.
+  const late = a.engine.decide(toCancel.id, body({}));
+  assert.equal(late.status, 503, JSON.stringify(late.body));
+  assert.equal(errorOf(a.engine.decide(resolved.id, body({}))), "ROSTER_EXPIRED", "transition: ROSTER_EXPIRED now precedes HOLD_ALREADY_RESOLVED");
+
+  // RECORDING continues: the execution authorized before expiry is recorded and signed.
+  const reported = a.engine.report(grantId, body({ result: "DISPATCHED" }), AGENT);
+  assert.ok(store.getGrant(grantId)!.consumption, "consequence: an execution reported after expiry is still recorded and signed");
+  assert.equal(reported.status, 200, JSON.stringify(reported.body));
+  // ...a local-state loss still closes its hold...
+  const cancelled = a.engine.cancelLocalStateLost(toCancel.id, AGENT);
+  assert.equal(store.getHold(toCancel.id)!.status, "CANCELLED_LOCAL_STATE_LOST", "consequence: a cancel after expiry still closes the hold");
+  assert.ok(store.getHold(toCancel.id)!.holdResolution, "consequence: the cancellation is signed");
+  assert.equal(cancelled.status, 200, JSON.stringify(cancelled.body));
+  // ...and an overdue hold still gets its timeout.
+  clock.advance(24 * HOUR);
+  assert.equal(a.engine.sweepExpired(), 1, "consequence: the sweep still records the timeout");
+  assert.equal(store.getHold(overdue.id)!.status, "EXPIRED");
+});
+
+test("a pinned grant never outlives its roster: the signed expiresAt is clamped to the roster's expiresAt", () => {
+  const world = newWorld();
+  const clock = makeClock();
+  const t0 = clock.t;
+  const rosterExpiry = t0 + 2 * MIN;
+  const store = new InMemoryStore();
+  const a = engineFor(pinned(world, clock, { expiresAt: new Date(rosterExpiry).toISOString() }), store, clock);
+  const hold = holdOf(store, createHold(a, "clamp"));
+  clock.advance(MIN);
+  assert.equal(a.engine.decide(hold.id, decision(a.trust, store, hold.id, world.approver)).status, 200);
+  const grant = store.getGrant(store.getHold(hold.id)!.grantId!)!.grant;
+  assert.ok(Date.parse(grant.expiresAt) <= rosterExpiry, `consequence: the signed grant must not outlive the roster (${grant.expiresAt})`);
+  assert.equal(grant.expiresAt, new Date(rosterExpiry).toISOString());
+});
+
+test("the requested recipients must be distinct: an alpha approver kid equal to the audit kid is refused at egress (DISPLAY_EGRESS_AAD_MISMATCH)", () => {
+  const clock = makeClock();
+  const approverEd = generateKeyPair("audit-1");
+  const trust = createAlphaTrust({
+    tenant: "alpha-tenant",
+    now: () => clock.t,
+    ids,
+    approverPublicKey: { kid: "audit-1", publicKey: approverEd.publicKey, hpkePublicKey: x25519Pair().publicKey },
+  });
+  assert.equal(trust.auditKid, "audit-1", "fixture: the approver kid equals the audit kid");
+  const store = new InMemoryStore();
+  const e = engineFor(trust, store, clock);
+  const r = createHold(e, "dup-recipient");
+  assert.equal(store.listHolds({}).length, 0, "consequence: no hold is frozen with one party sealed twice");
+  assert.equal(r.status, 422, JSON.stringify(r.body));
+  assert.equal(errorOf(r), "DISPLAY_EGRESS_AAD_MISMATCH");
 });

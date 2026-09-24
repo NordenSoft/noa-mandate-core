@@ -1587,6 +1587,26 @@
       "consumer": "parseGateRoster / createPinnedTrust under test",
       "proofs": [],
       "exception": "EX-TEST-FIXTURES"
+    },
+    {
+      "id": "gate-pinned-roster-approvers-0",
+      "package": "gate",
+      "file": "packages/gate/test/pinned-roster.test.ts",
+      "scope": "approvers",
+      "ordinal": 0,
+      "line": 693,
+      "kind": "construct",
+      "class": "test",
+      "input": "test-local key material",
+      "output": "roster approver declaration (test fixture)",
+      "validFrom": "explicit",
+      "revokedAt": "explicit",
+      "missingValue": "tests pin absent/legacy states on purpose",
+      "malformedValue": "tests pin malformed states on purpose",
+      "timestampParser": "test-local constants",
+      "consumer": "parseGateRoster / createPinnedTrust under test",
+      "proofs": [],
+      "exception": "EX-TEST-FIXTURES"
     }
   ],
   "anchoredResolvers": [

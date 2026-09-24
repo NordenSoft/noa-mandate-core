@@ -415,8 +415,10 @@ roster and a restart, and an expired roster stops the gate until one is provided
 
 ### NC-S8.4 — Rollback detection is limited
 
-The high-water state file refuses a lower roster version, or the same version with different bytes.
-Root, a compromised gate process, a whole-volume restore or a cloned host can defeat it.
+The high-water state file refuses a lower roster version, or the same version with different bytes,
+and its read-compare-write runs under a lock file. Root, a compromised gate process, a whole-volume
+restore or a cloned host can defeat it. The lock names a process id: a reused id can hold a stale
+lock (`STATE_LOCKED`) until an administrator removes it.
 
 ### NC-S8.5 — A clock rollback is not detected
 
@@ -458,19 +460,34 @@ service, not an approval.
 The out-of-process grant signer reads a separate trust file. Drift between it and the roster fails
 closed (the sidecar refuses an approver it does not know); nothing keeps the two files in step.
 
-### NC-S8.13 — The audience check compares kids, not keys
+### NC-S8.13 — The audience and display-recipient checks compare kids, not keys
 
-A hold envelope is accepted by a gate whose tenant and gate kid match. A kid reused for a new key
-would pass it; the rotation rule that forbids reuse is an operator rule, not enforced across rosters.
+A hold envelope is accepted by a gate whose tenant and gate kid match, and a decision by an approver
+whose kid is among the sealed display's recipients. On a shared store, a kid reused for a new key
+would pass both checks. The rotation rule that forbids reuse is an operator rule, not enforced across
+rosters.
 
 ### NC-S8.14 — Whoever controls the gate's environment controls its trust root
 
 The environment selects the roster, the key file, the digest pin and the development escape that
-accepts a roster owned by the gate's own uid.
+accepts a roster owned by the gate's own uid or a gate running as root.
 
 ### NC-S8.15 — No interoperability or conformance claim is made for `noa.gate-roster/1`
 
 It is reference-gate configuration, checked by unit tests only. No conformance corpus is published.
+
+### NC-S8.16 — A gate running as root is not a protected posture
+
+Root can rewrite any roster and any state file, so the owner rule certifies nothing for a gate that
+runs as root. Pinned mode refuses to start as root unless the development escape is set, and the
+banner then reports `ROOT-GATE (unsafe)`. The protected posture is a dedicated non-root uid.
+
+### NC-S8.17 — A record signed after the roster expired is a record, not authority
+
+After its roster expires the gate still signs timeouts, cancellations, reported executions and
+uncertainties for holds and grants it authorized earlier, under the same gate key. A signature dated
+after the roster's `expiresAt` shows what was recorded; it does not show that the roster was current,
+and no grant, reservation or new hold is ever signed then.
 
 ## 7. Changing this document
 

@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openEncryptedDisplay } from "noa-signer";
@@ -22,6 +22,16 @@ import { AUDIT_KID, freshDir, newWorld, rosterDoc, writeRoster, x25519Pair, type
 import type { HoldEnvelope } from "../src/types.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+
+/** Mode and content through ONE descriptor, so the two observations are of the same file. */
+function readPrivate(p: string): { mode: number; text: string } {
+  const fd = openSync(p, "r");
+  try {
+    return { mode: fstatSync(fd).mode, text: readFileSync(fd, "utf8") };
+  } finally {
+    closeSync(fd);
+  }
+}
 const HOUR = 60 * 60 * 1000;
 
 /** A clean environment: nothing inherited from the test process can select a trust mode. */
@@ -150,10 +160,10 @@ test("K15 — pinned serve seals with real HPKE: the roster's approver AND audit
   try {
     assert.equal(gate.banner["trustMode"], "PINNED");
     assert.equal(gate.banner["displaySealer"], "hpke");
-    assert.equal(gate.banner["rosterCustody"], "SAME-UID (unsafe)");
+    assert.equal(gate.banner["rosterCustody"], process.geteuid?.() === 0 ? "ROOT-GATE (unsafe)" : "SAME-UID (unsafe)");
     const apiKey = gate.banner["agentApiKey"] as string;
     const created = await post(gate.base, apiKey, "/v1/holds", HOLD_BODY, { "idempotency-key": "cli-k15" });
-    assert.equal(created.status, 201, JSON.stringify(created.body));
+    assert.equal(created.status, 201, `consequence: a pinned gate must freeze the hold with a sealed display: ${JSON.stringify(created.body)}`);
     const ed = created.body!["encryptedDisplay"] as Record<string, unknown>;
     const envelope = created.body!["holdEnvelope"] as unknown as HoldEnvelope;
     assert.equal(envelope.displayCiphertextHash, refHash(ed), "the envelope binds exactly the sealed object handed out");
@@ -198,11 +208,14 @@ test("K17 — every broken pinned input exits 1 with its code on stderr and neve
     ["a second identity source", { ...s.env, NOA_GATE_APPROVER_KID: "approver-example-9" }, "CONFIG_SOURCE_CONFLICT"],
     ["half a configuration", cleanEnv({ NOA_GATE_ROSTER_FILE: s.rosterFile, NOA_GATE_UNSAFE_IN_PROCESS_GRANT_KEY: "1" }), "CONFIG_PINNED_INCOMPLETE"],
     ["a pin with no roster", cleanEnv({ NOA_GATE_ROSTER_SHA256: "sha256:" + "0".repeat(64), NOA_GATE_UNSAFE_IN_PROCESS_GRANT_KEY: "1" }), "CONFIG_PINNED_INCOMPLETE"],
+    // An EMPTY pinned variable is present: the downgrade to the self-minting alpha root is refused.
+    ["an empty roster variable", cleanEnv({ NOA_GATE_ROSTER_FILE: "", NOA_GATE_UNSAFE_IN_PROCESS_GRANT_KEY: "1" }), "CONFIG_PINNED_INCOMPLETE"],
+    ["a relative roster path", { ...s.env, NOA_GATE_ROSTER_FILE: "roster.json" }, "ROSTER_FILE_UNSAFE"],
   ];
   if (process.geteuid?.() === 0) cases.splice(5, 1); // root owns every file: the same-uid arm needs a non-root gate
   for (const [name, env, want] of cases) {
     const r = await runToExit(["serve"], env);
-    assert.equal(r.timedOut, false, `${name}: the gate kept running (a fallback listened)`);
+    assert.equal(r.timedOut, false, `consequence: ${name} — the gate kept running (a fallback listened)`);
     assert.equal(r.code, 1, `${name}: exit ${String(r.code)}; stderr ${r.stderr}`);
     assert.match(r.stderr, new RegExp(`^noa-gate: ${want}: `), `${name}: stderr ${r.stderr}`);
     assert.equal(r.stdout, "", `${name}: nothing may be printed as if a gate were listening`);
@@ -226,7 +239,7 @@ test("restart — the same key file keeps the gate identity, bootId is new, the 
     await first.stop();
   }
   const statePath = `${s.keyFile}.roster-state`;
-  assert.equal(statSync(statePath).mode & 0o777, 0o600);
+  assert.equal(readPrivate(statePath).mode & 0o777, 0o600);
   const second = await startGate(s.env);
   try {
     assert.equal(second.banner["gateKid"], firstBanner["gateKid"]);
@@ -243,12 +256,13 @@ test("restart — the same key file keeps the gate identity, bootId is new, the 
 
 test("keygen is the only minting path: 0600, idempotent, never overwrites, refuses another kid; roster-check matches serve and writes nothing", async () => {
   const s = await pinnedSetup();
-  assert.equal(statSync(s.keyFile).mode & 0o777, 0o600);
-  const before = readFileSync(s.keyFile, "utf8");
+  const before = readPrivate(s.keyFile);
+  assert.equal(before.mode & 0o777, 0o600);
   const again = await runToExit(["keygen", "--key-file", s.keyFile, "--kid", "gate-example-1"], cleanEnv({}));
+  assert.equal(readPrivate(s.keyFile).text, before.text, "consequence: an existing key file is read, never rewritten");
   assert.equal(again.code, 0, again.stderr);
-  assert.equal(readFileSync(s.keyFile, "utf8"), before, "an existing key file is read, never rewritten");
   const other = await runToExit(["keygen", "--key-file", s.keyFile, "--kid", "gate-example-2"], cleanEnv({}));
+  assert.equal(readPrivate(s.keyFile).text, before.text, "consequence: another kid never replaces the key");
   assert.equal(other.code, 1);
   assert.match(other.stderr, /GATE_KEY_KID_MISMATCH/);
   assert.ok(!again.stdout.includes("privateKey"), "keygen never prints the private key");
@@ -273,10 +287,33 @@ test("keygen is the only minting path: 0600, idempotent, never overwrites, refus
 
 test("an unknown subcommand exits 2 and starts nothing; so does a stray flag to keygen", async () => {
   const r = await runToExit(["roster-chek"], cleanEnv({ NOA_GATE_UNSAFE_IN_PROCESS_GRANT_KEY: "1" }));
-  assert.equal(r.timedOut, false, "an unknown subcommand must not boot a gate");
+  assert.equal(r.timedOut, false, "consequence: an unknown subcommand must not boot a gate");
   assert.equal(r.code, 2);
   assert.match(r.stderr, /UNKNOWN_SUBCOMMAND/);
   assert.equal(r.stdout, "");
   const flag = spawnSync(process.execPath, [CLI, "keygen", "--key-file", "/nonexistent/k", "--kid", "gate-a", "--force"], { env: cleanEnv({}), encoding: "utf8" });
   assert.equal(flag.status, 2, flag.stderr);
+});
+
+test("every subcommand refuses an argument it does not know (UNKNOWN_ARGUMENT, exit 2): `serve --roster-file X` boots nothing", async () => {
+  const s = await pinnedSetup();
+  const serve = await runToExit(["serve", "--roster-file", s.rosterFile], cleanEnv({ NOA_GATE_UNSAFE_IN_PROCESS_GRANT_KEY: "1" }));
+  assert.equal(serve.timedOut, false, "consequence: a mistyped pinned configuration must not boot the alpha root");
+  assert.equal(serve.stdout, "", "consequence: nothing listens");
+  assert.equal(serve.code, 2, serve.stderr);
+  assert.match(serve.stderr, /UNKNOWN_ARGUMENT/);
+  const hold = await runToExit(["hold-and-run", "--frobnicate", "x", "--", "true"], cleanEnv({ NOA_GATE_KEY: "k" }));
+  assert.equal(hold.code, 2, hold.stderr);
+  assert.match(hold.stderr, /UNKNOWN_ARGUMENT/);
+  const check = await runToExit(["roster-check", s.rosterFile, "extra"], s.env);
+  assert.equal(check.code, 2, check.stderr);
+  assert.match(check.stderr, /UNKNOWN_ARGUMENT/);
+});
+
+test("roster-check applies serve's environment rules: a second identity source is CONFIG_SOURCE_CONFLICT", async () => {
+  const s = await pinnedSetup();
+  const r = await runToExit(["roster-check", s.rosterFile], { ...s.env, NOA_GATE_APPROVER_KID: "approver-example-9" });
+  assert.equal(r.stdout, "", "consequence: no digest is printed for an environment serve would refuse");
+  assert.equal(r.code, 1, r.stderr);
+  assert.match(r.stderr, /CONFIG_SOURCE_CONFLICT/);
 });

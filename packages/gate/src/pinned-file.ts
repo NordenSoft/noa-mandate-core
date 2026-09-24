@@ -14,11 +14,18 @@
  *   - Every property is read from `fstat` on THAT descriptor, never from a second lookup of the path.
  *   - The bytes read must equal the size `fstat` reported: a file that grows or shrinks while it is
  *     read is refused (`short-read`), not half-trusted.
- *   - With `checkAncestors`, the directory part is resolved once (`realpath`) and the final component
- *     is opened UNDER that resolved directory, so the path that is opened is exactly the chain the
- *     ancestor walk inspects. Every directory up to `/` must be owned by root or by the file's owner and
- *     carry no group/other write bit, unless it is root-owned and sticky (`/tmp`). A principal that can
- *     rename entries in any ancestor can replace the file without ever touching it.
+ *   - With `checkAncestors`, the CONFIGURED path must be absolute and free of `.`/`..` segments, and
+ *     its directory part is resolved here, one component at a time with `lstat`. Every symlink met on
+ *     the way (the configured path's own components and each link target's) is recorded with the
+ *     directory that holds it; once the file's owner is known, each such link must be owned by root or
+ *     that owner AND sit in a directory that passes the ancestor rule. Resolving with `realpath` and
+ *     inspecting only the result let a symlink in a directory the gate's uid can write re-point the gate
+ *     at a different, perfectly admin-owned roster (an archived one, say) without touching any file the
+ *     walk looked at. The final component is opened UNDER the resolved directory, so the path that is
+ *     opened is exactly the chain the ancestor walk inspects. Every directory of that chain up to `/`
+ *     must be owned by root or by the file's owner and carry no group/other write bit, unless it is
+ *     root-owned and sticky (`/tmp`). A principal that can rename entries in any ancestor can replace the
+ *     file without ever touching it.
  *
  * Nothing here parses content. Refusals are returned, never thrown, with one fixed leading token per
  * cause so a caller (and a test) can branch on the cause without reading prose.
@@ -31,18 +38,20 @@ import {
   fsyncSync,
   lstatSync,
   openSync,
+  readlinkSync,
   readSync,
-  realpathSync,
   renameSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { describeThrown, thrownCode } from "noa-mcp-adapter-core/safe-throw";
 
 export type PinnedFileToken =
   | "missing"
+  | "path-form"
+  | "symlink-ancestor"
   | "symlink"
   | "unreadable"
   | "not-regular"
@@ -62,7 +71,8 @@ export interface PinnedReadPolicy {
   readonly requireSingleLink: boolean;
   /** Owner rule; `null` = none. Returns true when the file's uid is acceptable. */
   readonly ownerAllowed: ((uid: number) => boolean) | null;
-  /** Walk `realpath(dirname)` to `/` (see the file header). */
+  /** Resolve the configured directory component by component, vet every symlink met, and walk the
+   *  resolved directory to `/` (see the file header). Requires an absolute, `.`/`..`-free path. */
   readonly checkAncestors: boolean;
 }
 
@@ -82,7 +92,7 @@ function fileRefusal(token: PinnedFileToken, detail: string): PinnedRead {
 /**
  * Every directory from `dir` up to `/` must be owned by root or by `ownerUid`, and must not be writable
  * by group or others unless it is root-owned and sticky. `lstat`, so a component that became a symlink
- * after `realpath` is refused rather than followed. Returns a reason, or `null` when the chain is safe.
+ * after it was resolved is refused rather than followed. Returns a reason, or `null` when the chain is safe.
  */
 export function unsafeAncestor(dir: string, ownerUid: number): string | null {
   let cur = dir;
@@ -107,18 +117,108 @@ export function unsafeAncestor(dir: string, ownerUid: number): string | null {
   }
 }
 
+/** A symlink met while resolving a configured directory, with the (resolved) directory that holds it. */
+export interface ResolvedLink {
+  readonly link: string;
+  readonly container: string;
+  readonly uid: number;
+}
+
+export type DirectoryResolution =
+  | { readonly ok: true; readonly real: string; readonly links: readonly ResolvedLink[] }
+  | { readonly ok: false; readonly token: PinnedFileToken; readonly detail: string };
+
+/** POSIX's own bound on nested symlink expansion (Linux MAXSYMLINKS). */
+const MAX_SYMLINK_EXPANSIONS = 40;
+
+/** Non-empty components of a path, or `null` when a `.` or `..` segment appears. */
+function segments(p: string): string[] | null {
+  const out: string[] = [];
+  for (const c of p.split("/")) {
+    if (c === "") continue;
+    if (c === "." || c === "..") return null;
+    out.push(c);
+  }
+  return out;
+}
+
+/**
+ * Resolve an absolute directory one component at a time with `lstat`, following symlinks by hand so
+ * that every link — the configured path's own and those inside link targets — is RECORDED with the
+ * resolved directory that holds it. A `.`/`..` segment in the configured path or in any link target is
+ * refused: without it, every directory this resolution passes through is either on the final chain or
+ * an ancestor of a recorded link's directory, and both are inspected. Never throws.
+ */
+export function resolveConfiguredDirectory(dir: string): DirectoryResolution {
+  const refuse = (token: PinnedFileToken, detail: string): DirectoryResolution => ({ ok: false, token, detail: `${token}: ${detail}` });
+  if (!isAbsolute(dir)) return refuse("path-form", `${JSON.stringify(dir)} is not an absolute path`);
+  let queue = segments(dir);
+  if (queue === null) return refuse("path-form", `${JSON.stringify(dir)} contains a . or .. segment`);
+  let cur = "/";
+  let expansions = 0;
+  const links: ResolvedLink[] = [];
+  while (queue.length > 0) {
+    const c = queue.shift() as string;
+    const next = cur === "/" ? `/${c}` : `${cur}/${c}`;
+    let st;
+    try {
+      st = lstatSync(next);
+    } catch (err) {
+      if (thrownCode(err) === "ENOENT") return refuse("missing", `${JSON.stringify(next)} does not exist`);
+      return refuse("unreadable", `cannot inspect ${JSON.stringify(next)} (${describeThrown(err)})`);
+    }
+    if (st.isSymbolicLink()) {
+      expansions++;
+      if (expansions > MAX_SYMLINK_EXPANSIONS) return refuse("symlink-ancestor", `more than ${MAX_SYMLINK_EXPANSIONS} symlinks while resolving ${JSON.stringify(dir)}`);
+      let target: string;
+      try {
+        target = readlinkSync(next);
+      } catch (err) {
+        return refuse("unreadable", `cannot read the symlink ${JSON.stringify(next)} (${describeThrown(err)})`);
+      }
+      const targetSegments = segments(target);
+      if (targetSegments === null) return refuse("symlink-ancestor", `the symlink ${JSON.stringify(next)} points through a . or .. segment`);
+      links.push({ link: next, container: cur, uid: st.uid });
+      if (isAbsolute(target)) cur = "/";
+      queue = [...targetSegments, ...queue];
+      continue;
+    }
+    if (!st.isDirectory()) return refuse("ancestor", `${JSON.stringify(next)} is not a directory`);
+    cur = next;
+  }
+  return { ok: true, real: cur, links };
+}
+
+/**
+ * Every recorded symlink must be owned by root or by the file's owner, and the directory holding it
+ * must pass the ancestor rule. Returns a reason, or `null` when every link is the owner's own.
+ */
+export function unsafeLink(links: readonly ResolvedLink[], ownerUid: number): string | null {
+  for (const l of links) {
+    if (l.uid !== 0 && l.uid !== ownerUid) {
+      return `the symlink ${JSON.stringify(l.link)} on the configured path is owned by uid ${l.uid}, neither root nor the file's owner (uid ${ownerUid})`;
+    }
+    const bad = unsafeAncestor(l.container, ownerUid);
+    if (bad !== null) return `the symlink ${JSON.stringify(l.link)} on the configured path sits under an unsafe directory: ${bad}`;
+  }
+  return null;
+}
+
 /** Read one operator-provisioned file under `policy`. Never throws. */
 export function readPinnedFile(filePath: string, policy: PinnedReadPolicy): PinnedRead {
   let dir = dirname(filePath);
   let target = filePath;
+  let links: readonly ResolvedLink[] = [];
   if (policy.checkAncestors) {
-    try {
-      dir = realpathSync(dir);
-    } catch (err) {
-      if (thrownCode(err) === "ENOENT") return fileRefusal("missing", `the directory of ${JSON.stringify(filePath)} does not exist`);
-      return fileRefusal("unreadable", `cannot resolve the directory of ${JSON.stringify(filePath)} (${describeThrown(err)})`);
+    const base = basename(filePath);
+    if (base === "" || base === "." || base === ".." || filePath.endsWith("/")) {
+      return fileRefusal("path-form", `${JSON.stringify(filePath)} does not name a file`);
     }
-    target = join(dir, basename(filePath));
+    const resolved = resolveConfiguredDirectory(dir);
+    if (!resolved.ok) return { ok: false, token: resolved.token, detail: resolved.detail };
+    dir = resolved.real;
+    links = resolved.links;
+    target = join(dir, base);
   }
 
   let fd: number;
@@ -146,6 +246,8 @@ export function readPinnedFile(filePath: string, policy: PinnedReadPolicy): Pinn
       return fileRefusal("owner", `${JSON.stringify(filePath)} is owned by uid ${st.uid}, which this file's owner rule refuses`);
     }
     if (policy.checkAncestors) {
+      const badLink = unsafeLink(links, st.uid);
+      if (badLink !== null) return fileRefusal("symlink-ancestor", badLink);
       const bad = unsafeAncestor(dir, st.uid);
       if (bad !== null) return fileRefusal("ancestor", bad);
     }
@@ -212,5 +314,76 @@ export function writeFileAtomic(filePath: string, bytes: Uint8Array): { ok: true
       }
     }
     return { ok: false, detail: `${JSON.stringify(filePath)} could not be written (${describeThrown(err)})` };
+  }
+}
+
+/**
+ * An exclusive lock file: created `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW` at 0600 and holding the
+ * creating process's pid. Existence IS the lock; `release` removes it. When the file already exists the
+ * holder's pid is returned so the caller can decide whether the holder is still alive. Never throws.
+ */
+export type LockAttempt =
+  | { readonly ok: true; release(): void }
+  | { readonly ok: false; readonly holderPid: number | null; readonly detail: string };
+
+export function tryCreateLock(lockPath: string): LockAttempt {
+  let fd: number;
+  try {
+    fd = openSync(lockPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW, 0o600);
+  } catch (err) {
+    if (thrownCode(err) !== "EEXIST") {
+      return { ok: false, holderPid: null, detail: `${JSON.stringify(lockPath)} could not be created (${describeThrown(err)})` };
+    }
+    return { ok: false, holderPid: readLockHolder(lockPath), detail: `${JSON.stringify(lockPath)} exists` };
+  }
+  try {
+    writeSync(fd, `${process.pid}\n`);
+    fsyncSync(fd);
+  } catch (err) {
+    closeSync(fd);
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      // the lock was never usable; nothing else to undo
+    }
+    return { ok: false, holderPid: null, detail: `${JSON.stringify(lockPath)} could not be written (${describeThrown(err)})` };
+  }
+  closeSync(fd);
+  let released = false;
+  return {
+    ok: true,
+    release(): void {
+      if (released) return;
+      released = true;
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // already gone: an administrator removed it, and the next holder will re-check the state
+      }
+    },
+  };
+}
+
+/** The pid recorded in an existing lock file, or `null` when it cannot be read as one. */
+function readLockHolder(lockPath: string): number | null {
+  const r = readPinnedFile(lockPath, { maxBytes: 64, forbiddenModeBits: 0o022, requireSingleLink: true, ownerAllowed: null, checkAncestors: false });
+  if (!r.ok) return null;
+  const text = new TextDecoder().decode(r.bytes).trim();
+  if (text.length === 0 || text.length > 10) return null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c < 0x30 || c > 0x39) return null;
+  }
+  const pid = Number(text);
+  return pid > 0 ? pid : null;
+}
+
+/** Remove a lock file whose holder was found dead. Never throws; returns whether it is gone. */
+export function removeStaleLock(lockPath: string): boolean {
+  try {
+    unlinkSync(lockPath);
+    return true;
+  } catch (err) {
+    return thrownCode(err) === "ENOENT";
   }
 }

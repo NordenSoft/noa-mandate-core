@@ -9,7 +9,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateKeyPair, type KeyPair } from "noa-approval-artifacts";
 import { parseGateRoster } from "../../src/roster.js";
-import { createPinnedTrust, type GateTrust, type RosterStateStatus } from "../../src/trust.js";
+import { createPinnedTrust, type GateTrust, type PinnedBoot, type PinnedRefusal, type RosterStateStatus } from "../../src/trust.js";
+import { GateEngine } from "../../src/engine.js";
+import { resolveGateConfig } from "../../src/config.js";
+import { InMemoryStore } from "../../src/store.js";
+import { hashSecret } from "../../src/auth.js";
+import { loadSchemas } from "../../src/schemas.js";
+import { body, sampleCommandParams, signPhoneDecision, testSealer } from "../helpers.js";
 
 export const TENANT = "tenant-example-1";
 export const GATE_KID = "gate-example-1";
@@ -132,4 +138,37 @@ export function writeKeyFile(dir: string, key: KeyPair, name = "gate.key.json"):
   writeFileSync(p, JSON.stringify({ kid: key.kid, privateKey: key.privateKey, publicKey: key.publicKey }), { mode: 0o600 });
   chmodSync(p, 0o600);
   return p;
+}
+
+/**
+ * THE CONSEQUENCE of a boot, measured: if it booted, run one HIGH hold through the resulting gate and
+ * let `signer` approve it; return how many grants that produced. A refused boot produces none. A
+ * knockout that lets a bad roster through must turn a "0 grants" assertion red — not merely change
+ * which refusal code is printed.
+ */
+export function grantsAfterBoot(boot: PinnedBoot | PinnedRefusal, signer: ApproverKeys, nowMs: number): number {
+  if (!boot.ok) return 0;
+  boot.release();
+  const agent = { id: "agent-consequence", name: "consequence", apiKeyHash: hashSecret("noa_gateagent_consequence"), createdAt: nowMs };
+  const store = new InMemoryStore();
+  store.putAgent(agent);
+  const engine = new GateEngine({ store, config: resolveGateConfig({ now: () => nowMs }), trust: boot.trust, schemas: loadSchemas(), sealDisplay: testSealer, unsafeInProcessGrantKey: true });
+  const created = engine.createHold(agent, "idem-consequence", body({
+    mode: "ENFORCED",
+    action: { canonical: "noa.command.exec", riskClass: "HIGH", reversible: false },
+    params: sampleCommandParams(),
+    chain: "consequence",
+  }));
+  if (created.status !== 201) return 0;
+  const hold = store.getHold((created.body as { holdId: string }).holdId);
+  if (!hold) return 0;
+  const signed = signPhoneDecision({
+    trust: boot.trust,
+    deferredReceipt: hold.deferredReceipt,
+    holdEnvelope: hold.holdEnvelope,
+    decision: "APPROVE",
+    signer: { kid: signer.kid, privateKey: signer.ed.privateKey },
+  });
+  engine.decide(hold.id, body(signed));
+  return store.listGrants().length;
 }

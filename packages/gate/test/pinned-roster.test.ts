@@ -15,14 +15,20 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   chownSync,
+  closeSync,
   existsSync,
+  fstatSync,
   linkSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  realpathSync,
+  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateKeyPair, virtualHash } from "noa-approval-artifacts";
 import { parseGateRoster, checkRosterClock } from "../src/roster.js";
@@ -38,6 +44,7 @@ import {
   TENANT,
   approverKeys,
   freshDir,
+  grantsAfterBoot,
   newWorld,
   rosterBytes,
   rosterDoc,
@@ -55,13 +62,27 @@ const DAY = 24 * HOUR;
 const OTHER_UID = 4242;
 
 function refused(r: { ok: boolean }): asserts r is PinnedRefusal {
-  assert.equal(r.ok, false, `expected a refusal, got ${JSON.stringify(r)}`);
+  assert.equal(r.ok, false, `consequence: the input must not be accepted (no roster, no boot); got ${JSON.stringify(r)}`);
+}
+/**
+ * REFUSED IS THE CONSEQUENCE, the code is the label: a knockout that removes a check must turn THIS
+ * assertion red — the input going through — not merely change which code a later check prints.
+ */
+function refusedWith(r: { ok: boolean; code?: string }, want: string, label = ""): void {
+  assert.equal(r.ok, false, `consequence: ${label || want} — the input must not be accepted (no roster, no boot); got ${JSON.stringify(r)}`);
+  assert.equal(r.code, want, `${label || want}: ${JSON.stringify(r)}`);
 }
 function booted(r: PinnedBoot | PinnedRefusal): asserts r is PinnedBoot {
   assert.equal(r.ok, true, `expected a boot, got ${JSON.stringify(r)}`);
 }
-function code(r: { ok: boolean; code?: string }): string | undefined {
-  return r.ok ? undefined : r.code;
+/** Mode and content through ONE descriptor, so the two observations are of the same file. */
+function readPrivate(p: string): { mode: number; text: string } {
+  const fd = openSync(p, "r");
+  try {
+    return { mode: fstatSync(fd).mode, text: readFileSync(fd, "utf8") };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Files on disk for one gate: roster (0644), key file (0600), and the default load input. */
@@ -123,12 +144,12 @@ test("the roster digest is JCS over the parsed value: key order, whitespace and 
 
 test("K4 — a quorum of 2 is QUORUM_UNSUPPORTED, never read as 1; below 1 or an unknown class is ROSTER_QUORUM_INVALID", () => {
   const world = newWorld();
-  assert.equal(code(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { quorum: { HIGH: 2 } })))), "QUORUM_UNSUPPORTED");
-  assert.equal(code(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { quorum: { HIGH: 1, CRITICAL: 3 } })))), "QUORUM_UNSUPPORTED");
-  assert.equal(code(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { quorum: { HIGH: 0 } })))), "ROSTER_QUORUM_INVALID");
-  assert.equal(code(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { quorum: { URGENT: 1 } })))), "ROSTER_QUORUM_INVALID");
-  assert.equal(code(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { quorum: {} })))), "ROSTER_QUORUM_INVALID");
-  assert.equal(code(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { quorum: { HIGH: "1" } })))), "ROSTER_QUORUM_INVALID");
+  refusedWith(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { quorum: { HIGH: 2 } }))), "QUORUM_UNSUPPORTED");
+  refusedWith(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { quorum: { HIGH: 1, CRITICAL: 3 } }))), "QUORUM_UNSUPPORTED");
+  refusedWith(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { quorum: { HIGH: 0 } }))), "ROSTER_QUORUM_INVALID");
+  refusedWith(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { quorum: { URGENT: 1 } }))), "ROSTER_QUORUM_INVALID");
+  refusedWith(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { quorum: {} }))), "ROSTER_QUORUM_INVALID");
+  refusedWith(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { quorum: { HIGH: "1" } }))), "ROSTER_QUORUM_INVALID");
 });
 
 test("K8 — an approver key equal to the gate key is ROSTER_KEY_REUSE (the gate cannot approve itself); so is a shared X25519 key", () => {
@@ -136,10 +157,20 @@ test("K8 — an approver key equal to the gate key is ROSTER_KEY_REUSE (the gate
   const selfApprover = rosterDoc(world, NOW);
   (selfApprover["approvers"] as Record<string, Record<string, unknown>>)[world.approver.kid]!["publicKey"] = world.gate.publicKey;
   const r = parseGateRoster(rosterBytes(selfApprover));
-  assert.equal(code(r), "ROSTER_KEY_REUSE", JSON.stringify(r));
+  refusedWith(r, "ROSTER_KEY_REUSE", JSON.stringify(r));
+
+  // The consequence the rule exists for: booted, the gate's own private key would approve its own hold.
+  const selfBoot = loadPinnedTrust(onDisk(world, selfApprover).input);
+  assert.equal(grantsAfterBoot(selfBoot, { kid: world.approver.kid, ed: world.gate, x: world.approver.x }, NOW), 0, "consequence: the gate key must not approve its own hold");
 
   const sharedRecipient = rosterDoc(world, NOW, { audit: { kid: "audit-example-1", hpkePublicKey: world.approver.x.publicKey } });
-  assert.equal(code(parseGateRoster(rosterBytes(sharedRecipient))), "ROSTER_KEY_REUSE");
+  refusedWith(parseGateRoster(rosterBytes(sharedRecipient)), "ROSTER_KEY_REUSE");
+  // The same key under a second spelling (bit 255 set: RFC 7748 masks it, so it is the same key) is
+  // refused as a non-canonical key before the string comparison could miss it.
+  const alias = Buffer.from(world.approver.x.publicKey, "base64");
+  alias[43] = (alias[43] as number) | 0x80;
+  const aliased = rosterDoc(world, NOW, { audit: { kid: "audit-example-1", hpkePublicKey: alias.toString("base64") } });
+  refusedWith(parseGateRoster(rosterBytes(aliased)), "ROSTER_HPKE_KEY_INVALID");
 });
 
 test("K14 — an approver kid equal to the gate kid is ROSTER_DUPLICATE_KID (it would overwrite the GATE keyring entry)", () => {
@@ -156,8 +187,8 @@ test("K14 — an approver kid equal to the gate kid is ROSTER_DUPLICATE_KID (it 
     },
   });
   const r = parseGateRoster(rosterBytes(doc));
-  assert.equal(code(r), "ROSTER_DUPLICATE_KID", JSON.stringify(r));
-  assert.equal(code(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { audit: { kid: world.approver.kid, hpkePublicKey: world.audit.publicKey } })))), "ROSTER_DUPLICATE_KID");
+  refusedWith(r, "ROSTER_DUPLICATE_KID", JSON.stringify(r));
+  refusedWith(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { audit: { kid: world.approver.kid, hpkePublicKey: world.audit.publicKey } }))), "ROSTER_DUPLICATE_KID");
 });
 
 test("K18 — a small-order Ed25519 approver key is ROSTER_KEY_INVALID at load; a raw-hex or low-order X25519 key is ROSTER_HPKE_KEY_INVALID", () => {
@@ -166,34 +197,51 @@ test("K18 — a small-order Ed25519 approver key is ROSTER_KEY_INVALID at load; 
   const smallOrder = Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from("01" + "00".repeat(31), "hex")]).toString("base64");
   const bad = rosterDoc(world, NOW);
   (bad["approvers"] as Record<string, Record<string, unknown>>)[world.approver.kid]!["publicKey"] = smallOrder;
-  assert.equal(code(parseGateRoster(rosterBytes(bad))), "ROSTER_KEY_INVALID");
+  refusedWith(parseGateRoster(rosterBytes(bad)), "ROSTER_KEY_INVALID");
 
   const rawHex = Buffer.from(world.approver.x.publicKey, "base64").subarray(12).toString("hex");
   const hex = rosterDoc(world, NOW);
   (hex["approvers"] as Record<string, Record<string, unknown>>)[world.approver.kid]!["hpkePublicKey"] = rawHex;
-  assert.equal(code(parseGateRoster(rosterBytes(hex))), "ROSTER_HPKE_KEY_INVALID");
+  refusedWith(parseGateRoster(rosterBytes(hex)), "ROSTER_HPKE_KEY_INVALID");
 
   // A low-order X25519 point (u = 1): canonical DER, but the sealer can never seal to it.
   const lowOrder = Buffer.concat([Buffer.from("302a300506032b656e032100", "hex"), Buffer.from("01" + "00".repeat(31), "hex")]).toString("base64");
   const low = rosterDoc(world, NOW, { audit: { kid: "audit-example-1", hpkePublicKey: lowOrder } });
-  assert.equal(code(parseGateRoster(rosterBytes(low))), "ROSTER_HPKE_KEY_INVALID");
+  refusedWith(parseGateRoster(rosterBytes(low)), "ROSTER_HPKE_KEY_INVALID");
+
+  // The two x = 0 points spelled with the sign bit set (RFC 8032 §5.1.3: decoding fails): the same
+  // small-order points as the canonical entries, under a second spelling.
+  for (const hexKey of ["01" + "00".repeat(30) + "80", "ec" + "ff".repeat(31)]) {
+    const signed = rosterDoc(world, NOW);
+    (signed["approvers"] as Record<string, Record<string, unknown>>)[world.approver.kid]!["publicKey"] =
+      Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(hexKey, "hex")]).toString("base64");
+    refusedWith(parseGateRoster(rosterBytes(signed)), "ROSTER_KEY_INVALID", `x = 0 with the sign bit: ${hexKey}`);
+  }
+  // An X25519 u-coordinate at or above p is a second spelling of u - p: p itself (u = 0), and p + 9,
+  // which is the base point u = 9 — a perfectly valid key under a second string.
+  for (const hexKey of ["ed" + "ff".repeat(30) + "7f", "f6" + "ff".repeat(30) + "7f"]) {
+    const big = rosterDoc(world, NOW, {
+      audit: { kid: "audit-example-1", hpkePublicKey: Buffer.concat([Buffer.from("302a300506032b656e032100", "hex"), Buffer.from(hexKey, "hex")]).toString("base64") },
+    });
+    refusedWith(parseGateRoster(rosterBytes(big)), "ROSTER_HPKE_KEY_INVALID", `u >= p: ${hexKey}`);
+  }
 });
 
 test("K19 — the closed world: a sig member, a requiredApprovals member and an unknown approver member are refused, not ignored", () => {
   const world = newWorld();
-  assert.equal(code(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { sig: { kid: "x", value: "y" } })))), "ROSTER_UNRECOGNIZED_MEMBER");
-  assert.equal(code(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { requiredApprovals: 2 })))), "ROSTER_UNRECOGNIZED_MEMBER");
+  refusedWith(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { sig: { kid: "x", value: "y" } }))), "ROSTER_UNRECOGNIZED_MEMBER");
+  refusedWith(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { requiredApprovals: 2 }))), "ROSTER_UNRECOGNIZED_MEMBER");
   const extra = rosterDoc(world, NOW);
   (extra["approvers"] as Record<string, Record<string, unknown>>)[world.approver.kid]!["quorumWeight"] = 2;
-  assert.equal(code(parseGateRoster(rosterBytes(extra))), "ROSTER_UNRECOGNIZED_MEMBER");
-  assert.equal(code(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { epoch: { keyManifestVersion: 2, keyManifestHash: "sha256:" + "2".repeat(64), note: "x" } })))), "ROSTER_UNRECOGNIZED_MEMBER");
-  assert.equal(code(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { spec: "noa.gate-roster/2" })))), "ROSTER_SPEC_UNSUPPORTED");
+  refusedWith(parseGateRoster(rosterBytes(extra)), "ROSTER_UNRECOGNIZED_MEMBER");
+  refusedWith(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { epoch: { keyManifestVersion: 2, keyManifestHash: "sha256:" + "2".repeat(64), note: "x" } }))), "ROSTER_UNRECOGNIZED_MEMBER");
+  refusedWith(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { spec: "noa.gate-roster/2" }))), "ROSTER_SPEC_UNSUPPORTED");
 });
 
 test("members are judged before the closed world (an unknown member AND a bad kid → the kid's code)", () => {
   const world = newWorld();
   const doc = rosterDoc(world, NOW, { extra: true, gate: { kid: "Gate-Upper", publicKey: world.gate.publicKey } });
-  assert.equal(code(parseGateRoster(rosterBytes(doc))), "ROSTER_KID_INVALID");
+  refusedWith(parseGateRoster(rosterBytes(doc)), "ROSTER_KID_INVALID");
 });
 
 test("member rules: kid, tenant, version, epoch, role, times, executionSigner, approver count, role sufficiency", () => {
@@ -222,7 +270,7 @@ test("member rules: kid, tenant, version, epoch, role, times, executionSigner, a
   ];
   for (const [want, doc] of cases) {
     const r = parseGateRoster(rosterBytes(doc));
-    assert.equal(code(r), want, `${want}: ${JSON.stringify(r)}`);
+    refusedWith(r, want, `${want}: ${JSON.stringify(r)}`);
   }
   const second = approverKeys(2);
   const twoActive = rosterDoc(world, NOW);
@@ -233,7 +281,7 @@ test("member rules: kid, tenant, version, epoch, role, times, executionSigner, a
     validFrom: new Date(NOW - HOUR).toISOString(),
     revokedAt: null,
   };
-  assert.equal(code(parseGateRoster(rosterBytes(twoActive))), "ROSTER_APPROVER_COUNT_UNSUPPORTED");
+  refusedWith(parseGateRoster(rosterBytes(twoActive)), "ROSTER_APPROVER_COUNT_UNSUPPORTED");
   // approve-high is sufficient when the quorum names only HIGH.
   assert.equal(parseGateRoster(rosterBytes(rosterDoc(world, NOW, { quorum: { HIGH: 1 } }))).ok, true);
 });
@@ -256,7 +304,9 @@ test("K11 — a digest pin that does not match is ROSTER_DIGEST_MISMATCH, checke
     },
   });
   const r = parseGateRoster(rosterBytes(edited), { expectedDigest: honest.digest });
-  assert.equal(code(r), "ROSTER_DIGEST_MISMATCH", JSON.stringify(r));
+  refusedWith(r, "ROSTER_DIGEST_MISMATCH", JSON.stringify(r));
+  const booted2 = loadPinnedTrust({ ...onDisk(world, edited).input, rosterSha256: honest.digest });
+  assert.equal(grantsAfterBoot(booted2, attacker, NOW), 0, "consequence: the edited-in approver gets no grant");
   assert.equal(parseGateRoster(rosterBytes(rosterDoc(world, NOW)), { expectedDigest: honest.digest }).ok, true);
 });
 
@@ -269,15 +319,19 @@ test("stage 8 — not yet valid, expired, a window over 90 days, a future-activa
   };
   const clock = (doc: Record<string, unknown>, at = NOW) => {
     const r = parse(doc);
-    return code(checkRosterClock(r.roster, r.activeApproverKid, at));
+    return checkRosterClock(r.roster, r.activeApproverKid, at);
   };
-  assert.equal(clock(rosterDoc(world, NOW)), undefined);
-  assert.equal(clock(rosterDoc(world, NOW), NOW - 2 * HOUR), "ROSTER_NOT_YET_VALID");
-  assert.equal(clock(rosterDoc(world, NOW), NOW + 31 * DAY), "ROSTER_EXPIRED");
-  assert.equal(clock(rosterDoc(world, NOW, { expiresAt: new Date(NOW + 90 * DAY).toISOString() })), "ROSTER_VALIDITY_TOO_LONG");
+  assert.equal(clock(rosterDoc(world, NOW)).ok, true, "control: a roster inside its window loads");
+  // The roster itself not yet valid while its approver already is: only the roster window refuses it.
+  const early = rosterDoc(world, NOW);
+  (early["approvers"] as Record<string, Record<string, unknown>>)[world.approver.kid]!["validFrom"] = new Date(NOW - 3 * HOUR).toISOString();
+  refusedWith(clock(early, NOW - 2 * HOUR), "ROSTER_NOT_YET_VALID");
+  refusedWith(clock(rosterDoc(world, NOW), NOW - 2 * HOUR), "ROSTER_NOT_YET_VALID");
+  refusedWith(clock(rosterDoc(world, NOW), NOW + 31 * DAY), "ROSTER_EXPIRED");
+  refusedWith(clock(rosterDoc(world, NOW, { expiresAt: new Date(NOW + 90 * DAY).toISOString() })), "ROSTER_VALIDITY_TOO_LONG");
   const later = rosterDoc(world, NOW);
   (later["approvers"] as Record<string, Record<string, unknown>>)[world.approver.kid]!["validFrom"] = new Date(NOW + HOUR).toISOString();
-  assert.equal(clock(later), "ROSTER_APPROVER_NOT_YET_VALID");
+  refusedWith(clock(later), "ROSTER_APPROVER_NOT_YET_VALID");
   const old = approverKeys(2);
   const future = rosterDoc(world, NOW);
   (future["approvers"] as Record<string, unknown>)[old.kid] = {
@@ -287,7 +341,7 @@ test("stage 8 — not yet valid, expired, a window over 90 days, a future-activa
     validFrom: new Date(NOW - DAY).toISOString(),
     revokedAt: new Date(NOW + HOUR).toISOString(),
   };
-  assert.equal(clock(future), "ROSTER_TIME_INVALID");
+  refusedWith(clock(future), "ROSTER_TIME_INVALID");
 });
 
 // ── stage 2: file discipline ────────────────────────────────────────────────────────────────────
@@ -311,6 +365,7 @@ test("K12 — a roster owned by the gate's own uid is ROSTER_FILE_UNSAFE owner, 
   if (process.geteuid?.() === 0) chownSync(rosterFile, OTHER_UID, OTHER_UID);
   const gateUid = statSync(rosterFile).uid;
   const r = loadPinnedTrust({ ...input, gateEuid: gateUid });
+  assert.equal(grantsAfterBoot(r, attacker, NOW), 0, "consequence: an approver the gate's own uid wrote in gets no grant");
   refused(r);
   assert.equal(r.code, "ROSTER_FILE_UNSAFE");
   assert.match(r.detail, /^owner: /);
@@ -318,6 +373,7 @@ test("K12 — a roster owned by the gate's own uid is ROSTER_FILE_UNSAFE owner, 
   const escaped = loadPinnedTrust({ ...input, gateEuid: gateUid, unsafeSameUid: true });
   booted(escaped);
   assert.equal(escaped.rosterCustody, "SAME-UID (unsafe)");
+  escaped.release();
 });
 
 test("K12 — file arms: group-writable mode, symlink, FIFO (returns promptly), second hard link, group-writable parent, oversize, missing", () => {
@@ -415,10 +471,10 @@ test("a missing key file is GATE_KEY_FILE_MISSING and none is created; a loose k
 test("stage 10 — the roster's executionSigner and NOA_GATE_GRANT_SIGNER_SOCKET must agree, both ways", () => {
   const world = newWorld();
   const noSigner = onDisk(world, rosterDoc(world, NOW));
-  assert.equal(code(loadPinnedTrust({ ...noSigner.input, grantSignerSocketSet: true })), "ROSTER_EXEC_SIGNER_MISMATCH");
+  refusedWith(loadPinnedTrust({ ...noSigner.input, grantSignerSocketSet: true }), "ROSTER_EXEC_SIGNER_MISMATCH");
   const exec = generateKeyPair("exec-example-1");
   const withSigner = onDisk(world, rosterDoc(world, NOW, { executionSigner: { kid: exec.kid, publicKey: exec.publicKey } }));
-  assert.equal(code(loadPinnedTrust(withSigner.input)), "ROSTER_EXEC_SIGNER_MISMATCH");
+  refusedWith(loadPinnedTrust(withSigner.input), "ROSTER_EXEC_SIGNER_MISMATCH");
   const ok = loadPinnedTrust({ ...withSigner.input, grantSignerSocketSet: true });
   booted(ok);
   assert.deepEqual(ok.trust.keyring[GATE_KID]!.roles, ["hold-signer"], "an external signer takes execution-signer away from the gate key");
@@ -445,12 +501,14 @@ test("K13 — a lower roster version is ROSTER_ROLLBACK (it would re-admit a rev
   assert.equal(first.stateStatus, "INITIALIZED");
   assert.equal(first.commitState(), null);
   const statePath = `${disk.keyFile}.roster-state`;
-  assert.equal(statSync(statePath).mode & 0o777, 0o600, "the state file is private to the gate");
-  assert.deepEqual(JSON.parse(readFileSync(statePath, "utf8")), { rosterDigest: first.rosterDigest, rosterVersion: 3, spec: "noa.gate-roster-state/1" });
+  const written = readPrivate(statePath);
+  assert.equal(written.mode & 0o777, 0o600, "the state file is private to the gate");
+  assert.deepEqual(JSON.parse(written.text), { rosterDigest: first.rosterDigest, rosterVersion: 3, spec: "noa.gate-roster-state/1" });
 
   const again = loadPinnedTrust(disk.input);
   booted(again);
   assert.equal(again.stateStatus, "UNCHANGED");
+  again.release();
 
   // v2: the retired approver is active again and the current one is gone — a restore of an old file.
   const v2 = rosterDoc(world, NOW, {
@@ -467,6 +525,7 @@ test("K13 — a lower roster version is ROSTER_ROLLBACK (it would re-admit a rev
   });
   writeFileSync(disk.rosterFile, JSON.stringify(v2));
   const rolled = loadPinnedTrust(disk.input);
+  assert.equal(grantsAfterBoot(rolled, retired, NOW), 0, "consequence: the approver revoked in v3 gets no grant from a restored v2");
   refused(rolled);
   assert.equal(rolled.code, "ROSTER_ROLLBACK");
 
@@ -480,7 +539,16 @@ test("K13 — a lower roster version is ROSTER_ROLLBACK (it would re-admit a rev
   booted(advanced);
   assert.equal(advanced.stateStatus, "ADVANCED");
   assert.equal(advanced.commitState(), null);
-  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).rosterVersion, 4);
+  assert.equal(JSON.parse(readPrivate(statePath).text).rosterVersion, 4);
+});
+
+test("stage 11 — a loose state file is STATE_FILE_UNSAFE even when its content is valid", () => {
+  const world = newWorld();
+  const disk = onDisk(world, rosterDoc(world, NOW));
+  const statePath = `${disk.keyFile}.roster-state`;
+  writeFileSync(statePath, JSON.stringify({ rosterDigest: "sha256:" + "a".repeat(64), rosterVersion: 1, spec: "noa.gate-roster-state/1" }), { mode: 0o644 });
+  chmodSync(statePath, 0o644);
+  refusedWith(loadPinnedTrust(disk.input), "STATE_FILE_UNSAFE");
 });
 
 test("stage 11 — a corrupt state file is STATE_FILE_CORRUPT; a loose one is STATE_FILE_UNSAFE", () => {
@@ -488,11 +556,11 @@ test("stage 11 — a corrupt state file is STATE_FILE_CORRUPT; a loose one is ST
   const disk = onDisk(world, rosterDoc(world, NOW));
   const statePath = `${disk.keyFile}.roster-state`;
   writeFileSync(statePath, JSON.stringify({ spec: "noa.gate-roster-state/1", rosterVersion: 1 }), { mode: 0o600 });
-  assert.equal(code(loadPinnedTrust(disk.input)), "STATE_FILE_CORRUPT");
+  refusedWith(loadPinnedTrust(disk.input), "STATE_FILE_CORRUPT");
   writeFileSync(statePath, JSON.stringify({ spec: "noa.gate-roster-state/1", rosterVersion: 1, rosterDigest: "sha256:" + "a".repeat(64), extra: 1 }));
-  assert.equal(code(loadPinnedTrust(disk.input)), "STATE_FILE_CORRUPT");
+  refusedWith(loadPinnedTrust(disk.input), "STATE_FILE_CORRUPT");
   chmodSync(statePath, 0o644);
-  assert.equal(code(loadPinnedTrust(disk.input)), "STATE_FILE_UNSAFE");
+  refusedWith(loadPinnedTrust(disk.input), "STATE_FILE_UNSAFE");
 });
 
 // ── stages 0, 1 and 7: the environment ──────────────────────────────────────────────────────────
@@ -500,19 +568,22 @@ test("stage 11 — a corrupt state file is STATE_FILE_CORRUPT; a loose one is ST
 test("stages 0-1 — any pinned variable selects pinned mode; half a configuration or a second identity source is refused", () => {
   assert.deepEqual(resolveTrustMode({}, true), { mode: "alpha" });
   assert.deepEqual(resolveTrustMode({ NOA_GATE_TENANT: "t" }, true), { mode: "alpha" });
-  assert.equal(code(resolveTrustMode({ NOA_GATE_ROSTER_FILE: "/r" }, false) as { ok: boolean; code?: string }), "PINNED_PLATFORM_UNSUPPORTED");
+  refusedWith(resolveTrustMode({ NOA_GATE_ROSTER_FILE: "/r" }, false) as { ok: boolean; code?: string }, "PINNED_PLATFORM_UNSUPPORTED");
   for (const env of [
     { NOA_GATE_ROSTER_FILE: "/r" },
     { NOA_GATE_KEY_FILE: "/k" },
     { NOA_GATE_ROSTER_FILE: "/r", NOA_GATE_KEY_FILE: "" },
     { NOA_GATE_ROSTER_SHA256: "sha256:" + "0".repeat(64) },
     { NOA_GATE_UNSAFE_ROSTER_SAME_UID: "1" },
+    // "Present" includes EMPTY: an empty pinned variable is not "not pinned", it is half a configuration.
+    { NOA_GATE_ROSTER_FILE: "" },
+    { NOA_GATE_KEY_FILE: "", NOA_GATE_ROSTER_SHA256: "" },
   ]) {
-    assert.equal(code(resolveTrustMode(env, true) as { ok: boolean; code?: string }), "CONFIG_PINNED_INCOMPLETE", JSON.stringify(env));
+    refusedWith(resolveTrustMode(env, true) as { ok: boolean; code?: string }, "CONFIG_PINNED_INCOMPLETE", JSON.stringify(env));
   }
   for (const extra of ["NOA_GATE_APPROVER_KID", "NOA_GATE_APPROVER_HPKE_PUBLIC_KEY", "NOA_GATE_GRANT_SIGNER_KID", "NOA_GATE_GRANT_SIGNER_PUBLIC_KEY"]) {
     const r = resolveTrustMode({ NOA_GATE_ROSTER_FILE: "/r", NOA_GATE_KEY_FILE: "/k", [extra]: "x" }, true);
-    assert.equal(code(r as { ok: boolean; code?: string }), "CONFIG_SOURCE_CONFLICT", extra);
+    refusedWith(r as { ok: boolean; code?: string }, "CONFIG_SOURCE_CONFLICT", extra);
   }
   const ok = resolveTrustMode({ NOA_GATE_ROSTER_FILE: "/r", NOA_GATE_KEY_FILE: "/k", NOA_GATE_UNSAFE_ROSTER_SAME_UID: "1" }, true);
   assert.deepEqual(ok, { mode: "pinned", rosterFile: "/r", keyFile: "/k", rosterSha256: undefined, unsafeSameUid: true });
@@ -521,7 +592,7 @@ test("stages 0-1 — any pinned variable selects pinned mode; half a configurati
 test("stage 7 — NOA_GATE_TENANT that differs from the roster is CONFIG_SOURCE_CONFLICT; the same value is accepted", () => {
   const world = newWorld();
   const disk = onDisk(world, rosterDoc(world, NOW));
-  assert.equal(code(loadPinnedTrust({ ...disk.input, tenantEnv: "tenant-example-2" })), "CONFIG_SOURCE_CONFLICT");
+  refusedWith(loadPinnedTrust({ ...disk.input, tenantEnv: "tenant-example-2" }), "CONFIG_SOURCE_CONFLICT");
   assert.equal(loadPinnedTrust({ ...disk.input, tenantEnv: TENANT }).ok, true);
 });
 
@@ -543,10 +614,14 @@ function bootFromEnv(env: Record<string, string>, platform: boolean, over: Parti
     nowMs: NOW,
     ...over,
   });
-  return r.ok ? "BOOTED" : r.code;
+  if (r.ok) {
+    r.release();
+    return "BOOTED";
+  }
+  return r.code;
 }
 
-test("precedence — stages 0|1, 1|2, 2|3, 3|4, 4|5, 5|6, 6|7, 7|8, 8|9, 9|10, 10|11: the earlier stage's code wins", () => {
+test("precedence — stages 0|1, 1|2, 2|2, 2|3, 3|4, 4|5, 5|6, 6|7, 7|8, 8|9, 9|10, 10|11, 11|11: the earlier check's code wins", () => {
   const world = newWorld();
   const dir = freshDir("precedence");
   const keyFile = writeKeyFile(dir, world.gate);
@@ -558,6 +633,8 @@ test("precedence — stages 0|1, 1|2, 2|3, 3|4, 4|5, 5|6, 6|7, 7|8, 8|9, 9|10, 1
   assert.equal(bootFromEnv({ NOA_GATE_ROSTER_FILE: "/absent" }, false, {}), "PINNED_PLATFORM_UNSUPPORTED");
   // 1|2: a second identity source AND a missing roster file.
   assert.equal(bootFromEnv(env(join(dir, "absent.json"), { NOA_GATE_APPROVER_KID: "x" }), true, {}), "CONFIG_SOURCE_CONFLICT");
+  // 2 (prelude) | 2 (file): a root gate AND a missing roster file.
+  assert.equal(bootFromEnv(env(join(dir, "absent.json")), true, { gateEuid: 0 }), "PINNED_ROOT_GATE");
   // 2|3: a group-writable file AND unparsable bytes.
   const loose = join(dir, "loose.json");
   writeFileSync(loose, "{not json", { mode: 0o664 });
@@ -581,7 +658,13 @@ test("precedence — stages 0|1, 1|2, 2|3, 3|4, 4|5, 5|6, 6|7, 7|8, 8|9, 9|10, 1
   // 10|11: a signer posture mismatch AND a rollback.
   writeFileSync(`${keyFile}.roster-state`, JSON.stringify({ rosterDigest: "sha256:" + "a".repeat(64), rosterVersion: 99, spec: "noa.gate-roster-state/1" }), { mode: 0o600 });
   assert.equal(bootFromEnv(env(put("ten.json", good)), true, { grantSignerSocketSet: true }), "ROSTER_EXEC_SIGNER_MISMATCH");
-  // …and with the posture fixed, the rollback is what refuses.
+  // 10|11 (lock): a signer posture mismatch AND a live lock; then the lock AND a rollback.
+  const lockPath = `${keyFile}.roster-state.lock`;
+  writeFileSync(lockPath, `${process.pid}\n`, { mode: 0o600 });
+  assert.equal(bootFromEnv(env(put("ten-lock.json", good)), true, { grantSignerSocketSet: true }), "ROSTER_EXEC_SIGNER_MISMATCH");
+  assert.equal(bootFromEnv(env(put("eleven-lock.json", good)), true, {}), "STATE_LOCKED");
+  rmSync(lockPath);
+  // …and with the posture fixed and the lock gone, the rollback is what refuses.
   assert.equal(bootFromEnv(env(put("eleven.json", good)), true, {}), "ROSTER_ROLLBACK");
 });
 
@@ -589,4 +672,154 @@ test("a generated X25519 recipient key is accepted in its canonical base64 DER f
   const world = newWorld();
   const doc = rosterDoc(world, NOW, { audit: { kid: "audit-example-1", hpkePublicKey: x25519Pair().publicKey } });
   assert.equal(parseGateRoster(rosterBytes(doc)).ok, true);
+});
+
+// ── QA round 1: the configured path, a root gate, the high-water lock, the state owner ────────────
+
+test("K12 symlink — a symlink on the configured roster path in a directory others can write is ROSTER_FILE_UNSAFE symlink-ancestor, and the archived roster it points at never grants", () => {
+  const world = newWorld();
+  const retired = approverKeys(9);
+  const base = freshDir("symlink");
+  const admin = join(base, "admin");
+  const archive = join(base, "admin-archive");
+  mkdirSync(admin);
+  chmodSync(admin, 0o755);
+  mkdirSync(archive);
+  chmodSync(archive, 0o755);
+  writeRoster(admin, rosterDoc(world, NOW));
+  // The archived roster: the approver since retired is its active one.
+  writeRoster(archive, rosterDoc(world, NOW, {
+    rosterVersion: 2,
+    approvers: { [retired.kid]: { role: "approve-critical", publicKey: retired.ed.publicKey, hpkePublicKey: retired.x.publicKey, validFrom: new Date(NOW - HOUR).toISOString(), revokedAt: null } },
+  }));
+  const keyFile = writeKeyFile(base, world.gate);
+  // A directory the gate's uid (here: anyone) can write, holding a symlink re-pointed at the archive.
+  const gatehome = join(base, "gatehome");
+  mkdirSync(gatehome);
+  chmodSync(gatehome, 0o777);
+  symlinkSync(archive, join(gatehome, "cfg"));
+  const input: LoadPinnedTrustInput = {
+    rosterFile: join(gatehome, "cfg", "roster.json"), keyFile, rosterSha256: undefined, unsafeSameUid: false,
+    tenantEnv: undefined, grantSignerSocketSet: false, gateEuid: OTHER_UID, nowMs: NOW, now: () => NOW,
+  };
+  const r = loadPinnedTrust(input);
+  assert.equal(grantsAfterBoot(r, retired, NOW), 0, "consequence: the archived roster's approver gets no grant");
+  refused(r);
+  assert.equal(r.code, "ROSTER_FILE_UNSAFE");
+  assert.match(r.detail, /^symlink-ancestor: /);
+
+  // Control: the same kind of symlink, owned by the roster's owner in a directory only that owner can
+  // write, is the administrator's own indirection and is accepted.
+  const links = join(base, "admin-links");
+  mkdirSync(links);
+  chmodSync(links, 0o755);
+  symlinkSync(admin, join(links, "cfg"));
+  const ok = loadPinnedTrust({ ...input, rosterFile: join(links, "cfg", "roster.json") });
+  booted(ok);
+  assert.equal(ok.roster.rosterVersion, 3);
+  ok.release();
+});
+
+test("the configured roster path: a platform symlink owned by root (macOS /var -> /private/var) is accepted; relative and dot-segment paths are refused", () => {
+  const world = newWorld();
+  const disk = onDisk(world, rosterDoc(world, NOW));
+  // Rebuild the path through the platform's own temp-dir spelling: on macOS that goes through the
+  // root-owned /var symlink; on Linux it is the same real path.
+  const raw = tmpdir();
+  const real = realpathSync(raw);
+  const viaPlatform = disk.rosterFile.startsWith(real) ? join(raw, disk.rosterFile.slice(real.length)) : disk.rosterFile;
+  const boot = loadPinnedTrust({ ...disk.input, rosterFile: viaPlatform });
+  booted(boot);
+  boot.release();
+  // Built by concatenation on purpose: path.join would normalize the dot segments away.
+  for (const bad of ["roster.json", `${disk.dir}/../${disk.dir.split("/").pop() as string}/roster.json`, `${disk.dir}/./roster.json`]) {
+    const r = loadPinnedTrust({ ...disk.input, rosterFile: bad });
+    refused(r);
+    assert.equal(r.code, "ROSTER_FILE_UNSAFE", bad);
+    assert.match(r.detail, /^path-form: /, bad);
+  }
+});
+
+test("a gate running as root is PINNED_ROOT_GATE (root can rewrite any roster); the development escape says ROOT-GATE (unsafe)", () => {
+  const world = newWorld();
+  const disk = onDisk(world, rosterDoc(world, NOW));
+  const r = loadPinnedTrust({ ...disk.input, gateEuid: 0 });
+  assert.equal(grantsAfterBoot(r, world.approver, NOW), 0, "consequence: no gate boots as root under the protected posture");
+  refusedWith(r, "PINNED_ROOT_GATE");
+  const escaped = loadPinnedTrust({ ...disk.input, gateEuid: 0, unsafeSameUid: true });
+  booted(escaped);
+  assert.equal(escaped.rosterCustody, "ROOT-GATE (unsafe)");
+  escaped.release();
+});
+
+test("K13 lock — overlapping boots on one key file are serialized: the second is STATE_LOCKED until the first commits, so the floor never goes down", () => {
+  const world = newWorld();
+  const disk = onDisk(world, rosterDoc(world, NOW, { rosterVersion: 4 }));
+  const v5 = writeRoster(disk.dir, rosterDoc(world, NOW, { rosterVersion: 5 }), "roster-v5.json");
+  const first = loadPinnedTrust(disk.input);
+  booted(first);
+  const second = loadPinnedTrust({ ...disk.input, rosterFile: v5 });
+  assert.equal(second.ok, false, "consequence: a second boot must not proceed while the first holds the high-water state");
+  assert.equal(second.ok ? "" : second.code, "STATE_LOCKED");
+  assert.equal(first.commitState(), null);
+  const statePath = `${disk.keyFile}.roster-state`;
+  assert.equal(existsSync(`${statePath}.lock`), false, "commitState releases the lock");
+  const later = loadPinnedTrust({ ...disk.input, rosterFile: v5 });
+  booted(later);
+  assert.equal(later.stateStatus, "ADVANCED");
+  assert.equal(later.commitState(), null);
+  assert.equal(JSON.parse(readPrivate(statePath).text).rosterVersion, 5);
+  // A boot of the older roster now meets the floor.
+  const stale = loadPinnedTrust(disk.input);
+  refusedWith(stale, "ROSTER_ROLLBACK");
+  assert.equal(existsSync(`${statePath}.lock`), false, "a refused load releases the lock");
+});
+
+test("K13 re-compare — a state file changed under the lock by something that ignores it is re-read at commit, and the floor is not lowered", () => {
+  const world = newWorld();
+  const disk = onDisk(world, rosterDoc(world, NOW, { rosterVersion: 4 }));
+  const boot = loadPinnedTrust(disk.input);
+  booted(boot);
+  const statePath = `${disk.keyFile}.roster-state`;
+  // An administrator's restore writes a higher floor while the boot is between its read and its write.
+  writeFileSync(statePath, JSON.stringify({ rosterDigest: "sha256:" + "a".repeat(64), rosterVersion: 9, spec: "noa.gate-roster-state/1" }), { mode: 0o600 });
+  const committed = boot.commitState();
+  assert.equal(JSON.parse(readPrivate(statePath).text).rosterVersion, 9, "consequence: the recorded floor is never lowered");
+  assert.equal(committed?.code, "ROSTER_ROLLBACK");
+  assert.equal(existsSync(`${statePath}.lock`), false, "a refused commit releases the lock");
+});
+
+test("K13 lock — a lock left by a dead holder is replaced once; a live or unreadable holder is STATE_LOCKED", () => {
+  const world = newWorld();
+  const disk = onDisk(world, rosterDoc(world, NOW));
+  const lockPath = `${disk.keyFile}.roster-state.lock`;
+  writeFileSync(lockPath, "424242\n", { mode: 0o600 });
+  refusedWith(loadPinnedTrust({ ...disk.input, isProcessAlive: () => true }), "STATE_LOCKED");
+  const replaced = loadPinnedTrust({ ...disk.input, isProcessAlive: () => false });
+  booted(replaced);
+  assert.equal(replaced.commitState(), null);
+  writeFileSync(lockPath, "not a pid\n", { mode: 0o600 });
+  refusedWith(loadPinnedTrust({ ...disk.input, isProcessAlive: () => false }), "STATE_LOCKED");
+  rmSync(lockPath);
+});
+
+test("stage 11 — a state file owned by another uid is STATE_FILE_UNSAFE owner (the key-file owner rule: the gate's uid or root)", () => {
+  const world = newWorld();
+  const disk = onDisk(world, rosterDoc(world, NOW));
+  const first = loadPinnedTrust(disk.input);
+  booted(first);
+  assert.equal(first.commitState(), null);
+  // The test process wrote the state; a gate running as another uid must refuse it.
+  const r = loadPinnedTrust({ ...disk.input, stateOwnerEuid: OTHER_UID });
+  refusedWith(r, "STATE_FILE_UNSAFE");
+  assert.match(r.ok ? "" : r.detail, /^owner: /);
+  const same = loadPinnedTrust(disk.input);
+  booted(same);
+  same.release();
+});
+
+test("K4 — a quorum of 2 refuses the boot itself (the engine's own re-check, K5, is a separate control)", () => {
+  const world = newWorld();
+  const r = loadPinnedTrust(onDisk(world, rosterDoc(world, NOW, { quorum: { HIGH: 2 } })).input);
+  refusedWith(r, "QUORUM_UNSUPPORTED");
 });

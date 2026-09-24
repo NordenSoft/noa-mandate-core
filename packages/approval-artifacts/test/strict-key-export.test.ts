@@ -28,6 +28,10 @@ test("isStrictEd25519PublicKey accepts exactly the keys verifyEd25519 accepts", 
   const candidates: Array<[string, unknown]> = [
     ["a generated key", kp.publicKey],
     ["the identity point (small order)", spki(Buffer.from("01" + "00".repeat(31), "hex"))],
+    // RFC 8032 §5.1.3: x = 0 with the sign bit set fails decoding. These are the two x = 0 points
+    // (y = 1 and y = p - 1) under a second spelling the small-order set did not list.
+    ["y = 1 with the sign bit set (x = 0)", spki(Buffer.from("01" + "00".repeat(30) + "80", "hex"))],
+    ["y = p - 1 with the sign bit set (x = 0)", spki(Buffer.from("ec" + "ff".repeat(31), "hex"))],
     ["a non-canonical y coordinate", spki(nonCanonicalY)],
     ["trailing garbage after the SPKI", Buffer.concat([Buffer.from(kp.publicKey, "base64"), Buffer.from([0])]).toString("base64")],
     ["non-canonical base64 padding", kp.publicKey.replace(/=$/, "")],
@@ -41,7 +45,7 @@ test("isStrictEd25519PublicKey accepts exactly the keys verifyEd25519 accepts", 
     // must say the same thing. For the one genuine key the signature does verify.
     const verifies = typeof key === "string" && verifyEd25519(key, msg, goodSig);
     if (key === kp.publicKey) assert.equal(verifies, true, "control: the genuine key verifies its own signature");
-    assert.equal(strict, key === kp.publicKey, `${name}: isStrictEd25519PublicKey returned ${strict}`);
+    assert.equal(strict, key === kp.publicKey, `consequence: ${name} — the published key rule must accept exactly the genuine key; isStrictEd25519PublicKey returned ${strict}`);
     if (!strict) assert.equal(verifies, false, `${name}: a key the rule refuses must not verify`);
     if (strict) accepted++;
   }

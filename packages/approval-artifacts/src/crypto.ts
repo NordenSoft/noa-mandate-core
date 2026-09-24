@@ -113,17 +113,23 @@ function strictEd25519PublicKey(publicKeyB64: unknown): KeyObject | null {
     const canonical = key.export({ type: "spki", format: "der" }) as Buffer;
     if (!canonical.equals(der)) return null; // reject non-canonical SPKI (trailing garbage)
 
-    // Strict RFC 8032 public-key decoding, matching `noa-receipt/src/keys.ts`:
-    // the encoded y coordinate must be canonical and the key must not be a
-    // point in the order-dividing-8 torsion subgroup.
+    // Strict RFC 8032 public-key decoding: the encoded y coordinate must be canonical (y < p), the
+    // x = 0 points must not carry a set sign bit, and the key must not be a point in the
+    // order-dividing-8 torsion subgroup.
     const raw = canonical.subarray(12);
     if (raw.length !== 32) return null;
+    const signBit = (raw[31]! & 0x80) !== 0;
     const yBytes = Buffer.from(raw);
     yBytes[31] = yBytes[31]! & 0x7f;
     const Q = (1n << 255n) - 19n;
     let y = 0n;
     for (let i = 31; i >= 0; i--) y = (y << 8n) | BigInt(yBytes[i]!);
     if (y >= Q) return null;
+    // RFC 8032 §5.1.3 step 4: "If x = 0, and x_0 = 1, decoding fails." x = 0 exactly when y^2 = 1,
+    // i.e. y = 1 or y = p - 1; their sign-bit-set spellings (`01…0080`, `ec…ffff`) name the same two
+    // small-order points as the canonical entries below, so they were a second spelling the set
+    // lookup could not see (QA round 1, reproduced as accepted roster approver keys).
+    if (signBit && (y === 1n || y === Q - 1n)) return null;
     if (SMALL_ORDER_PUBKEYS.has(raw.toString("hex"))) return null;
     return key;
   } catch {

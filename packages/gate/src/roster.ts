@@ -259,8 +259,14 @@ function instantNs(v: unknown): bigint | null {
 
 /**
  * An X25519 recipient key: canonical base64 of a DER SubjectPublicKeyInfo of type `x25519` that
- * re-encodes byte for byte. The raw-hex spelling `decodeX25519PublicKey` also accepts is refused here:
- * one spelling per key, so the key-reuse check below compares like with like.
+ * re-encodes byte for byte, whose 32-byte u-coordinate is a CANONICAL field element: bit 255 clear and
+ * u < p. The raw-hex spelling `decodeX25519PublicKey` also accepts is refused here.
+ *
+ * WHY THE FIELD-ELEMENT RULE. RFC 7748 decoding masks bit 255 and reduces u mod p, so `u` with bit 255
+ * set, or `u + p`, is the SAME key under a DIFFERENT string: DER, base64 and the re-encoding check all
+ * pass, and the key-reuse check below — which compares strings — saw two identities where there is one
+ * (QA round 1 reproduced an audit key equal to the approver's). With one spelling per key, string
+ * equality is key equality.
  *
  * A LOW-ORDER point is refused too, by one trial agreement against a fresh ephemeral key: the
  * derivation refuses exactly the points of small order (their shared secret is all zero). The display
@@ -276,11 +282,24 @@ export function isRosterX25519Key(v: unknown): v is string {
     const key = createPublicKeyCaptured({ key: der, format: "der", type: "spki" });
     if (key.asymmetricKeyType !== "x25519") return false;
     if (!bufEquals(keyExportSpkiDer(key), der)) return false;
+    if (!isCanonicalFieldElement(der)) return false;
     diffieHellman({ privateKey: generateKeyPairSync("x25519").privateKey, publicKey: key });
     return true;
   } catch {
     return false;
   }
+}
+
+/** The 2^255 - 19 field prime. */
+const FIELD_P = (1n << 255n) - 19n;
+
+/** The SPKI's 32-byte little-endian u-coordinate has bit 255 clear and is below p. */
+function isCanonicalFieldElement(der: Uint8Array): boolean {
+  const last = der[X25519_SPKI_DER_LENGTH - 1] as number;
+  if ((last & 0x80) !== 0) return false;
+  let u = 0n;
+  for (let i = X25519_SPKI_DER_LENGTH - 1; i >= X25519_SPKI_DER_LENGTH - 32; i--) u = (u << 8n) | BigInt(der[i] as number);
+  return u < FIELD_P;
 }
 
 function refuse(code: RosterRefusalCode, detail: string): RosterParseResult {

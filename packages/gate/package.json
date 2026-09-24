@@ -43,6 +43,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/*.test.js",
+    "test:pinned": "npm run build && node --test dist/test/pinned-*.test.js",
     "start": "npm run build && node dist/src/cli.js"
   },
   "dependencies": {

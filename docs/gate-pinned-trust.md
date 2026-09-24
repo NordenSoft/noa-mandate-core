@@ -29,10 +29,10 @@ Pinned mode is selected when **any** of these variables is present. An empty val
 
 | Variable | Meaning |
 | --- | --- |
-| `NOA_GATE_ROSTER_FILE` | Path of the roster. Required in pinned mode. |
+| `NOA_GATE_ROSTER_FILE` | Absolute path of the roster, with no `.` or `..` segments. Required in pinned mode. |
 | `NOA_GATE_KEY_FILE` | Path of the gate key file. Required in pinned mode. |
 | `NOA_GATE_ROSTER_SHA256` | Optional second-channel pin: `sha256:<64 lowercase hex>`, compared exactly with the roster digest. |
-| `NOA_GATE_UNSAFE_ROSTER_SAME_UID` | `1` accepts a roster owned by the gate's own uid. Development only; the banner says `SAME-UID (unsafe)`. |
+| `NOA_GATE_UNSAFE_ROSTER_SAME_UID` | `1` accepts a roster owned by the gate's own uid, and a gate running as root. Development only; the banner says `SAME-UID (unsafe)` or `ROOT-GATE (unsafe)`. |
 
 With none of them present the gate runs in `ALPHA-EPHEMERAL` mode, unchanged apart from its banner.
 Alpha wires **no display sealer**, so every alpha hold is refused with
@@ -83,10 +83,14 @@ Every member is required and the member set is closed at every level. An undefin
 - **Times:** RFC 3339 instants, read under the key-manifest schema's grammar with nanosecond
   precision (never `Date.parse`). `revokedAt` is `null` or an instant.
 - **Ed25519 keys:** accepted exactly when the decision verifier would accept them
-  (`isStrictEd25519PublicKey`): canonical base64, canonical DER, canonical y, and not small-order.
+  (`isStrictEd25519PublicKey`): canonical base64, canonical DER, canonical y, no x = 0 point spelled
+  with the sign bit set (RFC 8032 §5.1.3), and not small-order.
 - **X25519 keys:** canonical base64 of a 44-byte DER SubjectPublicKeyInfo of type `x25519` that
-  re-encodes byte for byte. The raw-hex spelling is refused, and so is a low-order point (the display
-  sealer can never seal to one, so the gate would boot and then fail every hold).
+  re-encodes byte for byte, whose u-coordinate is a canonical field element (bit 255 clear, u < p).
+  RFC 7748 decoding masks bit 255 and reduces mod p, so any other spelling is the same key under a
+  second string, which the string-based reuse check below would not see. The raw-hex spelling is
+  refused, and so is a low-order point (the display sealer can never seal to one, so the gate would
+  boot and then fail every hold).
 - **Role:** `approve-high` or `approve-critical`.
 - **Quorum:** a non-empty object keyed by risk class (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`,
   `IRREVERSIBLE`). Each value is an integer ≥ 1. This version implements exactly 1, so a value of 2
@@ -122,8 +126,16 @@ The roster is not signed. It is trusted because of three things:
    - It must be owned by root, or by a uid **other than the gate's effective uid**. A roster the
      gate's own uid can rewrite could be rewritten by a compromised gate, or by an agent sharing its
      uid, and would survive a restart.
-   - Every directory from `realpath(dirname)` up to `/` must be owned by root or by the roster's
-     owner, and must not be writable by group or others, unless it is root-owned and sticky.
+   - The configured path must be absolute and free of `.` and `..` segments. Its directory is resolved
+     one component at a time with `lstat`. Every symlink met on the way (in the configured path or
+     inside a link target) must be owned by root or by the roster's owner, and every directory above
+     it must pass the rule below. A symlink in a directory the gate can write would otherwise re-point
+     the gate at a different, perfectly admin-owned roster, such as an archived one. A root-owned
+     platform link such as macOS `/var -> /private/var` passes.
+   - Every directory of the resolved chain up to `/` must be owned by root or by the roster's owner,
+     and must not be writable by group or others, unless it is root-owned and sticky.
+   - The gate must not run as root (`PINNED_ROOT_GATE`): root can rewrite any roster, so the owner rule
+     would certify nothing. Run the gate as a dedicated non-root uid.
    - Mode bits and ownership are what is inspected. An access-control list that grants write outside
      the mode bits is not read: on Linux a named-user or named-group write entry raises the group
      write bit and is refused, but an extended ACL on macOS does not change the mode and is not seen.
@@ -165,6 +177,14 @@ The state file is `<NOA_GATE_KEY_FILE>.roster-state`:
 
 It follows the key file's owner rule: the gate's uid or root, no group or other bits, one hard link.
 
+The read, the comparison and the write happen under one exclusive lock,
+`<NOA_GATE_KEY_FILE>.roster-state.lock`. The lock is created `O_EXCL | O_NOFOLLOW` at mode 0600 and
+holds the booting process's pid. A second boot on the same key file while a live process holds the lock
+is `STATE_LOCKED`. A lock whose holder has died is removed once and retried. A lock that names no
+readable pid is `STATE_LOCKED` until an administrator removes it. At commit the state is read and
+compared again under the lock, so a floor written in the meantime by anything that ignores the lock
+is never lowered.
+
 | State file shows | Roster loaded | Result |
 | --- | --- | --- |
 | Nothing (file missing) | Any | First boot; banner shows `rosterHighWater: "INITIALIZED"` |
@@ -186,7 +206,7 @@ The first failure wins. Every code exits 1 before the gate listens, printing
 | --- | --- | --- |
 | 0 | Platform | `PINNED_PLATFORM_UNSUPPORTED` (no POSIX uids) |
 | 1 | Environment | `CONFIG_PINNED_INCOMPLETE`, `CONFIG_SOURCE_CONFLICT` |
-| 2 | Roster file | `ROSTER_FILE_MISSING`, `ROSTER_FILE_UNSAFE`. The detail starts with one of `symlink`, `not-regular`, `nlink`, `size`, `mode`, `owner`, `ancestor`, `short-read`, `unreadable`. |
+| 2 | Gate uid, then roster file | `PINNED_ROOT_GATE`; `ROSTER_FILE_MISSING`, `ROSTER_FILE_UNSAFE`. The detail starts with one of `path-form`, `symlink-ancestor`, `symlink`, `not-regular`, `nlink`, `size`, `mode`, `owner`, `ancestor`, `short-read`, `unreadable`. |
 | 3 | Parse | `ROSTER_PARSE`, `ROSTER_NOT_OBJECT` |
 | 4 | Digest pin | `ROSTER_DIGEST_MISMATCH` |
 | 5 | Members, then closed world | `ROSTER_SPEC_UNSUPPORTED`; then, in JCS key order, `ROSTER_MEMBER_INVALID`, `ROSTER_KID_INVALID`, `ROSTER_KEY_INVALID`, `ROSTER_HPKE_KEY_INVALID`, `ROSTER_ROLE_INVALID`, `ROSTER_TIME_INVALID`, `ROSTER_EPOCH_INVALID`, `ROSTER_QUORUM_INVALID`, `QUORUM_UNSUPPORTED`, `ROSTER_VERSION_INVALID`, `ROSTER_TENANT_INVALID`; then `ROSTER_UNRECOGNIZED_MEMBER` |
@@ -195,7 +215,7 @@ The first failure wins. Every code exits 1 before the gate listens, printing
 | 8 | Clock | `ROSTER_NOT_YET_VALID`, `ROSTER_EXPIRED`, `ROSTER_VALIDITY_TOO_LONG`, `ROSTER_APPROVER_NOT_YET_VALID`, `ROSTER_TIME_INVALID` (future revocation) |
 | 9 | Key file | `GATE_KEY_FILE_MISSING`, `GATE_KEY_FILE_UNSAFE`, `GATE_KEY_INCONSISTENT`, `GATE_KEY_NOT_PINNED` |
 | 10 | Signer posture | `ROSTER_EXEC_SIGNER_MISMATCH`: the roster's `executionSigner` is null exactly when `NOA_GATE_GRANT_SIGNER_SOCKET` is set, or the other way round |
-| 11 | State | `STATE_FILE_UNSAFE`, `STATE_FILE_CORRUPT`, `ROSTER_ROLLBACK`, `ROSTER_EQUIVOCATION`, `STATE_FILE_WRITE_FAILED` |
+| 11 | State | `STATE_LOCKED`, `STATE_FILE_UNSAFE`, `STATE_FILE_CORRUPT`, `ROSTER_ROLLBACK`, `ROSTER_EQUIVOCATION`; at commit, the same comparison again, then `STATE_FILE_WRITE_FAILED` |
 
 When the roster pins an `executionSigner`, the out-of-process signer's expected identity is taken
 from the roster. The in-process grant key still requires `NOA_GATE_UNSAFE_IN_PROCESS_GRANT_KEY=1`.
@@ -206,12 +226,18 @@ These checks run in both modes. Each one is load-bearing only where a hold store
 root, or is shared between trust roots: a durable store, or a restart onto one. With the in-memory
 store, a restart already loses every hold.
 
+The ownership check (audience and epoch) runs before any signature or state change on an existing
+hold or grant. That covers `decide`, `reserve`, `cancel` and `report`, and the expiry and uncertainty
+sweeps, which leave a hold or grant this trust root does not own exactly as it is. In `decide` it runs
+before a hold is lazily expired, so a foreign gate never signs a timeout receipt for another gate's
+hold.
+
 | Where | Check | Refusal |
 | --- | --- | --- |
-| `decide`, `reserve` | The hold envelope names this gate's tenant and gate kid | `409 GATE_AUDIENCE_MISMATCH` |
-| `decide`, `reserve` | The hold envelope carries this trust root's key-manifest epoch | `409 EPOCH_CHANGED` |
+| `decide`, `reserve`, `cancel`, `report` | The hold envelope names this gate's tenant and gate kid | `409 GATE_AUDIENCE_MISMATCH` |
+| `decide`, `reserve`, `cancel`, `report` | The hold envelope carries this trust root's key-manifest epoch | `409 EPOCH_CHANGED` |
 | `decide`, after signature verification | The deciding approver is a recipient of the hold's sealed display | `422 APPROVER_NOT_DISPLAY_RECIPIENT` |
-| `createHold`, on egress from the sealer | The sealed display's recipients are exactly the requested set: no extra, no missing | `422 DISPLAY_EGRESS_AAD_MISMATCH` |
+| `createHold`, on egress from the sealer | The requested recipients are distinct, and the sealed display's recipients are exactly that set: no extra, no missing | `422 DISPLAY_EGRESS_AAD_MISMATCH` |
 
 These checks run in pinned mode only:
 
@@ -222,10 +248,18 @@ These checks run in pinned mode only:
 | `createHold`, `decide` | The quorum value for that class is 1 | `500 QUORUM_UNSUPPORTED` |
 
 A refusal at `decide` leaves the hold `PENDING`, and it expires normally. Quorum comes only from the
-roster: a decision body is read only for its `receipt` and `decisionArtifact`.
+roster: a decision body is read only for its `receipt` and `decisionArtifact`. A grant's signed
+`expiresAt` is clamped to the roster's `expiresAt` as well as to the hold's life.
 
-The audience check compares kids. A kid reused for a new key would pass it, which is why a kid is
-never reused for a new key. That is an operator rule; it is not enforced across rosters.
+Roster expiry stops AUTHORITY, not RECORDING. After the roster expires the gate freezes no hold,
+decides nothing (it refuses before it touches the hold) and reserves nothing. It still records what
+follows from authority given before expiry: a timeout for an overdue hold, a cancellation that closes
+a hold, an execution reported for a grant, and an uncertainty for a stuck one. Otherwise the evidence
+of something that already happened would be lost.
+
+The audience check and the display-recipient check compare kids. A kid reused for a new key would pass
+both, which is why a kid is never reused for a new key. That is an operator rule; it is not enforced
+across rosters.
 
 `reserve` re-runs the audience, epoch and roster-expiry checks, but this has a limit. `GET` and
 `wait` already hand the signed grant to the agent that owns the hold, so the reserve checks stop only
@@ -244,10 +278,12 @@ recipients.
   - `activeApproverKid`, `quorum`, `bootId`, `displaySealer: "hpke"`.
 - `noa-gate keygen --key-file <path> --kid <kid>` creates the gate key; see above.
 - `noa-gate roster-check <roster> [--key-file <path>]` validates a roster under the same environment
-  `serve` reads. It prints the digest and a summary. With `--key-file` it also checks the key file and
-  the high-water state. It never writes the state file and never listens. Run it as the gate's OS
+  rules `serve` applies, so a second identity source is `CONFIG_SOURCE_CONFLICT` here too. It prints
+  the digest and a summary. With `--key-file` it also checks the key file and the high-water state,
+  reading them without taking the lock. It never writes and never listens. Run it as the gate's OS
   user, because the owner rule is evaluated against the caller's uid.
-- Any other subcommand exits 2 with `UNKNOWN_SUBCOMMAND` and starts nothing.
+- Any other subcommand exits 2 with `UNKNOWN_SUBCOMMAND` and starts nothing. Every subcommand refuses
+  an argument it does not know with `UNKNOWN_ARGUMENT` (exit 2); `serve` takes no arguments at all.
 
 ## Lifecycle
 
@@ -278,6 +314,20 @@ recipients.
     the approval window and grant life. A clock rollback is not detected.
   - `expiresAt` is mandatory and capped at 90 days. After it the gate authorizes nothing until an
     administrator provides a new roster and the gate restarts.
+
+## What the knockout registry does not measure
+
+Every control above has a knockout arm whose detecting test asserts the attack's consequence (a
+grant, a hold, a boot, the key file's bytes), not only a refusal code. These three rules have no arm,
+because removing any one of them changes only which refusal an input gets, never whether it is
+refused:
+
+- The `.`/`..` segment and absolute-path rule of the configured roster path. Without it, a dot-segment
+  path still resolves to a missing or refused file in every case the tests could build. Its purpose is
+  to keep the symlink walk's inspected set complete.
+- The roster's class-membership line at `createHold` and `decide`. The quorum-value line refuses the
+  same input, and the whole check is armed as one control.
+- The zero-active-approver branch. Removing it crashes the loader, which still refuses.
 
 ## The grant sidecar's trust file
 

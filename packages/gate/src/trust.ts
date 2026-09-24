@@ -20,9 +20,9 @@ import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, ra
 import { generateKeyPair, signArtifact, refHash, parseDocument, type KeyEntry } from "noa-approval-artifacts";
 import { SIGNING_KEY_LIFECYCLE_SPEC, isHex64, intrinsics, type SigningKeyLifecycle } from "noa-receipt";
 import { loadOrCreateKeyFile } from "noa-mcp-adapter-core";
-import { describeThrown } from "noa-mcp-adapter-core/safe-throw";
+import { describeThrown, thrownCode } from "noa-mcp-adapter-core/safe-throw";
 import { encodeDocument } from "./bytes.js";
-import { readPinnedFile, writeFileAtomic } from "./pinned-file.js";
+import { readPinnedFile, removeStaleLock, tryCreateLock, writeFileAtomic } from "./pinned-file.js";
 import {
   checkRosterClock,
   isRosterId,
@@ -590,6 +590,8 @@ export type PinnedBootCode =
   | "GATE_KEY_INCONSISTENT"
   | "GATE_KEY_NOT_PINNED"
   | "ROSTER_EXEC_SIGNER_MISMATCH"
+  | "PINNED_ROOT_GATE"
+  | "STATE_LOCKED"
   | "STATE_FILE_UNSAFE"
   | "STATE_FILE_CORRUPT"
   | "ROSTER_ROLLBACK"
@@ -643,19 +645,8 @@ export function resolveTrustMode(env: Readonly<Record<string, string | undefined
       "pinned mode needs BOTH NOA_GATE_ROSTER_FILE and NOA_GATE_KEY_FILE (non-empty); a pinned variable was set without them",
     );
   }
-  const conflicting: string[] = [];
-  for (const name of objectKeys(env as Record<string, unknown>)) {
-    if (env[name] === undefined) continue;
-    if (name.startsWith("NOA_GATE_APPROVER_") || name === "NOA_GATE_GRANT_SIGNER_KID" || name === "NOA_GATE_GRANT_SIGNER_PUBLIC_KEY") {
-      conflicting[conflicting.length] = name;
-    }
-  }
-  if (conflicting.length > 0) {
-    return bootRefusal(
-      "CONFIG_SOURCE_CONFLICT",
-      `${conflicting.sort().join(", ")} set in pinned mode; identities come only from the roster, and a second source is refused rather than ignored`,
-    );
-  }
+  const conflict = pinnedEnvironmentConflict(env);
+  if (conflict !== null) return conflict;
   return {
     mode: "pinned",
     rosterFile,
@@ -663,6 +654,26 @@ export function resolveTrustMode(env: Readonly<Record<string, string | undefined
     rosterSha256: env["NOA_GATE_ROSTER_SHA256"],
     unsafeSameUid: env["NOA_GATE_UNSAFE_ROSTER_SAME_UID"] === "1",
   };
+}
+
+/**
+ * The second-identity-source rule, shared by `serve` (through `resolveTrustMode`) and `roster-check`:
+ * any `NOA_GATE_APPROVER_*`, `NOA_GATE_GRANT_SIGNER_KID` or `NOA_GATE_GRANT_SIGNER_PUBLIC_KEY` present
+ * is CONFIG_SOURCE_CONFLICT. Identities come only from the roster; a second source is refused, not ignored.
+ */
+export function pinnedEnvironmentConflict(env: Readonly<Record<string, string | undefined>>): PinnedRefusal | null {
+  const conflicting: string[] = [];
+  for (const name of objectKeys(env as Record<string, unknown>)) {
+    if (env[name] === undefined) continue;
+    if (name.startsWith("NOA_GATE_APPROVER_") || name === "NOA_GATE_GRANT_SIGNER_KID" || name === "NOA_GATE_GRANT_SIGNER_PUBLIC_KEY") {
+      conflicting[conflicting.length] = name;
+    }
+  }
+  if (conflicting.length === 0) return null;
+  return bootRefusal(
+    "CONFIG_SOURCE_CONFLICT",
+    `${conflicting.sort().join(", ")} set in pinned mode; identities come only from the roster, and a second source is refused rather than ignored`,
+  );
 }
 
 /** Largest accepted roster. It names a few keys; the bound exists so a hostile file cannot be large. */
@@ -677,6 +688,12 @@ export interface LoadPinnedTrustInput extends LoadPinnedRosterInput {
   keyFile: string;
   /** Whether NOA_GATE_GRANT_SIGNER_SOCKET is set: must agree with the roster's executionSigner. */
   grantSignerSocketSet: boolean;
+  /** Take the high-water lock (default true). `roster-check` reads the state without it and never writes. */
+  lockState?: boolean;
+  /** TEST SEAM: the uid the state file's owner rule accepts besides root. Defaults to this process's euid. */
+  stateOwnerEuid?: number;
+  /** TEST SEAM: whether a lock holder's pid is alive. Defaults to a signal-0 probe. */
+  isProcessAlive?: (pid: number) => boolean;
   now?: () => number;
   ids?: () => string;
   nonces?: () => string;
@@ -689,25 +706,29 @@ export interface PinnedBoot {
   readonly rosterDigest: string;
   readonly activeApproverKid: string;
   readonly stateStatus: RosterStateStatus;
-  readonly rosterCustody: "ADMIN-OWNED" | "SAME-UID (unsafe)";
+  readonly rosterCustody: RosterCustody;
   /**
    * Stage 11's write: record this roster as the high-water mark. Call it only after every other check
-   * has passed and before listening. Returns null on success (or when nothing changed).
+   * has passed and before listening. The state is RE-READ and RE-COMPARED under the lock taken at load,
+   * so a state file changed meanwhile (by anything that ignores the lock) is still caught. Releases the
+   * lock. Returns null on success (or when nothing changed).
    */
   commitState(): PinnedRefusal | null;
+  /** Release the state lock without writing (a boot that stops after loading must call it). Idempotent. */
+  release(): void;
 }
 
 type StateRead =
   | { ok: true; state: { rosterVersion: number; rosterDigest: string } | null }
   | PinnedRefusal;
 
-function readRosterState(statePath: string): StateRead {
+function readRosterState(statePath: string, ownerEuid: number | null): StateRead {
   const r = readPinnedFile(statePath, {
     maxBytes: STATE_MAX_BYTES,
     forbiddenModeBits: 0o077,
     requireSingleLink: true,
     // The key-file owner rule: the gate's own uid or root. The state is the gate's own custody.
-    ownerAllowed: (uid) => uid === 0 || uid === PROCESS_EUID,
+    ownerAllowed: (uid) => uid === 0 || uid === ownerEuid,
     checkAncestors: false,
   });
   if (!r.ok) {
@@ -766,6 +787,12 @@ export function checkGateKey(key: GateKeyPair, pinned: { kid: string; publicKey:
   return null;
 }
 
+/**
+ * What the boot banner says about who can rewrite the roster. Only ADMIN-OWNED is the protected posture:
+ * the other two are development escapes that must be typed out (NOA_GATE_UNSAFE_ROSTER_SAME_UID=1).
+ */
+export type RosterCustody = "ADMIN-OWNED" | "SAME-UID (unsafe)" | "ROOT-GATE (unsafe)";
+
 export interface LoadPinnedRosterInput {
   rosterFile: string;
   /** NOA_GATE_ROSTER_SHA256: compared exactly with the computed `sha256:<hex>` digest. */
@@ -786,14 +813,15 @@ export interface PinnedRoster {
   readonly rosterDigest: string;
   readonly activeApproverKid: string;
   readonly expiresAtMs: number;
-  readonly rosterCustody: "ADMIN-OWNED" | "SAME-UID (unsafe)";
+  readonly rosterCustody: RosterCustody;
 }
 
 /**
  * Stages 2-8 — the roster alone, first failure wins:
  *
- *    2 file     ROSTER_FILE_MISSING · ROSTER_FILE_UNSAFE (detail token: symlink, not-regular, nlink, size,
- *               mode, owner, ancestor, short-read, unreadable)
+ *    2 file     PINNED_ROOT_GATE (the gate's euid is 0) · ROSTER_FILE_MISSING · ROSTER_FILE_UNSAFE (detail
+ *               token: path-form, symlink-ancestor, symlink, not-regular, nlink, size, mode, owner, ancestor,
+ *               short-read, unreadable)
  *  3-6 roster   `parseGateRoster` (the digest pin, stage 4, runs before any semantic rule)
  *    7 tenant   CONFIG_SOURCE_CONFLICT when NOA_GATE_TENANT is set and differs from the roster
  *    8 clock    `checkRosterClock`
@@ -801,6 +829,14 @@ export interface PinnedRoster {
 export function loadPinnedRoster(input: LoadPinnedRosterInput): PinnedRoster | PinnedRefusal {
   // ── stage 2: the roster file ──────────────────────────────────────────────────────────────────
   const gateEuid = input.gateEuid;
+  // A gate running as root can rewrite ANY roster — root-owned or an administrator's — and its rewrite
+  // survives a restart, so the owner rule below would certify nothing while the banner said ADMIN-OWNED.
+  if (gateEuid === 0 && !input.unsafeSameUid) {
+    return bootRefusal(
+      "PINNED_ROOT_GATE",
+      "the gate runs as root, which can rewrite any roster; run it as a dedicated non-root uid (or set NOA_GATE_UNSAFE_ROSTER_SAME_UID=1 for development)",
+    );
+  }
   const file = readPinnedFile(input.rosterFile, {
     maxBytes: ROSTER_MAX_BYTES,
     forbiddenModeBits: 0o022,
@@ -835,7 +871,7 @@ export function loadPinnedRoster(input: LoadPinnedRosterInput): PinnedRoster | P
     rosterDigest: parsed.digest,
     activeApproverKid: parsed.activeApproverKid,
     expiresAtMs: parsed.expiresAtMs,
-    rosterCustody: input.unsafeSameUid ? "SAME-UID (unsafe)" : "ADMIN-OWNED",
+    rosterCustody: gateEuid === 0 ? "ROOT-GATE (unsafe)" : input.unsafeSameUid ? "SAME-UID (unsafe)" : "ADMIN-OWNED",
   };
 }
 
@@ -845,8 +881,8 @@ export function loadPinnedRoster(input: LoadPinnedRosterInput): PinnedRoster | P
  *
  *    9 key file GATE_KEY_FILE_MISSING · GATE_KEY_FILE_UNSAFE · GATE_KEY_INCONSISTENT · GATE_KEY_NOT_PINNED
  *   10 signer   ROSTER_EXEC_SIGNER_MISMATCH
- *   11 state    STATE_FILE_UNSAFE · STATE_FILE_CORRUPT · ROSTER_ROLLBACK · ROSTER_EQUIVOCATION
- *               (and STATE_FILE_WRITE_FAILED from `commitState`)
+ *   11 state    STATE_LOCKED · STATE_FILE_UNSAFE · STATE_FILE_CORRUPT · ROSTER_ROLLBACK · ROSTER_EQUIVOCATION
+ *               (and, from `commitState`, the same comparison again plus STATE_FILE_WRITE_FAILED)
  *
  * There is no retry and no fallback: a caller that receives a refusal must not start a gate.
  */
@@ -888,29 +924,24 @@ export function loadPinnedTrust(input: LoadPinnedTrustInput): PinnedBoot | Pinne
     );
   }
 
-  // ── stage 11: anti-rollback high-water ─────────────────────────────────────────────────────────
+  // ── stage 11: anti-rollback high-water, read-compare-write under ONE lock ───────────────────────
+  // Two overlapping boots that each read version N and then write their own higher version in the
+  // opposite order would LOWER the floor; an atomic rename prevents torn writes, not that. The lock is
+  // held from this read to the rename in `commitState` (or until `release`).
   const statePath = `${input.keyFile}.roster-state`;
-  const state = readRosterState(statePath);
-  if (!state.ok) return state;
-  let stateStatus: RosterStateStatus;
-  if (state.state === null) {
-    stateStatus = "INITIALIZED";
-  } else if (roster.rosterVersion < state.state.rosterVersion) {
-    return bootRefusal(
-      "ROSTER_ROLLBACK",
-      `roster version ${roster.rosterVersion} is below the high-water mark ${state.state.rosterVersion}; an older roster may re-admit a revoked approver`,
-    );
-  } else if (roster.rosterVersion === state.state.rosterVersion) {
-    if (loaded.rosterDigest !== state.state.rosterDigest) {
-      return bootRefusal(
-        "ROSTER_EQUIVOCATION",
-        `roster version ${roster.rosterVersion} was already loaded with digest ${state.state.rosterDigest}; a changed roster needs a new version`,
-      );
-    }
-    stateStatus = "UNCHANGED";
-  } else {
-    stateStatus = "ADVANCED";
+  const stateOwner = input.stateOwnerEuid ?? PROCESS_EUID;
+  let releaseLock: () => void = () => {};
+  if (input.lockState !== false) {
+    const lock = acquireStateLock(`${statePath}.lock`, input.isProcessAlive ?? processAlive);
+    if (!lock.ok) return lock;
+    releaseLock = lock.release;
   }
+  const compared = compareHighWater(readRosterState(statePath, stateOwner), roster.rosterVersion, loaded.rosterDigest);
+  if (!compared.ok) {
+    releaseLock();
+    return compared;
+  }
+  const stateStatus = compared.status;
 
   const trust = createPinnedTrust({
     roster,
@@ -933,9 +964,75 @@ export function loadPinnedTrust(input: LoadPinnedTrustInput): PinnedBoot | Pinne
     stateStatus,
     rosterCustody: loaded.rosterCustody,
     commitState(): PinnedRefusal | null {
-      if (stateStatus === "UNCHANGED") return null;
-      const w = writeFileAtomic(statePath, stateBytes);
-      return w.ok ? null : bootRefusal("STATE_FILE_WRITE_FAILED", w.detail);
+      try {
+        // Re-read and re-compare under the lock: a state written meanwhile by anything that ignores the
+        // lock (an administrator's restore, a stale holder) must not be overwritten with a lower floor.
+        const again = compareHighWater(readRosterState(statePath, stateOwner), roster.rosterVersion, loaded.rosterDigest);
+        if (!again.ok) return again;
+        if (again.status === "UNCHANGED") return null;
+        const w = writeFileAtomic(statePath, stateBytes);
+        return w.ok ? null : bootRefusal("STATE_FILE_WRITE_FAILED", w.detail);
+      } finally {
+        releaseLock();
+      }
+    },
+    release(): void {
+      releaseLock();
     },
   };
+}
+
+/** Compare a roster against the recorded high-water mark. */
+function compareHighWater(
+  state: StateRead,
+  rosterVersion: number,
+  rosterDigest: string,
+): { ok: true; status: RosterStateStatus } | PinnedRefusal {
+  if (!state.ok) return state;
+  if (state.state === null) return { ok: true, status: "INITIALIZED" };
+  if (rosterVersion < state.state.rosterVersion) {
+    return bootRefusal(
+      "ROSTER_ROLLBACK",
+      `roster version ${rosterVersion} is below the high-water mark ${state.state.rosterVersion}; an older roster may re-admit a revoked approver`,
+    );
+  }
+  if (rosterVersion === state.state.rosterVersion) {
+    if (rosterDigest !== state.state.rosterDigest) {
+      return bootRefusal(
+        "ROSTER_EQUIVOCATION",
+        `roster version ${rosterVersion} was already loaded with digest ${state.state.rosterDigest}; a changed roster needs a new version`,
+      );
+    }
+    return { ok: true, status: "UNCHANGED" };
+  }
+  return { ok: true, status: "ADVANCED" };
+}
+
+/** Signal 0 probes existence without delivering anything; EPERM means alive but not ours. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return thrownCode(err) === "EPERM";
+  }
+}
+
+/**
+ * The high-water lock: exclusive create; an existing lock whose holder is alive is STATE_LOCKED; a
+ * lock whose holder is dead is removed ONCE and the create retried.
+ */
+function acquireStateLock(lockPath: string, isAlive: (pid: number) => boolean): { ok: true; release: () => void } | PinnedRefusal {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const a = tryCreateLock(lockPath);
+    if (a.ok) return { ok: true, release: () => a.release() };
+    if (a.holderPid === null) {
+      return bootRefusal("STATE_LOCKED", `${a.detail} and names no readable holder; an administrator must inspect and remove it`);
+    }
+    if (isAlive(a.holderPid)) {
+      return bootRefusal("STATE_LOCKED", `the roster high-water state is locked by live process ${a.holderPid}; another gate is starting on this key file`);
+    }
+    if (attempt === 0 && !removeStaleLock(lockPath)) break;
+  }
+  return bootRefusal("STATE_LOCKED", `${JSON.stringify(lockPath)}: a stale lock could not be replaced`);
 }

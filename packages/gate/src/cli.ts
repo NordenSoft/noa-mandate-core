@@ -37,7 +37,9 @@ import {
   createAlphaTrust,
   loadPinnedRoster,
   loadPinnedTrust,
+  pinnedEnvironmentConflict,
   resolveTrustMode,
+  type PinnedBoot,
   type PinnedBootCode,
 } from "./trust.js";
 import { isRosterId } from "./roster.js";
@@ -102,7 +104,16 @@ function onSignals(close: () => Promise<void>): void {
   process.on("SIGTERM", shutdown);
 }
 
-async function serve(): Promise<void> {
+/** A usage refusal: one line on stderr and exit code 2. Nothing is started. */
+function refuseUsage(command: string, detail: string): number {
+  process.stderr.write(`noa-gate ${command}: UNKNOWN_ARGUMENT: ${detail}\n`);
+  return 2;
+}
+
+async function serve(args: string[]): Promise<number | null> {
+  // `serve` takes no arguments. One was once silently ignored, so `serve --roster-file X` booted the
+  // self-minting alpha root for an operator who asked for a pinned one.
+  if (args.length > 0) return refuseUsage("serve", `${JSON.stringify(args[0])}; serve takes no arguments (configuration is read from the environment)`);
   const bindAddress = process.env["NOA_GATE_BIND"] ?? "127.0.0.1";
   const port = Number.parseInt(process.env["NOA_GATE_PORT"] ?? "8899", 10);
 
@@ -127,7 +138,10 @@ async function serve(): Promise<void> {
   // ── stages 0-1: which trust root. ANY pinned variable present means pinned, or refuse. ──────────
   const request = resolveTrustMode(process.env, typeof process.geteuid === "function");
   if ("code" in request) return refuseBoot(request.code, request.detail);
-  if (request.mode === "alpha") return serveAlpha(common);
+  if (request.mode === "alpha") {
+    await serveAlpha(common);
+    return null;
+  }
 
   // ── stages 2-11: the pinned trust root. A refusal is final: there is no alpha fallback. ────────
   const boot = loadPinnedTrust({
@@ -141,14 +155,27 @@ async function serve(): Promise<void> {
     nowMs: Date.now(),
   });
   if (!boot.ok) return refuseBoot(boot.code, boot.detail);
+  try {
+    return await servePinned(boot, common);
+  } catch (err) {
+    // Anything that stops the boot after loading releases the high-water lock before the exit.
+    boot.release();
+    throw err;
+  }
+}
 
+async function servePinned(boot: PinnedBoot, common: ServeCommon): Promise<number | null> {
+  const { bindAddress, port } = common;
   // The signer's identity comes from the ROSTER (stage 10 already proved roster and socket agree), and
   // a signer we cannot reach, or that names itself differently, stops the boot here.
   // A configured socket without a pinned signer must never fall through to the in-process grant key.
   let executionSigner;
   if (common.grantSignerSocket !== undefined) {
     const pinnedSigner = boot.roster.executionSigner;
-    if (pinnedSigner === null) return refuseBoot("ROSTER_EXEC_SIGNER_MISMATCH", "NOA_GATE_GRANT_SIGNER_SOCKET is set but the roster pins no executionSigner");
+    if (pinnedSigner === null) {
+      boot.release();
+      return refuseBoot("ROSTER_EXEC_SIGNER_MISMATCH", "NOA_GATE_GRANT_SIGNER_SOCKET is set but the roster pins no executionSigner");
+    }
     executionSigner = remoteExecutionSigner({
       socketPath: common.grantSignerSocket,
       expect: { kid: pinnedSigner.kid, publicKey: pinnedSigner.publicKey },
@@ -199,6 +226,7 @@ async function serve(): Promise<void> {
     ) + "\n",
   );
   onSignals(() => gate.close());
+  return null;
 }
 
 /**
@@ -288,7 +316,7 @@ function parseFlags(args: string[], allowed: readonly string[]): { ok: true; fla
       continue;
     }
     const name = a.slice(2);
-    if (!allowed.includes(name)) return { ok: false, detail: `unknown flag ${JSON.stringify(a)}` };
+    if (!allowed.includes(name)) return { ok: false, detail: `UNKNOWN_ARGUMENT: unknown flag ${JSON.stringify(a)}` };
     if (Object.prototype.hasOwnProperty.call(flags, name)) return { ok: false, detail: `flag ${JSON.stringify(a)} given twice` };
     const v = args[i + 1];
     if (v === undefined || v.startsWith("--")) return { ok: false, detail: `flag ${JSON.stringify(a)} needs a value` };
@@ -308,7 +336,7 @@ function keygen(args: string[]): number {
   const usage = "usage: noa-gate keygen --key-file <path> --kid <kid>";
   const parsed = parseFlags(args, ["key-file", "kid"]);
   if (!parsed.ok || parsed.positional.length > 0) {
-    process.stderr.write(`noa-gate keygen: ${parsed.ok ? "unexpected argument" : parsed.detail}; ${usage}\n`);
+    process.stderr.write(`noa-gate keygen: ${parsed.ok ? `UNKNOWN_ARGUMENT: unexpected argument ${JSON.stringify(parsed.positional[0])}` : parsed.detail}; ${usage}\n`);
     return 2;
   }
   const keyFile = parsed.flags["key-file"];
@@ -349,12 +377,19 @@ function rosterCheck(args: string[]): number {
   const usage = "usage: noa-gate roster-check <roster-file> [--key-file <path>]";
   const parsed = parseFlags(args, ["key-file"]);
   if (!parsed.ok || parsed.positional.length !== 1) {
-    process.stderr.write(`noa-gate roster-check: ${parsed.ok ? "exactly one roster file is required" : parsed.detail}; ${usage}\n`);
+    process.stderr.write(`noa-gate roster-check: ${parsed.ok ? (parsed.positional.length > 1 ? `UNKNOWN_ARGUMENT: unexpected argument ${JSON.stringify(parsed.positional[1])}` : "exactly one roster file is required") : parsed.detail}; ${usage}\n`);
     return 2;
   }
   const rosterFile = parsed.positional[0] as string;
   if (typeof process.geteuid !== "function") {
     process.stderr.write("noa-gate roster-check: PINNED_PLATFORM_UNSUPPORTED: this platform has no POSIX user ids\n");
+    return 1;
+  }
+  // The same environment rules `serve` applies: a second identity source is refused here too, so a
+  // roster that checks clean cannot then be refused by `serve` for an environment reason.
+  const conflict = pinnedEnvironmentConflict(process.env);
+  if (conflict !== null) {
+    process.stderr.write(`noa-gate roster-check: ${conflict.code}: ${conflict.detail}\n`);
     return 1;
   }
   const common = {
@@ -368,7 +403,7 @@ function rosterCheck(args: string[]): number {
   const keyFile = parsed.flags["key-file"];
   const result = keyFile === undefined
     ? loadPinnedRoster(common)
-    : loadPinnedTrust({ ...common, keyFile, grantSignerSocketSet: Boolean(process.env["NOA_GATE_GRANT_SIGNER_SOCKET"]) });
+    : loadPinnedTrust({ ...common, keyFile, grantSignerSocketSet: Boolean(process.env["NOA_GATE_GRANT_SIGNER_SOCKET"]), lockState: false });
   if (!result.ok) {
     process.stderr.write(`noa-gate roster-check: ${result.code}: ${result.detail}\n`);
     return 1;
@@ -404,9 +439,18 @@ function flag(args: string[], name: string): string | undefined {
   return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
 }
 
+/** The options `hold-and-run` accepts before `--`; each takes one value. */
+const HOLD_AND_RUN_FLAGS = ["--url", "--key", "--canonical", "--risk", "--cwd", "--target-env"] as const;
+
 async function holdAndRun(args: string[]): Promise<number> {
   const dashDash = args.indexOf("--");
   const options = dashDash < 0 ? args : args.slice(0, dashDash);
+  for (let i = 0; i < options.length; i += 2) {
+    const name = options[i] as string;
+    if (!(HOLD_AND_RUN_FLAGS as readonly string[]).includes(name) || i + 1 >= options.length) {
+      return refuseUsage("hold-and-run", `${JSON.stringify(name)} is not an option with a value (known: ${HOLD_AND_RUN_FLAGS.join(", ")}); the command goes after --`);
+    }
+  }
   const explicitUrl = flag(options, "url");
   const explicitKey = flag(options, "key");
   const environmentUrl = process.env["NOA_GATE_URL"];
@@ -471,20 +515,27 @@ async function holdAndRun(args: string[]): Promise<number> {
   return result.outcome === "EXECUTED" ? 0 : 1;
 }
 
-/** The subcommands this binary knows. Nothing else starts anything. */
-const KNOWN_SUBCOMMANDS = ["serve", "hold-and-run", "keygen", "roster-check"] as const;
+/**
+ * The subcommands this binary knows, as a closed table: a handler returns an exit code, or `null` when
+ * the process keeps running (a listening gate). Nothing outside the table starts anything.
+ */
+type Subcommand = (rest: string[]) => Promise<number | null>;
+const SUBCOMMANDS: Readonly<Record<string, Subcommand>> = Object.freeze(Object.assign(Object.create(null) as Record<string, Subcommand>, {
+  serve: (rest: string[]) => serve(rest),
+  "hold-and-run": (rest: string[]) => holdAndRun(rest),
+  keygen: async (rest: string[]) => keygen(rest),
+  "roster-check": async (rest: string[]) => rosterCheck(rest),
+}));
 
 async function main(): Promise<void> {
-  const [, , sub, ...rest] = process.argv;
-  if (sub === undefined || sub === "serve") {
-    await serve();
-    return;
+  const [, , sub = "serve", ...rest] = process.argv;
+  const handler = Object.prototype.hasOwnProperty.call(SUBCOMMANDS, sub) ? SUBCOMMANDS[sub] : undefined;
+  if (handler === undefined) {
+    process.stderr.write(`noa-gate: UNKNOWN_SUBCOMMAND: ${JSON.stringify(sub)}; known: ${Object.keys(SUBCOMMANDS).join(", ")}\n`);
+    process.exit(2);
   }
-  if (sub === "hold-and-run") process.exit(await holdAndRun(rest));
-  if (sub === "keygen") process.exit(keygen(rest));
-  if (sub === "roster-check") process.exit(rosterCheck(rest));
-  process.stderr.write(`noa-gate: UNKNOWN_SUBCOMMAND: ${JSON.stringify(sub)}; known: ${KNOWN_SUBCOMMANDS.join(", ")}\n`);
-  process.exit(2);
+  const exitCode = await handler(rest);
+  if (exitCode !== null) process.exit(exitCode);
 }
 
 main().catch((e) => {

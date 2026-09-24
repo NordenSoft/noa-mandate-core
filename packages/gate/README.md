@@ -70,18 +70,20 @@ exactly one explicit posture.
 
 The server has two trust modes:
 
-- **Pinned** (`NOA_GATE_ROSTER_FILE` and `NOA_GATE_KEY_FILE`). The gate uses a persistent gate key, and
-  approver, audit key, key-manifest epoch and quorum come only from an operator-provisioned roster.
-  The HPKE display sealer is wired. Every broken input refuses the boot with a stable code, and there
-  is no fallback. `noa-gate keygen` creates the key file and `noa-gate roster-check` validates a
-  roster. See [docs/gate-pinned-trust.md](../../docs/gate-pinned-trust.md) and
+- **Pinned** (`NOA_GATE_ROSTER_FILE` and `NOA_GATE_KEY_FILE`, absolute paths). The gate uses a
+  persistent gate key, and approver, audit key, key-manifest epoch and quorum come only from an
+  operator-provisioned roster. The HPKE display sealer is wired. Run the gate as a dedicated non-root
+  uid; the roster belongs to root or an administrator. Every broken input refuses the boot with a
+  stable code, and there is no fallback. `noa-gate keygen` creates the key file and
+  `noa-gate roster-check` validates a roster. See
+  [docs/gate-pinned-trust.md](../../docs/gate-pinned-trust.md) and
   [NON-CLAIMS.md](../../NON-CLAIMS.md) §S8.
 - **Alpha** (no pinned variable set). A fresh trust root is minted on every boot, `NOA_GATE_TENANT`
   names the tenant, and no display sealer is wired, so every hold is refused with
   `DISPLAY_SEALER_UNCONFIGURED`.
 
 Any other subcommand than `serve`, `hold-and-run`, `keygen` and `roster-check` exits 2 and starts
-nothing.
+nothing, and every subcommand refuses an argument it does not know (`UNKNOWN_ARGUMENT`, exit 2).
 
 For an out-of-process grant signer in alpha mode, provide the variables below. In pinned mode, set
 only `NOA_GATE_GRANT_SIGNER_SOCKET`: the signer's identity comes from the roster, and the other
