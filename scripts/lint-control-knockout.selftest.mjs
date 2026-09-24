@@ -70,8 +70,10 @@ import {
   newFailureEventsBeyondBaseline,
   observeSuite,
   parseBoundaryArmTerminalEvidence,
+  knockoutShardSuiteKey,
   partitionByDependency,
   partitionIntoShards,
+  planKnockoutShards,
   prepareContainedEvidenceSnapshot,
   privateFallbackRoot,
   probeProcess,
@@ -87,6 +89,7 @@ import {
   userCacheHome,
   validateContainedObservationResponse,
   validateKnockoutRegistry,
+  validateKnockoutShardCostTable,
 } from "./lib/knockout-runner.mjs";
 import {
   PROOF_EVENT_PROTOCOL,
@@ -104,7 +107,7 @@ import {
   unverifiedGateProvenance,
 } from "./lib/gate-event-contract.mjs";
 import { localPackageDependencyOrder, proofPreparationPlan, runRecipeFor } from "./lib/proof-resolve.mjs";
-import { knockoutRegistrySnapshot } from "./lint-control-knockout.mjs";
+import { KNOCKOUT_SHARD_COSTS, knockoutRegistrySnapshot } from "./lint-control-knockout.mjs";
 
 /**
  * EVERY fixture this file writes lives under one private workspace, and that workspace is NOT the
@@ -1325,11 +1328,24 @@ check("the registry shards deterministically: exact union, no overlap, and every
   for (let index = 0; index < 208; index += 1) {
     registry.push(mk(`entry-${index}`, [`packages/p${index % 18}`, "npm", ["test"]]));
   }
+  // One minute per arm and a budget no group reaches: this case measures exactness, balance and
+  // affinity. Splitting for the budget has its own case below.
+  const costs = {
+    budgetMinutes: 1_000_000,
+    fixedMinutes: 1,
+    suites: Array.from({ length: 18 }, (_, index) => ({
+      armMinutes: 1, kind: "tests", samples: 1, suite: [`packages/p${index}`, "npm", ["test"]],
+    })),
+  };
+  // The costliest suite group: its baseline plus one arm per entry.
+  const largestGroupMinutes = 1 + Math.ceil(208 / 18);
 
   // EXACT PARTITION at several totals, including 1 and a total that does not divide evenly.
   for (const total of [1, 2, 4, 7, 8, 13, 16, 32]) {
     const shards = [];
-    for (let index = 0; index < total; index += 1) shards.push(partitionIntoShards(registry, index, total));
+    for (let index = 0; index < total; index += 1) {
+      shards.push(partitionIntoShards(registry, index, total, costs));
+    }
     const ids = shards.flat().map((entry) => entry.id);
     assert.equal(ids.length, registry.length,
       `total=${total}: the shards cover ${ids.length} entries, the registry has ${registry.length}`);
@@ -1337,10 +1353,17 @@ check("the registry shards deterministically: exact union, no overlap, and every
       `total=${total}: an entry appears in more than one shard`);
     assert.deepEqual([...ids].sort(), registry.map((e) => e.id).sort(),
       `total=${total}: the union is not the registry`);
-    // Balanced to within one entry — a shard carrying the long tail alone is the timeout again.
-    const sizes = shards.map((shard) => shard.length);
-    assert.ok(Math.max(...sizes) - Math.min(...sizes) <= 1,
-      `total=${total}: shard sizes are unbalanced: ${JSON.stringify(sizes)}`);
+    // BALANCED IN MINUTES, not in entries: equal entry counts put ten boundary arms of about 14
+    // minutes each in one job (run 35964797924, 176.6 of 180 minutes). Longest-first assignment
+    // bounds the spread instead: the most loaded shard exceeds the least loaded by at most one
+    // piece, and a piece is at most one whole suite group.
+    const plan = planKnockoutShards(registry, total, costs);
+    assert.deepEqual(plan.shards.map((shard) => shard.entries.map((e) => e.id)),
+      shards.map((shard) => shard.map((e) => e.id)),
+      `total=${total}: partitionIntoShards does not return the plan's own slices`);
+    const loads = plan.shards.map((shard) => shard.projectedMinutes);
+    assert.ok(Math.max(...loads) - Math.min(...loads) <= largestGroupMinutes,
+      `total=${total}: projected shard minutes are unbalanced: ${JSON.stringify(loads)}`);
     // SUITE AFFINITY, which is why this is not round-robin: a baseline is measured once per distinct
     // suite in a run, so a partition that scattered suites would multiply baseline cost by N.
     const suiteCounts = shards.map((shard) => new Set(shard.map((e) => JSON.stringify(e.suite))).size);
@@ -1348,16 +1371,23 @@ check("the registry shards deterministically: exact union, no overlap, and every
       `total=${total}: a shard touches ${Math.max(...suiteCounts)} suites; the partition lost suite affinity`);
   }
 
-  // DETERMINISTIC: the same inputs give the same slice, every time.
-  assert.deepEqual(partitionIntoShards(registry, 2, 8).map((e) => e.id),
-    partitionIntoShards(registry, 2, 8).map((e) => e.id),
+  // DETERMINISTIC: the same inputs give the same slice, every time, and so do equal copies of them,
+  // which is what every separate CI leg recomputes from its own checkout.
+  assert.deepEqual(partitionIntoShards(registry, 2, 8, costs).map((e) => e.id),
+    partitionIntoShards(registry, 2, 8, costs).map((e) => e.id),
     "the partition is not deterministic");
+  assert.deepEqual(
+    planKnockoutShards(structuredClone(registry), 8, structuredClone(costs)).shards
+      .map((shard) => shard.entries.map((e) => e.id)),
+    planKnockoutShards(registry, 8, costs).shards.map((shard) => shard.entries.map((e) => e.id)),
+    "equal copies of the registry and cost table plan differently");
 
   // ANTI-VACUITY: the coverage assertions above must be able to FAIL. A partitioner that drops one
   // entry and one that duplicates an entry are both caught by the same two checks.
-  const dropsOne = (entries, index, total) => partitionIntoShards(entries, index, total).slice(index === 0 ? 1 : 0);
+  const dropsOne = (entries, index, total) =>
+    partitionIntoShards(entries, index, total, costs).slice(index === 0 ? 1 : 0);
   const duplicates = (entries, index, total) => {
-    const slice = partitionIntoShards(entries, index, total);
+    const slice = partitionIntoShards(entries, index, total, costs);
     return index === 0 ? [...slice, entries[entries.length - 1]] : slice;
   };
   for (const [label, broken] of [["a dropped entry", dropsOne], ["a duplicated entry", duplicates]]) {
@@ -1369,12 +1399,12 @@ check("the registry shards deterministically: exact union, no overlap, and every
 
   // MALFORMED AND OUT-OF-RANGE refuse in the pure function, before any caller can act on them.
   for (const [index, total] of [[0, 0], [0, -1], [1, 1], [4, 4], [-1, 4], [1.5, 4], ["0", 4], [0, "4"], [NaN, 4]]) {
-    assert.throws(() => partitionIntoShards(registry, index, total),
+    assert.throws(() => partitionIntoShards(registry, index, total, costs),
       `shard ${JSON.stringify(index)}/${JSON.stringify(total)} was accepted instead of refused`);
   }
 
   // AN EMPTY SLICE IS RETURNED AS EMPTY, so the caller can refuse rather than report a green job.
-  assert.deepEqual(partitionIntoShards(registry, 900, 999), [],
+  assert.deepEqual(partitionIntoShards(registry, 900, 999, costs), [],
     "a shard beyond the registry did not come back empty");
 
   // ── THE CLI REFUSES, END TO END, BEFORE MEASURING ANYTHING ────────────────────────────────────
@@ -1453,14 +1483,215 @@ check("sharding partitions the DEPENDENCY-RUNNABLE registry, never the declared 
   assert.deepEqual(runnable.map((e) => e.id), ["public-1", "public-2", "public-3"]);
   assert.deepEqual(setupFailed.map((e) => e.id), ["dependent-1", "dependent-2"]);
 
+  const costs = {
+    budgetMinutes: 120,
+    fixedMinutes: 16,
+    suites: [{ armMinutes: 4, kind: "tests", samples: 1, suite: ["packages/p", "npm", ["test"]] }],
+  };
   const sharded = [];
-  for (let index = 0; index < 3; index += 1) sharded.push(...partitionIntoShards(runnable, index, 3).map((e) => e.id));
+  for (let index = 0; index < 3; index += 1) {
+    sharded.push(...partitionIntoShards(runnable, index, 3, costs).map((e) => e.id));
+  }
   assert.deepEqual(sharded.sort(), ["public-1", "public-2", "public-3"],
     "the shards do not cover exactly the dependency-runnable entries");
   for (const missing of setupFailed) {
     assert.equal(sharded.includes(missing.id), false,
       `${missing.id} is SETUP_FAILED yet was assigned to a shard, which would score it as measured`);
   }
+});
+
+check("the shard plan holds every leg to the cost budget where equal-count slices did not", () => {
+  // ── THE MEASURED FAILURE THIS REPLACES ────────────────────────────────────────────────────────
+  // Run 35964797924 grouped the registry by suite and cut equal-count slices: the first slice got
+  // ten boundary-selftest arms of about 14 minutes each and ran 176.6 of its 180 minutes, while
+  // the other thirty slices took 42 to 87. This fixture has the same shape (one expensive suite
+  // first in registry order, then many cheap ones) and the measured table's fixed and budget minutes.
+  const expensive = [".", "node", ["expensive-selftest.mjs"]];
+  const cheap = (index) => [`packages/c${index % 12}`, "npm", ["test"]];
+  const costs = {
+    budgetMinutes: 120,
+    fixedMinutes: 16,
+    suites: [
+      { armMinutes: 14.5, kind: "gate", samples: 1, suite: expensive },
+      ...Array.from({ length: 12 }, (_, index) => ({
+        armMinutes: 4.5, kind: "tests", samples: 1, suite: cheap(index),
+      })),
+    ],
+  };
+  const registry = [];
+  for (let index = 0; index < 16; index += 1) {
+    registry.push({
+      id: `expensive-${index}`, kind: "gate", suite: expensive,
+      // One entry carries a setup-integrity postcheck, which costs a second arm.
+      ...(index === 3 ? { expectedSetupIntegrity: {} } : {}),
+    });
+  }
+  for (let index = 0; index < 264; index += 1) {
+    registry.push({ id: `cheap-${index}`, kind: "tests", suite: cheap(index) });
+  }
+  // An INDEPENDENT projection written from the model's definition, so the plan's own number is
+  // checked rather than trusted.
+  const armOf = new Map(costs.suites.map((row) => [JSON.stringify([row.kind, row.suite]), row.armMinutes]));
+  const project = (entries) => {
+    if (entries.length === 0) return 0;
+    const keys = new Set(entries.map((entry) => JSON.stringify([entry.kind, entry.suite])));
+    let minutes = costs.fixedMinutes;
+    for (const key of keys) minutes += armOf.get(key);
+    for (const entry of entries) {
+      minutes += armOf.get(JSON.stringify([entry.kind, entry.suite])) *
+        (entry.expectedSetupIntegrity === undefined ? 1 : 2);
+    }
+    return minutes;
+  };
+
+  const total = 32;
+  const plan = planKnockoutShards(registry, total, costs);
+  const ids = plan.shards.flatMap((shard) => shard.entries.map((entry) => entry.id));
+  assert.equal(ids.length, registry.length, "the plan does not hold every entry exactly once");
+  assert.deepEqual([...new Set(ids)].sort(), registry.map((entry) => entry.id).sort(),
+    "the plan's union is not the registry");
+  for (const shard of plan.shards) {
+    assert.ok(shard.entries.length > 0, `shard ${shard.index} is empty and would refuse`);
+    assert.equal(shard.projectedMinutes, project(shard.entries),
+      `shard ${shard.index}: the plan reports ${shard.projectedMinutes} minutes, the model gives ` +
+      `${project(shard.entries)}`);
+    assert.ok(shard.projectedMinutes <= costs.budgetMinutes,
+      `shard ${shard.index} projects ${shard.projectedMinutes} minutes, over the ` +
+      `${costs.budgetMinutes}-minute budget`);
+  }
+  assert.ok(plan.shards.filter((shard) => shard.entries.some((entry) => entry.kind === "gate")).length > 1,
+    "the expensive suite was not split although it alone exceeds the budget");
+
+  // ANTI-VACUITY: the previous equal-count partition, reproduced here, breaks the same budget on
+  // the same fixture, so the assertions above measure the change and not an easy fixture.
+  const bySuite = new Map();
+  for (const entry of registry) {
+    const key = JSON.stringify([entry.kind, entry.suite]);
+    if (!bySuite.has(key)) bySuite.set(key, []);
+    bySuite.get(key).push(entry);
+  }
+  const grouped = [...bySuite.values()].flat();
+  const size = Math.floor(grouped.length / total);
+  const remainder = grouped.length % total;
+  const previousWorst = Math.max(...Array.from({ length: total }, (_, index) => {
+    const start = index * size + Math.min(index, remainder);
+    return project(grouped.slice(start, start + size + (index < remainder ? 1 : 0)));
+  }));
+  assert.ok(previousWorst > costs.budgetMinutes,
+    `equal-count slices project at most ${previousWorst} minutes on this fixture, so it does not ` +
+    "reproduce the measured failure");
+});
+
+check("a suite without a cost row, a repeated row or a malformed cost table refuses the plan", () => {
+  // A guessed cost is a timeout found hours later, so an entry whose suite has no row refuses
+  // before any leg is planned, naming the suite and the entry. The table's shape is closed.
+  const p = ["packages/p", "npm", ["test"]];
+  const q = ["packages/q", "npm", ["test"]];
+  const registry = [{ id: "a", kind: "tests", suite: p }, { id: "b", kind: "tests", suite: q }];
+  const rowP = { armMinutes: 4, kind: "tests", samples: 1, suite: p };
+  const rowQ = { armMinutes: 4, kind: "tests", samples: 1, suite: q };
+  const good = { budgetMinutes: 120, fixedMinutes: 16, suites: [rowP, rowQ] };
+  assert.doesNotThrow(() => planKnockoutShards(registry, 2, good));
+  assert.throws(() => partitionIntoShards(registry, 0, 2, { ...good, suites: [rowP] }),
+    /no row for suite .*packages\/q.*\(entry "b"\)/,
+    "an entry whose suite has no cost row was planned");
+  // The kind is part of the suite key, exactly as it is for the baseline an arm is judged against.
+  assert.throws(() => planKnockoutShards(registry, 2, { ...good, suites: [rowP, { ...rowQ, kind: "gate" }] }),
+    /no row for suite/, "a row for another kind of the same command was accepted as this suite's cost");
+  for (const [label, table, pattern] of [
+    ["absent table", undefined, /the table must be an object/],
+    ["array table", [], /the table must be an object/],
+    ["unknown key", { ...good, margin: 1 }, /keys must be exactly/],
+    ["missing key", { budgetMinutes: 120, suites: [rowP, rowQ] }, /keys must be exactly/],
+    ["zero budget", { ...good, budgetMinutes: 0 }, /budgetMinutes must be a positive finite/],
+    ["NaN fixed", { ...good, fixedMinutes: Number.NaN }, /fixedMinutes must be a positive finite/],
+    ["string fixed", { ...good, fixedMinutes: "16" }, /fixedMinutes must be a positive finite/],
+    ["fixed fills the budget", { ...good, fixedMinutes: 120 }, /leaves no room/],
+    ["suites not an array", { ...good, suites: {} }, /suites must be an array/],
+    ["row with an extra key", { ...good, suites: [{ ...rowP, note: "x" }, rowQ] }, /keys must be exactly/],
+    ["negative arm minutes", { ...good, suites: [{ ...rowP, armMinutes: -4 }, rowQ] }, /armMinutes must be a positive finite/],
+    ["infinite arm minutes", { ...good, suites: [{ ...rowP, armMinutes: Infinity }, rowQ] }, /armMinutes must be a positive finite/],
+    ["fractional samples", { ...good, suites: [{ ...rowP, samples: 1.5 }, rowQ] }, /samples must be a non-negative integer/],
+    ["suite not an array", { ...good, suites: [{ ...rowP, suite: "packages/p" }, rowQ] }, /needs a kind string and a suite array/],
+    ["repeated row", { ...good, suites: [rowP, rowP, rowQ] }, /repeats suite/],
+  ]) {
+    assert.throws(() => planKnockoutShards(registry, 2, table), pattern,
+      `${label}: the cost table was accepted`);
+  }
+});
+
+check("the live registry and its shard cost table cover each other, and the CI matrix plans within budget", () => {
+  // The table is data kept beside the registry. A suite with no row makes every leg refuse its
+  // plan; a row no suite uses is a stale measurement nobody reviews. Both are reported here, in
+  // the selftest every leg runs first, naming the suite to fix.
+  const { registry } = knockoutRegistrySnapshot();
+  const coverageProblems = (entries, table) => {
+    const rows = validateKnockoutShardCostTable(table).armMinutesByKey;
+    const used = new Set(entries.map(knockoutShardSuiteKey));
+    return [
+      ...[...used].filter((key) => !rows.has(key)).map((key) => `no cost row for suite ${key}`),
+      ...[...rows.keys()].filter((key) => !used.has(key)).map((key) => `cost row for unused suite ${key}`),
+    ];
+  };
+  assert.deepEqual(coverageProblems(registry, KNOCKOUT_SHARD_COSTS), [],
+    "the shard cost table and the live registry disagree");
+
+  // The leg count and the job limit are READ from ci.yml, never restated here: the matrix list is
+  // the one place that sets the number of legs, and the ruleset requires one check per leg.
+  const lines = fs.readFileSync(path.join(REPO, ".github/workflows/ci.yml"), "utf8").split("\n");
+  const start = lines.indexOf("  knockout-shards:");
+  assert.notEqual(start, -1, "the knockout-shards job is gone from ci.yml");
+  let end = start + 1;
+  while (end < lines.length && !/^  [A-Za-z0-9_-]+:\s*$/.test(lines[end])) end += 1;
+  const job = lines.slice(start, end).join("\n");
+  const legList = /\n        shard: \[([^\]]*)\]/.exec(job);
+  assert.notEqual(legList, null, "the knockout-shards matrix no longer lists its legs as shard: [...]");
+  const legs = legList[1].split(",").map((value) => value.trim()).filter((value) => value !== "");
+  assert.ok(legs.length > 0 && new Set(legs).size === legs.length,
+    `the knockout-shards matrix legs are empty or repeated: ${JSON.stringify(legs)}`);
+  const timeout = /\n    timeout-minutes: ([0-9]+)\n/.exec(job);
+  assert.notEqual(timeout, null, "the knockout-shards job has no timeout-minutes");
+  assert.ok(KNOCKOUT_SHARD_COSTS.budgetMinutes < Number(timeout[1]),
+    `the planning budget ${KNOCKOUT_SHARD_COSTS.budgetMinutes} is not below the job limit ${timeout[1]}`);
+
+  const budgetProblems = (entries, table) => {
+    const plan = planKnockoutShards(entries, legs.length, table);
+    const planned = plan.shards.flatMap((shard) => shard.entries.map((entry) => entry.id));
+    const problems = [];
+    if (planned.length !== entries.length || new Set(planned).size !== entries.length) {
+      problems.push(`the plan holds ${planned.length} slots for ${entries.length} entries`);
+    }
+    for (const shard of plan.shards) {
+      if (shard.entries.length === 0) problems.push(`leg ${shard.index} is empty and would refuse`);
+      if (shard.projectedMinutes > table.budgetMinutes) {
+        problems.push(`leg ${shard.index} projects ${shard.projectedMinutes} of ${table.budgetMinutes} budget minutes`);
+      }
+    }
+    return problems;
+  };
+  assert.deepEqual(budgetProblems(registry, KNOCKOUT_SHARD_COSTS), [],
+    `the live registry does not fit ${legs.length} legs within budget: split or speed up a suite, ` +
+    "or add legs, which also needs the ruleset's required checks changed");
+
+  // ANTI-VACUITY: each detector above fires on a real-shaped change.
+  const [firstRow, ...otherRows] = KNOCKOUT_SHARD_COSTS.suites;
+  assert.ok(coverageProblems(registry, { ...KNOCKOUT_SHARD_COSTS, suites: otherRows })
+    .some((problem) => problem.startsWith("no cost row")), "a missing cost row was not reported");
+  assert.ok(coverageProblems(registry, {
+    ...KNOCKOUT_SHARD_COSTS,
+    suites: [...KNOCKOUT_SHARD_COSTS.suites, { ...firstRow, suite: ["packages/unused", "npm", ["test"]] }],
+  }).some((problem) => problem.startsWith("cost row for unused")), "an unused cost row was not reported");
+  const costliest = [...KNOCKOUT_SHARD_COSTS.suites].sort((a, b) => b.armMinutes - a.armMinutes)[0];
+  const template = registry.find((entry) => knockoutShardSuiteKey(entry) === knockoutShardSuiteKey(costliest));
+  const { expectedSetupIntegrity: _postcheck, ...plainArm } = template;
+  const overloaded = [
+    ...registry,
+    ...Array.from({ length: 200 }, (_, index) => ({ ...plainArm, id: `overload-${index}` })),
+  ];
+  assert.ok(budgetProblems(overloaded, KNOCKOUT_SHARD_COSTS)
+    .some((problem) => problem.includes("budget minutes")), "an over-budget registry was not reported");
+  assert.ok(budgetProblems(registry.slice(0, legs.length - 1), KNOCKOUT_SHARD_COSTS)
+    .some((problem) => problem.includes("is empty")), "a registry too small for every leg was not reported");
 });
 
 check("the preparation planner orders a synthetic file: chain, and fails closed on every bad plan", () => {

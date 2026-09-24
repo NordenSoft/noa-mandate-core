@@ -42,7 +42,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION,
-  baselineEvidenceSummary, partitionIntoShards, PASSING,
+  baselineEvidenceSummary, planKnockoutShards, PASSING,
   ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS, runIsolatedKnockoutSweep, validateKnockoutRegistry,
 } from "./lib/knockout-runner.mjs";
 import {
@@ -4725,6 +4725,180 @@ const KNOCKOUTS = [
 ];
 
 /**
+ * SHARD COST TABLE — the reviewed data `planKnockoutShards` (lib/knockout-runner.mjs) divides the
+ * CI matrix with. A change that adds a suite to the registry adds its row here in the same change:
+ * the planner refuses an entry whose suite has no row, and the selftest refuses a row that no
+ * entry uses, so this table cannot drift from the registry in either direction.
+ *
+ * MEASURED, NOT GUESSED. `armMinutes` is the largest gap between consecutive `progress` lines of
+ * that suite in two complete 32-leg CI runs, 35964797924 (pull request 14) and 35920358016 (main
+ * 6810051), rounded UP to the next half minute. A gap that closes several lines at once is divided
+ * among them, and an entry with a setup-integrity postcheck counts twice. `samples` is the number
+ * of gaps behind a row; 0 would mark an estimate, which must carry its reason beside the row.
+ *
+ * `fixedMinutes` covers what every job pays around its arms: checkout, install, build, capture
+ * and the runner selftest. It is the smallest whole minute at which every job of those two runs
+ * whose suites all have a measured row projects at least its measured duration; the largest
+ * shortfall it absorbs is 15.4 minutes. `budgetMinutes` is the planning ceiling, 60 minutes under
+ * the 180-minute `timeout-minutes` of the knockout-shards job, so a job may run half again as slow
+ * as its projection before it reaches the limit. Recalibrate from fresh complete runs when a
+ * suite's command or a row's measurements change.
+ */
+export const KNOCKOUT_SHARD_COSTS = Object.freeze({
+  budgetMinutes: 120,
+  fixedMinutes: 16,
+  suites: Object.freeze([
+    {
+      kind: "gate",
+      suite: [".", "node", ["scripts/lint-boundary.mjs", "--selftest", "--knockout-json"]],
+      armMinutes: 14.5,
+      samples: 24,
+    },
+    {
+      kind: "tests",
+      suite: [".", "node", ["--test-name-pattern=^reviewed controls close every local worker and provenance-required boundary suite$", "--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+      armMinutes: 4,
+      samples: 4,
+    },
+    {
+      kind: "gate",
+      suite: [".", "node", ["scripts/lint-boundary.mjs", "--output-contract-selftest", "--knockout-json"]],
+      armMinutes: 4,
+      samples: 2,
+    },
+    {
+      kind: "gate",
+      suite: [".", "node", ["scripts/lib/boundary-spool-arm.selftest.mjs"]],
+      armMinutes: 4.5,
+      samples: 2,
+    },
+    {
+      kind: "tests",
+      suite: [".", "node", ["--test-name-pattern=^all parser-backed routes carry bootstrap and candidate bootstrap has no key discovery$", "--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+      armMinutes: 4.5,
+      samples: 16,
+    },
+    {
+      kind: "tests",
+      suite: [".", "node", ["--test-name-pattern=^isolated knockout bootstrap is direct-pipe-bound, remote-free, and fail-closed$", "--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+      armMinutes: 4,
+      samples: 1,
+    },
+    {
+      kind: "tests",
+      suite: [".", "node", ["--test-name-pattern=^pre-push Tier-A argv selftest is portable and exact$", "--test", "scripts/pre-push-gate.selftest.mjs"]],
+      armMinutes: 4,
+      samples: 2,
+    },
+    {
+      kind: "tests",
+      suite: [".", "node", ["--test-name-pattern=^lock, attestation, parser-byte, and parser-symlink drift fail before parser top level$", "--test", "scripts/lib/boundary-bootstrap.selftest.mjs"]],
+      armMinutes: 4.5,
+      samples: 3,
+    },
+    {
+      kind: "tests",
+      suite: [".", "node", ["--test", "scripts/lib/boundary-external-authority.selftest.mjs"]],
+      armMinutes: 4.5,
+      samples: 6,
+    },
+    { kind: "tests", suite: ["packages/signer-core", "npm", ["test"]], armMinutes: 5, samples: 69 },
+    { kind: "tests", suite: ["packages/gate", "npm", ["test"]], armMinutes: 4.5, samples: 32 },
+    { kind: "tests", suite: ["packages/relay", "npm", ["test"]], armMinutes: 4.5, samples: 16 },
+    {
+      kind: "tests",
+      suite: ["packages/e2e-demo", "node", ["--import", "tsx", "--test", "test/keyring-resolver-parity.test.ts"]],
+      armMinutes: 4,
+      samples: 1,
+    },
+    {
+      kind: "tests",
+      suite: ["packages/framework-adapters", "npm", ["test"]],
+      armMinutes: 4,
+      samples: 2,
+    },
+    { kind: "tests", suite: ["packages/mcp-proxy", "npm", ["test"]], armMinutes: 4, samples: 1 },
+    { kind: "tests", suite: ["packages/adapter-core", "npm", ["test"]], armMinutes: 4.5, samples: 6 },
+    { kind: "tests", suite: ["packages/rail-x402", "npm", ["test"]], armMinutes: 4.5, samples: 22 },
+    { kind: "tests", suite: [".", "npm", ["run", "test:product"]], armMinutes: 5.5, samples: 48 },
+    { kind: "gate", suite: [".", "npm", ["run", "lint:security-gates"]], armMinutes: 4, samples: 4 },
+    {
+      kind: "tests",
+      suite: [".", "node", ["--test", "scripts/lib/security-ratchet.selftest.mjs"]],
+      armMinutes: 4,
+      samples: 4,
+    },
+    { kind: "tests", suite: ["packages/evidence", "npm", ["test"]], armMinutes: 6.5, samples: 78 },
+    {
+      kind: "tests",
+      suite: ["packages/approval-artifacts", "npm", ["test"]],
+      armMinutes: 4,
+      samples: 4,
+    },
+    {
+      kind: "gate",
+      suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+      armMinutes: 7.5,
+      samples: 71,
+    },
+    {
+      kind: "gate",
+      suite: [".", "node", ["scripts/lib/proof-resolve.selftest.mjs"]],
+      armMinutes: 4,
+      samples: 5,
+    },
+    {
+      kind: "tests",
+      suite: ["packages/signer-core", "node", ["--test", "test/dependency-hardening.test.mjs"]],
+      armMinutes: 4.5,
+      samples: 37,
+    },
+    {
+      kind: "tests",
+      suite: ["packages/signer-core", "node", ["--test", "dist/test/ed25519-runtime-integrity.test.js"]],
+      armMinutes: 4.5,
+      samples: 4,
+    },
+    {
+      kind: "gate",
+      suite: [".", "npm", ["run", "lint:resolver-parity"]],
+      armMinutes: 4.5,
+      samples: 5,
+    },
+    {
+      kind: "gate",
+      suite: [".", "node", ["scripts/lint-resolver-parity.mjs"]],
+      armMinutes: 3.5,
+      samples: 3,
+    },
+    {
+      kind: "tests",
+      suite: ["packages/e2e-demo", "npm", ["run", "test:resolver-parity:built"]],
+      armMinutes: 4.5,
+      samples: 2,
+    },
+    {
+      kind: "tests",
+      suite: [".", "npm", ["run", "test:action-digest"]],
+      armMinutes: 4.5,
+      samples: 14,
+    },
+    {
+      kind: "gate",
+      suite: [".", "npm", ["run", "lint:inert-containers"]],
+      armMinutes: 4,
+      samples: 2,
+    },
+    {
+      kind: "tests",
+      suite: [".", "npm", ["run", "test:deploy-release"]],
+      armMinutes: 5.5,
+      samples: 10,
+    },
+  ].map((row) => Object.freeze(row))),
+});
+
+/**
  * Read-only candidate-local registry surface for disposable workers. The supervisor sends only
  * the canonical registry digest and selected entry bytes; every retained arm imports this captured
  * module and checks those values against the same candidate-local registry.
@@ -4783,10 +4957,26 @@ if (DIRECT_ENTRY) {
     process.exit(0);
   }
 
+  // The shard's slice comes from the cost-aware plan over the WHOLE runnable registry, recomputed
+  // identically on every leg. A plan that cannot be made (a suite with no cost row) refuses here,
+  // before capture, instead of letting a guessed cost time out a job hours later.
+  let shardPlan = null;
+  if (SHARD) {
+    try {
+      shardPlan = planKnockoutShards(RUNNABLE, SHARD.total, KNOCKOUT_SHARD_COSTS)
+        .shards[SHARD.index];
+    } catch (error) {
+      console.error(
+        `--shard ${SHARD.index}/${SHARD.total}: shard plan refused before measurement: ` +
+        String(error && error.message),
+      );
+      process.exit(1);
+    }
+  }
   const selected = ONLY
     ? RUNNABLE.filter((entry) => entry.id === ONLY)
     : SHARD
-      ? partitionIntoShards(RUNNABLE, SHARD.index, SHARD.total)
+      ? [...shardPlan.entries]
       : RUNNABLE;
 
   if (SHARD && selected.length === 0) {
@@ -4806,6 +4996,14 @@ if (DIRECT_ENTRY) {
   if (selected.length === 0) {
     console.error("NOTHING_SELECTED: the public registry contains no runnable entries");
     process.exit(1);
+  }
+  if (SHARD) {
+    // Stated before the first arm, so a job that is later cancelled still names what it planned.
+    console.log(
+      `knockout shard plan ${SHARD.index}/${SHARD.total}: ${selected.length} controls across ` +
+      `${shardPlan.suiteCount} suites, projected ${shardPlan.projectedMinutes} of ` +
+      `${KNOCKOUT_SHARD_COSTS.budgetMinutes} budget minutes`,
+    );
   }
 
   const rawDependenciesByEntry = new Map(
