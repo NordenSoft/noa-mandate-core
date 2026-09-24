@@ -15,8 +15,8 @@
       "name": "noa-receipt",
       "noticeTitle": "NOA Receipt — the open Agent Action Receipt organ",
       "packagePath": ".",
-      "pathCount": 75,
-      "pathSetSha256": "d72b54b13d92b90d7610a4d222cdafe521da6ff03d186324e7e819e9f81d924d"
+      "pathCount": 77,
+      "pathSetSha256": "6707e6f170a83db4386eaf37acecd412e675eb008df6b570762de8af80d17d60"
     },
     {
       "name": "noa-mcp-adapter-core",
@@ -29,8 +29,8 @@
       "name": "noa-approval-artifacts",
       "noticeTitle": "NOA Approval Artifacts — signed approval and execution-control artifact schemas and conformance vectors",
       "packagePath": "packages/approval-artifacts",
-      "pathCount": 193,
-      "pathSetSha256": "e4c31b3ed721717810f061bb934731dcbcf0c236633c4427a497c952815cb0d3"
+      "pathCount": 195,
+      "pathSetSha256": "fc14c4bc73696487ea9c19b08a59439abaf06ef3a0a88299b3ef9e42d76cfab1"
     },
     {
       "name": "noa-framework-adapters",

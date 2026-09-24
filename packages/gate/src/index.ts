@@ -15,6 +15,34 @@ export { RateLimiter, type RateDecision } from "./ratelimit.js";
 export { parseBearer, hashSecret, constantTimeEqualHex, type ParsedBearer } from "./auth.js";
 export { DEFAULT_GATE_CONFIG, resolveGateConfig, isLoopbackAddress, type GateConfig } from "./config.js";
 export { createAlphaTrust, type GateTrust, type GateKeyPair, type CreateTrustInput, type ExternalExecutionSignerKey } from "./trust.js";
+// Pinned trust (docs/gate-pinned-trust.md): the roster validator and the trust root built from it.
+export {
+  createPinnedTrust,
+  loadPinnedTrust,
+  loadPinnedRoster,
+  resolveTrustMode,
+  type CreatePinnedTrustInput,
+  type LoadPinnedTrustInput,
+  type LoadPinnedRosterInput,
+  type PinnedBoot,
+  type PinnedBootCode,
+  type PinnedRefusal,
+  type PinnedRoster,
+  type PinnedTrustState,
+  type RosterStateStatus,
+  type TrustModeRequest,
+} from "./trust.js";
+export {
+  GATE_ROSTER_SPEC,
+  parseGateRoster,
+  checkRosterClock,
+  type GateRoster,
+  type RosterApprover,
+  type RosterParseResult,
+  type RosterClockResult,
+  type RosterRefusalCode,
+  type RosterClockRefusalCode,
+} from "./roster.js";
 export {
   localExecutionSigner,
   remoteExecutionSigner,

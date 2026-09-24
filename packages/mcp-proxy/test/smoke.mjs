@@ -1918,7 +1918,7 @@ async function main() {
   ok("(x) segment B verifies under the NEW kid alone", verifyChain(b(segX_B), { keyring: b({ [kpXb.kid]: kpXb.publicKey }) }).status === "VALID");
   ok(
     "(x) the atomic lifecycle refuses retired history and verifies the current-key segment",
-    verifyChain(b(segX_A), { keyring: b(lifecycleX) }).status === "TAMPERED" && verifyChain(b(segX_B), { keyring: b(lifecycleX) }).status === "VALID",
+    verifyChain(b(segX_A), { keyring: b(lifecycleX) }).status === "KEY_RETIRED" && verifyChain(b(segX_B), { keyring: b(lifecycleX) }).status === "VALID",
   );
   const segBOldOnlyX = verifyChain(b(segX_B), { keyring: b({ [kpXa.kid]: kpXa.publicKey }) });
   ok(

@@ -123,6 +123,9 @@ export const NOA_RECEIPT: EntryPoint[] = [
   { name: "projectDeployRelease", cls: "bytes-in", why: "the deployment tuple is a DOCUMENT, parsed by the shared strict boundary; a caller-owned live object is refused without being traversed, which is what makes symbol keys, accessors and revisable reads unreachable rather than merely rejected" },
   { name: "projectionIdentityHash", cls: "producer-inert", why: "pure pre-image construction over four scalar fields read once; its output is compared against pinned golden vectors, never accepted as a verdict" },
 
+  // ── noa.ledger.transfer/1 (src/ledger-transfer.ts) ─────────────────────────────────────────────
+  { name: "projectLedgerTransfer", cls: "bytes-in", why: "the transfer tuple is a DOCUMENT, parsed by the shared strict boundary; a caller-owned live object is refused without being traversed, and the hash, display and returned tuple are all re-derived from the module's own canonical bytes" },
+
   // ── policy surface ─────────────────────────────────────────────────────────────────────────────
   { name: "evaluate", cls: "bytes-in", why: "policy and inputs are documents; the rule walk runs over safeParse output" },
   { name: "validatePolicy", cls: "bytes-in", why: "the validated bytes ARE the supplied bytes" },

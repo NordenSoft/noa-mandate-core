@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Key-load self-check for the C# verifier, run by impl-csharp/conformance.sh. It compiles the SAME
+    src/Crypto.cs the CLI uses and calls its key-load and signature-R functions directly, so the
+    stage at which a key is refused is pinned (a TAMPERED verdict alone does not show it).
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>noa-verify-selfcheck</AssemblyName>
+    <RootNamespace>NoaReceipt.SelfCheck</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../src/Crypto.cs" Link="Crypto.cs" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.1" />
+  </ItemGroup>
+
+</Project>

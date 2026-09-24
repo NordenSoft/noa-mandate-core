@@ -8,6 +8,21 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Added
 
+- `noa.ledger.transfer/1` publishes the wire form of a reference ledger transfer
+  (`src/ledger-transfer.ts`; normative specification `docs/ledger-transfer-spec.md`; ADR-R-010,
+  PROPOSED). New exports: `projectLedgerTransfer` (bytes-in: validates the six string members
+  `amount`, `fromAccount`, `ledger`, `salt`, `toAccount`, `unit` with one spelling per value, refuses
+  any other member and a self-transfer, JCS-canonicalizes the tuple and returns its `paramsHash`,
+  canonical bytes, frozen tuple and six-row display — or one of eleven stable refusal codes), the
+  pinned `LEDGER_TRANSFER_SCHEMA_ID` / `LEDGER_TRANSFER_DISPLAY_ID` /
+  `LEDGER_TRANSFER_IMPLEMENTATION_DIGEST` (recomputable from the published build), the spec and
+  canonical-name constants, and the `LedgerTransferParams` / `LedgerTransferResult` /
+  `LedgerTransferRefusalCode` / `LedgerTransferUnit` types. A generated, diff-gated corpus lands with
+  it (`conformance/ledger-transfer/vectors.json`, 150 vectors: 2 identity pins, 20 accepts, 128
+  refusals, with every adjacent pair of the refusal order and every cross-phase pair pinned) over a synthetic fixture
+  (`acct-example-N`, `ledger-example-N`, the ISO 4217 testing code `XTS`). The reference Gate gains a sealed adapter for the action that is deliberately not
+  registered. See `NON-CLAIMS.md` §S7. Additive: the frozen `noa.receipt/0.1` wire format gains no
+  field.
 - `noa.deploy.release/1` publishes the wire form of the deployment action bind
   (`src/deploy-release.ts`; normative specification `docs/deploy-release-spec.md`). New exports:
   `projectDeployRelease` (bytes-in: validates the six-member deployment tuple — `repository`,
@@ -36,6 +51,29 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Fixed
 
+- Strict public-key validation: refuse non-canonical and small-order Ed25519 key encodings (RFC 8032
+  §5.1.3 decoding + small-order rejection). All five verifiers (TypeScript `src/keys.ts`, Python
+  `impl-py`, Go `impl-go`, Rust `impl-rust`, C# `impl-csharp`) now apply one rule at key load, before
+  signature verification: a public key is refused when its `y` is not canonical (`y ≥ p`), when `y`
+  does not decode to a curve point, when `x = 0` carries a set sign bit, when the point is one of the
+  8 small-order points in any spelling, or when it is not in the prime-order subgroup (mixed order).
+  A signature's `R` must be canonically encoded and not small-order, `S` must be canonical (`S < L`),
+  and every verifier evaluates the cofactorless equation `[S]B = R + [k]A` with `k` reduced mod `L`
+  (C# additionally requires `R` in the prime-order subgroup, which gives the same verdict whatever
+  equation its library evaluates). A refused keyring key yields `TAMPERED` (exit `2`) in every verifier.
+- `noa-approval-artifacts` applies the same key and `R` rule: it is generated from `src/keys.ts` into
+  `src/inert-core/ed25519-strict.ts` by `scripts/sync-inert-core.mjs` (CI's `check:inert-core` fails
+  on drift), and `verifyArtifact` refuses a trust-root key that fails it before signature
+  verification, with the reason `signing key refused by strict public-key validation`.
+- `noa-relay` refuses device registration with a key that fails the same rule (`422 BAD_PUBLIC_KEY`),
+  verifies with `{ zip215: false }`, and requires a strictly decoded, prime-order `R`.
+- The shared corpus gains `conformance/vectors/strict-ed25519/` (14 refused-key keyrings, including a
+  mixed-order key, and one `S ≥ L` signature vector), run by all five verifiers; the conformance matrix
+  asserts the `malleability` class for Go, Rust and C# from that corpus. A `TAMPERED` verdict does not
+  show where the refusal happened, so each port's key-load function is also checked directly
+  (`impl-py/conformance.mjs` for TypeScript and Python, the Go and Rust unit tests, and the new C#
+  self-check `impl-csharp/selfcheck`, run by `impl-csharp/conformance.sh`). Keys produced by Ed25519
+  key generation are unaffected; no committed positive fixture key changes verdict.
 - A lifecycle retirement added after an honestly signed receipt no longer changes that receipt's
   historical integrity to `TAMPERED`. The side API verifies with retained public material, attributes
   only through a separately trusted checkpoint inside the covered signer's explicit
@@ -56,6 +94,53 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Changed
 
+- `NON-CLAIMS.md` gains §S8, the claim boundary of the reference gate's new pinned trust mode
+  (`noa.gate-roster/1`, `docs/gate-pinned-trust.md`): no single-use enforcement at the effect, no
+  signed or remotely revocable roster, limited rollback detection, no clock-rollback detection, a
+  quorum of exactly 1, kid-only audience and recipient checks, no protected posture for a gate running
+  as root, records signed after roster expiry that are not authority, reserved grants stranded by an
+  epoch rotation, the one-pid-namespace assumption of the high-water lock, and no conformance claim for
+  the roster format. The gate itself (`noa-gate`)
+  is not part of this package; the entry records the change to a document this package ships.
+- **Behaviour change (refusal labels only): an authentic signature by a lifecycle-retired key is now
+  `KEY_RETIRED`, not `TAMPERED`, on the default `verifyChain` path, and the CLI exits `9`, not `2`.**
+  Previously a relying party could tell "intact bytes with an authentic signature by a key the trust
+  root has since retired" from "altered bytes / forged signature" only by matching `reason` text. The
+  verifier now authenticates a retired key's signature against its retained public material first,
+  so a forged or altered receipt or checkpoint naming that key stays `TAMPERED`; `KEY_RETIRED` is
+  reported only when every other hash, signature, linkage, identity and checkpoint check passed, so
+  it cannot stand in for any of them. It remains a refusal: `signaturesVerified` and `tailChecked`
+  are `false`, and it does not establish that the signature predates retirement. The result keeps
+  every warning a complete run produces (truncation, fork, attribution-level and the other caveats)
+  plus exactly one `key-retired: seq N kid "…" (receipt|checkpoint)` warning; that warning, the
+  `reason` and a CLI stderr note (default and `--anchors`/`--trust-set` paths) point to
+  `--purpose historical`, and no other status carries that pointer.
+  Because the retired-key refusal moved to the end of the walk, other lifecycle-keyring inputs were
+  relabelled too. The general rule: when the input also fails another check — anywhere in the walk,
+  including a later receipt or any phase of the checkpoint — that later failing check now answers.
+  The classes below were each measured on the parent commit and are pinned by tests (full table:
+  [VERSIONING.md §3.2](VERSIONING.md)):
+  - `TAMPERED` (exit 2) → `KEY_RETIRED` (exit 9): authentic retired receipt or checkpoint, nothing
+    else wrong.
+  - `TAMPERED` (2) → `UNTRUSTED` (5): a retired seq-0 receipt whose kid the identity manifest does not
+    authorize; a retired receipt followed by a later receipt the manifest does not authorize; retired
+    receipts, or a retired checkpoint, with a checkpoint kid not authorized for the chain opener.
+  - `TAMPERED` (2) → `MALFORMED` (3): a retired receipt followed by a later `MALFORMED` receipt (for
+    example `requireNFC: true` and a non-NFC string); a checkpoint document that is not a JSON object
+    (for example `[]` or `null`).
+  - `TAMPERED` → `TAMPERED` with a different `reason`/`badSeq`: a retired kid carrying another key's
+    signature ("invalid signature"); a later receipt with altered bytes, a forged signature or broken
+    linkage (reported at that later seq); a forged checkpoint, whatever its key's state ("checkpoint
+    not authenticated"); an authentic checkpoint over a truncated head ("tail truncated").
+  This change moves no receipt into or out of `VALID`, and the static-keyring algorithm, every vector
+  under `conformance/vectors` and the historical purpose are unchanged by it. Consumers that accept
+  only `VALID` / exit `0` need no change; a consumer that matched `TAMPERED` or exit `2` to detect
+  retirement must match `KEY_RETIRED` or exit `9`. `conformance/survivable-retirement/cases.json` now
+  carries a 17-case `currentUse` half that pins this refusal order, including the cross-phase pairs
+  (a retired receipt against every checkpoint phase and every later receipt's own checks); the
+  knockout swaps each pair in a copy of the built verifier and must turn a named case red. The TypeScript reference is the one port that implements lifecycle
+  keyrings on its current-use path; Python, Go, Rust and C# are declared `NOT_IMPLEMENTED` there and
+  are checked to refuse every case without ever reporting `KEY_RETIRED`.
 - Historical prefix results use `classification: PARTIAL` with
   `dimensions.completeness: PREFIX_ANCHORED`. This pair is the migration target for the earlier
   informal `DEGRADED` label; `VERIFIED` is reserved for an authenticated exact head with intact

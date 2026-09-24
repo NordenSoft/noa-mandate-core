@@ -97,7 +97,7 @@ const CLASS_RULES = [
   [/impersonation/i, "impersonation"],
   [/truncation|legit opener checkpoint/i, "truncation"],
   [/duplicate json key/i, "dup-key"],
-  [/malleability|low-order pubkey|non-canonical y.q|non-canonical keyring spki/i, "malleability"],
+  [/malleability|low-order pubkey|non-canonical y.q|non-canonical keyring spki|non-canonical pubkey|off-curve pubkey|mixed-order pubkey|signature-r rule/i, "malleability"],
   [/astral|surrogate|arabic-indic|fullwidth digit|unicode digit|unicode-digit|code-point/i, "unicode"],
   [/content altered/i, "hash"],
   [/non-canonical base64 sig|trailing-bits non-canonical sig base64|sig fails under wrong pubkey/i, "sig"],
@@ -344,7 +344,9 @@ const FILE_VECTOR_CLASS_RULES = [
   // ZERO real labels (verified: no vector in conformance/vectors/ or conformance/golden/ uses any of
   // these words) — this rule exists so a FUTURE malleability vector is picked up automatically, not
   // because one exists today.
-  [/malleab|low-order|non-canonical.*(pubkey|spki|point)/i, "malleability"],
+  // strict-ed25519/ (gen-vectors.ts 11) adds the off-curve key case: a key refused at key load by the
+  // same strict public-key validation, so it belongs to the same class.
+  [/malleab|low-order|non-canonical.*(pubkey|spki|point)|off-curve|mixed-order/i, "malleability"],
   // gen-vectors.ts "duplicate object key" — the parser-level rule. NOT `dup-seq`; see the trap
   // note above.
   [/duplicate-key/i, "dup-key"],
@@ -769,6 +771,14 @@ function renderMarkdown({ table, totalTsPyResults, tsPyExitCode, fileLangRuns, o
       "each column's count against its own corpus.",
   );
   lines.push("");
+  lines.push(
+    "**A verdict row shows agreement, not the stage of a refusal.** Every `strict-ed25519` vector " +
+      "is `TAMPERED` whether the key is refused at key load or the signature fails later, so this " +
+      "table cannot show where a refusal happened. The key-load stage is pinned separately, per port: " +
+      "`impl-py/conformance.mjs`'s `key load (...)` checks (TypeScript and Python), the Go and Rust " +
+      "unit tests, and the C# self-check (`impl-csharp/selfcheck`, run by `impl-csharp/conformance.sh`).",
+  );
+  lines.push("");
   const header = ["Vector class", ...COLUMNS.map((c) => c.label)];
   lines.push(`| ${header.join(" | ")} |`);
   lines.push(`|${header.map(() => "---").join("|")}|`);
@@ -795,7 +805,9 @@ function renderMarkdown({ table, totalTsPyResults, tsPyExitCode, fileLangRuns, o
   // Go/Rust/C# at once (the interesting case — a class asserted for even one of the three has real
   // coverage, just not from every language).
   const fileLangsAllEmpty = VECTOR_CLASSES.filter((cls) => ["Go", "Rust", "CSharp"].every((k) => classesNotAssertedFor(k, table).includes(cls)));
-  lines.push(
+  // Rendered only while such a gap exists: the sentence below names it as open, and once the
+  // file-based corpus covers every class for at least one of the three, it would be a false claim.
+  if (fileLangsAllEmpty.length > 0) lines.push(
     "‡ \"not asserted here\" (Go/Rust/C# columns) means the shared file-based corpus " +
       "(`conformance/vectors/`, `conformance/golden/`) does not currently include a vector that " +
       "`FILE_VECTOR_CLASS_RULES` maps to this class for that implementation. It does NOT mean the " +
@@ -810,7 +822,7 @@ function renderMarkdown({ table, totalTsPyResults, tsPyExitCode, fileLangRuns, o
       "low-order-pubkey vector pair under `conformance/vectors/attack/` would close it for real, " +
       "not just cosmetically.",
   );
-  lines.push("");
+  if (fileLangsAllEmpty.length > 0) lines.push("");
   lines.push(
     "**Additional checks outside the 10-class taxonomy.** The file-based corpus also runs several " +
       "checks that predate or fall outside these 10 classes — chain-linkage and genesis/prevHash " +
@@ -859,7 +871,7 @@ function renderMarkdown({ table, totalTsPyResults, tsPyExitCode, fileLangRuns, o
   // implementations until their suites consume those vectors — same discipline as the
   // `malleability` footnote above: an open coverage gap is recorded, never silently absorbed.
   lines.push(
-    "**`correlation-composition` (S4) — not asserted for Python/Go/Rust/C#.** The D7 composition corpus (fixed receipt + grant → `noa.action-digest/0.1` → seeded correlation nonce → settlement-evidence verdict; `packages/rail-x402/conformance/settlement-evidence/vectors.json`, octet framing pinned in `docs/settlement-evidence-spec.md` §3) is currently consumed by the TS suite only (`packages/rail-x402`, gated by its own `npm test`). No vector in the shared file-based corpus exercises the composition for the other four implementations, and none of their suites loads the rail corpus — so no composition cell is claimed for them. Treat this as an open coverage gap, not a passing claim: porting the corpus into a language's own runner is what closes it for real, exactly as the `malleability` note above prescribes for its gap.",
+    "**`correlation-composition` (S4) — not asserted for Python/Go/Rust/C#.** The D7 composition corpus (fixed receipt + grant → `noa.action-digest/0.1` → seeded correlation nonce → settlement-evidence verdict; `packages/rail-x402/conformance/settlement-evidence/vectors.json`, octet framing pinned in `docs/settlement-evidence-spec.md` §3) is currently consumed by the TS suite only (`packages/rail-x402`, gated by its own `npm test`). No vector in the shared file-based corpus exercises the composition for the other four implementations, and none of their suites loads the rail corpus — so no composition cell is claimed for them. Treat this as an open coverage gap, not a passing claim: porting the corpus into a language's own runner is what closes it for real, as the file-based `strict-ed25519/` vectors did for the `malleability` class.",
   );
   lines.push("");
   lines.push(
@@ -1088,6 +1100,9 @@ function selftest() {
   console.log("\nQA round 2 finding F4 — malleability now has a live classifier rule (was entirely absent):");
   check('a plausible future "attack/malleability-s-scalar.json" label now classifies malleability', classifyFileVector("attack/malleability-s-scalar.json") === "malleability");
   check('a plausible future "attack/low-order-pubkey.json" label now classifies malleability', classifyFileVector("attack/low-order-pubkey.json") === "malleability");
+  check('the strict-ed25519 off-curve key label classifies malleability', classifyFileVector("strict-ed25519/off-curve pubkey y=2") === "malleability");
+  check('the strict-ed25519 mixed-order key label classifies malleability', classifyFileVector("strict-ed25519/mixed-order pubkey") === "malleability");
+  check('the strict-ed25519 x = 0 sign-bit key label classifies malleability', classifyFileVector("strict-ed25519/x0-sign y=1 non-canonical pubkey") === "malleability");
   check("the new malleability rule does not swallow any REAL current corpus label", ["golden/genesis + keyring", "attack/tampered-content + keyring", "attack/key-swap + keyring", "malformed/duplicate-key"].every((l) => classifyFileVector(l) !== "malleability"));
 
   console.log("\nQA round 2 finding F5 — parser robustness (colon-in-detail) + the tenant re-attribution now mechanically pinned:");

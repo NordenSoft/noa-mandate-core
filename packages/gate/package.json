@@ -43,12 +43,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/*.test.js",
+    "test:pinned": "npm run build && node --test dist/test/pinned-*.test.js",
     "start": "npm run build && node dist/src/cli.js"
   },
   "dependencies": {
     "noa-approval-artifacts": "file:../approval-artifacts",
     "noa-receipt": "file:../..",
-    "noa-mcp-adapter-core": "file:../adapter-core"
+    "noa-mcp-adapter-core": "file:../adapter-core",
+    "noa-signer": "file:../signer-core"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

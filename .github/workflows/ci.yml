@@ -9,8 +9,12 @@ on:
     branches: [main]
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # One group per pull request (by number), otherwise per pushed ref. A newer push to a pull request
+  # cancels that pull request's running check: the superseded head can no longer merge. A push to main
+  # or to a hardening branch never cancels a RUNNING check. GitHub still keeps at most one pending run
+  # per group, so pushes that arrive while a run is in progress collapse to the newest one.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -146,10 +150,12 @@ jobs:
         run: cd packages/rail-x402 && npm ci
       - name: evidence tests
         run: cd packages/evidence && npm ci && npm test
+      - name: Build signer-core for the gate's and relay's local package dependency
+        # MOVED above the gate step: the pinned gate wires `noa-signer`'s HPKE display sealer, so the gate
+        # build resolves `packages/signer-core/dist` and would die on a missing module below this line.
+        run: cd packages/signer-core && npm ci && npm run build
       - name: gate tests
         run: cd packages/gate && npm ci && npm test
-      - name: Build signer-core for relay's local package dependency
-        run: cd packages/signer-core && npm ci && npm run build
       - name: relay tests
         run: cd packages/relay && npm ci && npm test
       - name: signer-core tests
@@ -280,11 +286,14 @@ jobs:
         run: bash impl-rust/conformance.sh
       - name: C# verifier == Python reference
         run: bash impl-csharp/conformance.sh
-      - name: Survivable retirement — 19 cases x all five verifiers
+      - name: Survivable retirement — 25 cases x all five verifiers + 17 current-use cases
         # The steps above already produced the TS, Go, Rust release and C# release artifacts. Reuse
-        # those exact executables: this adds the 95-result historical contract without compiling a
-        # second copy of every port. Regeneration plus the scoped diff binds the checked-in byte
-        # fixtures to the explicit generator oracle.
+        # those exact executables: this adds the 125-result historical contract without compiling a
+        # second copy of every port. The 17 current-use cases run on every port too: the one port
+        # declared IMPLEMENTED must match each, the others must refuse without ever reporting
+        # KEY_RETIRED, and the knockout swaps each pair of the KEY_RETIRED refusal order. Counts are
+        # pinned in test/survivable-retirement-conformance.test.ts as well. Regeneration plus the
+        # scoped diff binds the checked-in byte fixtures to the explicit generator oracle.
         run: |
           npm run check:survivable-retirement -- --no-build
           npm run check:survivable-retirement:knockout -- --no-build
@@ -520,6 +529,15 @@ jobs:
         # against a violation BUDGET that fails on regression — the count may only fall, and each
         # flips to blocking when it reaches zero. The rule is never weakened to fit the code.
         run: npm run lint:security-gates
+      - name: L4 knockout anchors (every registry mutation applies exactly once)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        # The knockout runner refuses an entry whose `find` does not match exactly once, but only
+        # inside a shard, hours into this workflow. This reads the same registry statically, stages
+        # each entry as the runner does, and fails in seconds; its selftest plants rotted, ambiguous,
+        # no-op, missing-file, also[], partner, self-cancelling, symlinked, non-regular, companion and
+        # setup-integrity defects and requires each to fail naming exactly the planted entries.
+        # --ignore-scripts: npm runs no pre/post hook around it (the knockout selftest also refuses one).
+        run: npm run --ignore-scripts lint:knockout-anchors
       - name: L11 inert-before-write on trusted decision paths
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # BLOCKING, and it runs its own selftest first. L2 and L8 model dispatch as a CALL or a READ

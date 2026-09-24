@@ -10,7 +10,8 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ARTIFACTS } from "../src/domains.js";
-import { verifyEd25519 } from "../src/crypto.js";
+import { generateKeyPair, isStrictEd25519PublicKey, verifyEd25519 } from "../src/crypto.js";
+import { keyHolderRCases } from "./ed25519-keyholder.js";
 import { verifyArtifact, type KeyEntry, type VerifyContext } from "../src/verify.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -200,6 +201,89 @@ test("strict Ed25519 parity rejects a non-canonical y coordinate", () => {
     ),
     false,
   );
+});
+
+// ── Strict public-key validation (one rule with noa-receipt/src/keys.ts, generated into
+// src/inert-core/ed25519-strict.ts): refuse non-canonical, off-curve, small-order and mixed-order
+// key encodings (RFC 8032 §5.1.3 decoding + small-order rejection + prime-order subgroup).
+const STRICT_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+const REFUSED_KEY_RAW: Array<[string, string]> = [
+  ["small-order: identity", "0100000000000000000000000000000000000000000000000000000000000000"],
+  ["small-order: order 2", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"],
+  ["small-order: order 4 (even x)", "0000000000000000000000000000000000000000000000000000000000000000"],
+  ["small-order: order 4 (odd x)", "0000000000000000000000000000000000000000000000000000000000000080"],
+  ["small-order: order 8 (a)", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"],
+  ["small-order: order 8 (b)", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85"],
+  ["small-order: order 8 (c)", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"],
+  ["small-order: order 8 (d)", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa"],
+  ["x = 0 with sign bit: y = 1", "0100000000000000000000000000000000000000000000000000000000000080"],
+  ["x = 0 with sign bit: y = p - 1", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+  ["non-canonical y: y = p, sign bit set", "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+  ["non-canonical y: y = p + 1", "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"],
+  // Off-curve encodings (y = 2 and others) are pinned in ONE dedicated test in
+  // strict-key-export.test.ts, so the knockout that removes that check can bind to exactly it.
+];
+/** A genuine key plus the order-2 point: (x, y) -> (-x, -y). Same curve, mixed order. */
+function mixedOrderRaw(publicKeyB64: string): string {
+  const raw = Buffer.from(publicKeyB64, "base64").subarray(12);
+  const p = (1n << 255n) - 19n;
+  let y = 0n;
+  for (let i = 31; i >= 0; i--) y = (y << 8n) | BigInt(i === 31 ? raw[i]! & 0x7f : raw[i]!);
+  const out = Buffer.alloc(32);
+  let v = p - y;
+  for (let i = 0; i < 32; i++) {
+    out[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  out[31] = (out[31]! & 0x7f) | ((raw[31]! & 0x80) ^ 0x80);
+  return out.toString("hex");
+}
+const spkiOf = (rawHex: string): string => Buffer.concat([STRICT_SPKI_PREFIX, Buffer.from(rawHex, "hex")]).toString("base64");
+
+test("strict Ed25519 public-key validation refuses every non-canonical, small-order and mixed-order key", () => {
+  const message = Buffer.from("NOA side-artifact strict verifier parity", "utf8");
+  const signature = Buffer.alloc(64, 7).toString("base64");
+  const genuine = generateKeyPair("strict-k");
+  const all: Array<[string, string]> = [...REFUSED_KEY_RAW, ["mixed order: genuine key + order-2 point", mixedOrderRaw(genuine.publicKey)]];
+  for (const [label, rawHex] of all) {
+    assert.equal(isStrictEd25519PublicKey(spkiOf(rawHex)), false, `${label} must be refused at key load`);
+    assert.equal(verifyEd25519(spkiOf(rawHex), message, signature), false, label);
+  }
+  assert.equal(isStrictEd25519PublicKey(genuine.publicKey), true, "a generated key must pass");
+  for (const entry of Object.values(keyring)) assert.equal(isStrictEd25519PublicKey(entry.publicKey), true, "corpus keyring key refused");
+});
+
+test("knockout proof (signature-R rule): verifyEd25519 refuses key-holder signatures whose R is the identity, the identity with the sign bit, or rB + a small-order point", () => {
+  // A fresh key and signatures made WITH its private scalar at test time; nothing is committed as bytes.
+  const kp = generateKeyPair("r-rule");
+  const seed = Buffer.from(kp.privateKey, "base64").subarray(16);
+  const message = Buffer.from("signature-R rule", "utf8");
+  const cases = keyHolderRCases(seed, message);
+  assert.equal(cases.publicRaw.toString("hex"), Buffer.from(kp.publicKey, "base64").subarray(12).toString("hex"), "helper key derivation");
+  assert.equal(verifyEd25519(kp.publicKey, message, cases.control.toString("base64")), true, "the control signature must verify");
+  for (const [label, sig] of cases.refused) {
+    assert.equal(verifyEd25519(kp.publicKey, message, sig.toString("base64")), false, `${label} must be refused`);
+  }
+});
+
+test("verifyArtifact refuses every signed kind at key load when its signing key fails strict public-key validation", () => {
+  const signedAccepts = vectors.filter(({ vec }) =>
+    vec.expect === "ACCEPT" && Object.values(ARTIFACTS).some((m) => m.spec === vec.spec && m.domain !== null));
+  const kinds = new Set(signedAccepts.map(({ vec }) => vec.spec));
+  assert.ok(kinds.size >= 6, `expected every signed kind to have an ACCEPT vector, got ${kinds.size}`);
+  for (const { slug, file, vec } of signedAccepts) {
+    const sigKid = (vec.artifact as { sig: { kid: string } }).sig.kid;
+    const genuine = verifyArtifact(b(vec.artifact), b({ ...vec.context, schemas, keyring }));
+    assert.equal(genuine.ok, true, `${slug}/${file}: the unmodified ACCEPT vector must verify (${genuine.reason})`);
+    const refusedKeys = [...REFUSED_KEY_RAW.map(([, raw]) => raw), mixedOrderRaw(keyring[sigKid]!.publicKey)];
+    for (const rawHex of refusedKeys) {
+      const weakKeyring = structuredClone(keyring);
+      weakKeyring[sigKid]!.publicKey = spkiOf(rawHex);
+      const result = verifyArtifact(b(vec.artifact), b({ ...vec.context, schemas, keyring: weakKeyring }));
+      assert.equal(result.ok, false, `${slug}/${file}: accepted under refused key ${rawHex}`);
+      assert.match(result.reason ?? "", /refused by strict public-key validation/, `${slug}/${file} ${rawHex}: wrong stage: ${result.reason}`);
+    }
+  }
 });
 
 test("Decision verifier rejects the OpenSSL small-order universal forgery", () => {

@@ -68,7 +68,8 @@ for (const [name, makeStore] of STORE_FACTORIES) {
     const h = makeHarness({}, makeStore());
     const { agent } = makeAgent(h);
     makeDevice(h, agent, "dup-kid", 1);
-    const res = h.engine.registerDevice({ kid: "dup-kid", publicKeyHex: "b".repeat(64) });
+    // A second, generated key: registration applies strict public-key validation before the kid check.
+    const res = h.engine.registerDevice({ kid: "dup-kid", publicKeyHex: "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394" });
     assert.equal(res.status, 409);
     assert.equal(bodyOf<{ error: string }>(res).error, "KID_ALREADY_REGISTERED");
   });

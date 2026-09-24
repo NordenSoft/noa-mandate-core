@@ -186,6 +186,9 @@ verify(receipts, { keyring?, checkpoint?, identityManifest? }):
                                              (curve-PINNED: a non-Ed25519 key is rejected, no alg-confusion)
        - keyring supplied AND kid UNKNOWN -> TAMPERED (no silent TOFU on attacker input)
        - no keyring at all                -> UNVERIFIED (cannot authenticate; never VALID)
+       - lifecycle keyring AND kid RETIRED -> verify with the retained public key first: a bad
+                                             signature is TAMPERED; an authentic one is remembered
+                                             and the walk CONTINUES (it never becomes VALID)
   5b. identity binding (only if identityManifest supplied):
        - (agent.id, sig.kid) authorized in the manifest -> ok
        - else                                           -> UNTRUSTED (cross-agent impersonation:
@@ -196,25 +199,52 @@ verify(receipts, { keyring?, checkpoint?, identityManifest? }):
   7. if checkpoint: assert head matches checkpoint (tail-truncation); and (if identityManifest
        supplied) the checkpoint sig.kid MUST be authorized for the GENESIS agent.id (the chain
        OPENER, seq 0) — NOT the mutable head — else UNTRUSTED (closes the re-heading attack); warn
-       when the chain has >1 agent.id (opener-scoped completeness)
-  -> VALID | UNVERIFIED | UNTRUSTED | TAMPERED | MALFORMED
+       when the chain has >1 agent.id (opener-scoped completeness). A checkpoint whose kid is
+       lifecycle-RETIRED is authenticated with the retained public key like step 5
+  8. if every check above passed but step 5 or 7 remembered an authentic retired-key signature
+       -> KEY_RETIRED (refused for current use; the first such signature is reported)
+  -> VALID | UNVERIFIED | UNTRUSTED | TAMPERED | MALFORMED | KEY_RETIRED
 ```
 
 CLI exit codes: `0` VALID · `1` UNVERIFIED (no keyring supplied) · `2` TAMPERED · `3` MALFORMED
-· `4` usage · `5` UNTRUSTED (identity binding failed). **CI rule: treat any non-zero exit as failure** (do not special-case `==2`). Honest
+· `4` usage · `5` UNTRUSTED (identity binding failed) · `9` KEY_RETIRED. **CI rule: treat any non-zero exit as failure** (do not special-case `==2`). Honest
 by design: without a keyring, signatures are reported UNVERIFIED, never VALID; without a
 checkpoint, the verifier emits an explicit tail-truncation warning; and it always emits a
 fork/equivocation caveat (an offline verifier sees only the branch it was given) plus a
 non-monotonic-timestamp warning if `ts` goes backwards.
 
-**Public-key strictness (interop-normative).** A conformant verifier MUST decode the Ed25519 public
-key `A` strictly: it **MUST reject** the 8 canonical small-order point encodings (the torsion subgroup
-of order dividing 8) and **MUST reject** any non-canonical encoding with `y ≥ q`. A verifier whose library admits low-order keys
-(e.g. OpenSSL) otherwise accepts low-order keys that a strict RFC-8032 verifier rejects, splitting the
-verdict on identical signed bytes (a legitimate signing key is never a low-order point, so this rejects
-no genuine key). This is the minimal pin for cross-impl agreement on `A` — **not** full ZIP-215
-semantics; the signature's `R` point needs no separate blocklist because it is bound by the verification
-equation, which both implementations enforce. The cross-impl conformance suite pins these vectors.
+**Retired keys (optional lifecycle trust root).** The static keyring above has no notion of
+retirement. A verifier that also accepts the `noa.signing-key-lifecycle/0.1` trust root (the
+reference verifier does) MUST refuse every non-null `retiredAt` for current use, and MUST
+authenticate the signature against the retired key's retained public material before it decides
+how to refuse. A signature that does not authenticate is `TAMPERED`, exactly as with a current key.
+An authentic one is `KEY_RETIRED`, reported only when every other check passes, so it can never
+stand in for a hash, signature, linkage, identity or checkpoint failure. `KEY_RETIRED` is not an
+acceptance: the signer-chosen `ts` is not evidence of when the signature was made, so the result
+does not establish that the receipt predates retirement. Attribution of such a receipt is the job
+of the separate `noa.historical-verification/0.1` purpose, which requires an independently trusted
+checkpoint. The reference verifier's `KEY_RETIRED` result carries a `key-retired:` warning that
+names that purpose; no other status carries it.
+
+**Public-key strictness (interop-normative).** A conformant verifier MUST apply strict public-key
+validation to the Ed25519 public key `A` at key load, from the key bytes alone and before signature
+verification: it refuses non-canonical and small-order key encodings (RFC 8032 §5.1.3 decoding +
+small-order rejection). It **MUST reject** a key whose `y` coordinate is not canonical (`y ≥ q`), whose
+`y` does not decode to a curve point, whose `x = 0` carries a set sign bit (RFC 8032 §5.1.3 step 4),
+whose point lies in the torsion subgroup of order dividing 8 (any of the 8 points, in any spelling), or
+whose point is not in the prime-order subgroup (`[L]A` is not the identity: a mixed-order key). A
+refused key authenticates nothing: every receipt or checkpoint under it is `TAMPERED`. Which encodings a
+library admits as a public key differs between libraries and versions (e.g. OpenSSL), so the rule is
+enforced by the verifier itself; a legitimate signing key always passes it, so it rejects no genuine key.
+
+**Signature strictness (interop-normative).** The signature's `R` **MUST** be canonically encoded (the
+decoding steps above) and **MUST NOT** be one of the 8 small-order points; `S` **MUST** be canonical
+(`S < L`). A verifier **MUST** evaluate the cofactorless equation `[S]B = R + [k]A` with
+`k = SHA-512(R ‖ A ‖ M)` reduced mod `L`, over the signature's own `R` bytes. With a prime-order `A` and
+this equation, no `R` outside the prime-order subgroup can verify; a verifier whose library evaluates
+the cofactored equation instead MUST also require `R` in the prime-order subgroup, which yields the
+same verdict. This is the pin for cross-impl agreement — **not** ZIP-215 semantics. The shared
+conformance corpus (`conformance/vectors/strict-ed25519/`) pins the key vectors for all five verifiers.
 
 ---
 

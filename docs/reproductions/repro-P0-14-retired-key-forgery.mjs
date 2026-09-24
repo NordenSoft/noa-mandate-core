@@ -249,11 +249,11 @@ probe(
 // Root chain, text alias, and standalone checkpoint.
 const chainControl = verifyChain(b([currentReceipt]), { keyring: b(lifecycleDoc) });
 const chainAttack = verifyChain(b([retiredReceipt]), { keyring: b(lifecycleDoc) });
-probe("verifyChain", chainControl.status === "VALID", chainAttack.status === "TAMPERED" && /retired/i.test(chainAttack.reason ?? ""), chainControl.status, `${chainAttack.status}: ${chainAttack.reason}`);
+probe("verifyChain", chainControl.status === "VALID", chainAttack.status === "KEY_RETIRED" && /retired/i.test(chainAttack.reason ?? ""), chainControl.status, `${chainAttack.status}: ${chainAttack.reason}`);
 
 const textControl = verifyChainText(JSON.stringify([currentReceipt]), { keyring: JSON.stringify(lifecycleDoc) });
 const textAttack = verifyChainText(JSON.stringify([retiredReceipt]), { keyring: JSON.stringify(lifecycleDoc) });
-probe("verifyChainText", textControl.status === "VALID", textAttack.status === "TAMPERED" && /retired/i.test(textAttack.reason ?? ""), textControl.status, `${textAttack.status}: ${textAttack.reason}`);
+probe("verifyChainText", textControl.status === "VALID", textAttack.status === "KEY_RETIRED" && /retired/i.test(textAttack.reason ?? ""), textControl.status, `${textAttack.status}: ${textAttack.reason}`);
 
 const currentCheckpoint = buildCheckpoint(currentReceipt, AFTER, currentSigner);
 const retiredCheckpoint = buildCheckpoint(currentReceipt, BEFORE, retiredSigner);
@@ -264,15 +264,15 @@ probe("verifyCheckpoint", checkpointControl === "ok", checkpointAttack === "reti
 const witnessOpts = { anchors: b([]), trustSet: b({ witnesses: [], quorum: 0 }) };
 const witnessedControl = verifyChainWitnessed(b([currentReceipt]), b(lifecycleDoc), witnessOpts);
 const witnessedAttack = verifyChainWitnessed(b([retiredReceipt]), b(lifecycleDoc), witnessOpts);
-probe("verifyChainWitnessed", witnessedControl.chain.status === "VALID", witnessedAttack.chain.status === "TAMPERED" && /retired/i.test(witnessedAttack.chain.reason ?? ""), witnessedControl.chain.status, `${witnessedAttack.chain.status}: ${witnessedAttack.chain.reason}`);
+probe("verifyChainWitnessed", witnessedControl.chain.status === "VALID", witnessedAttack.chain.status === "KEY_RETIRED" && /retired/i.test(witnessedAttack.chain.reason ?? ""), witnessedControl.chain.status, `${witnessedAttack.chain.status}: ${witnessedAttack.chain.reason}`);
 
 const cliControl = cliVerify([currentReceipt], lifecycleDoc);
 const cliAttack = cliVerify([retiredReceipt], lifecycleDoc);
-probe("root noa verify CLI", cliControl.status === 0, cliAttack.status === 2 && /retired/i.test(cliAttack.output), `exit=${cliControl.status}`, `exit=${cliAttack.status}: ${cliAttack.output}`);
+probe("root noa verify CLI", cliControl.status === 0, cliAttack.status === 9 && /retired/i.test(cliAttack.output), `exit=${cliControl.status}`, `exit=${cliAttack.status}: ${cliAttack.output}`);
 
 const serveControl = await serveVerify(1, [currentReceipt], lifecycleDoc);
 const serveAttack = await serveVerify(1, [retiredReceipt], lifecycleDoc);
-probe("root noa --serve IPC", serveControl.status === "VALID", serveAttack.status === "TAMPERED" && /retired/i.test(serveAttack.reason ?? ""), `${serveControl.status} exit=${serveControl.exit}`, `${serveAttack.status}: ${serveAttack.reason}`);
+probe("root noa --serve IPC", serveControl.status === "VALID", serveAttack.status === "KEY_RETIRED" && /retired/i.test(serveAttack.reason ?? ""), `${serveControl.status} exit=${serveControl.exit}`, `${serveAttack.status}: ${serveAttack.reason}`);
 
 // COSE direct and receipt composition.
 const currentCose = receiptToCose(currentReceipt, currentSigner);
@@ -441,7 +441,7 @@ const manifestRetired = {
 };
 const builtCurrent = verifyChain(b([currentReceipt]), { keyring: b(buildReceiptKeyring(manifestCurrent)) });
 const builtRetired = verifyChain(b([retiredReceipt]), { keyring: b(buildReceiptKeyring(manifestRetired)) });
-probe("buildReceiptKeyring", builtCurrent.status === "VALID", builtRetired.status === "TAMPERED" && /retired/i.test(builtRetired.reason ?? ""), builtCurrent.status, `${builtRetired.status}: ${builtRetired.reason}`);
+probe("buildReceiptKeyring", builtCurrent.status === "VALID", builtRetired.status === "KEY_RETIRED" && /retired/i.test(builtRetired.reason ?? ""), builtCurrent.status, `${builtRetired.status}: ${builtRetired.reason}`);
 
 // Full evidence pipeline: use its valid EXECUTED bundle and change only the EXTERNAL checkpoint
 // trust root from current to retired. This reaches evidence step 17 without narrowing.

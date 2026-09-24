@@ -23,6 +23,14 @@ if [ ! -f "$EXE" ]; then
   dotnet build -c Release "$SCRIPT_DIR" >/dev/null || { echo "BUILD FAILED"; exit 2; }
 fi
 
+# KEY-LOAD SELF-CHECK. The vector comparison below proves verdict agreement with impl-py; it cannot
+# show WHERE a key was refused (a TAMPERED verdict looks the same whether the key or the signature
+# failed). This program compiles the same src/Crypto.cs and calls its key-load and signature-R
+# functions directly on conformance/vectors/strict-ed25519/. A failure fails the whole run.
+echo "== key-load self-check (impl-csharp/selfcheck) =="
+dotnet run --project "$SCRIPT_DIR/selfcheck/selfcheck.csproj" -c Release -- conformance/vectors \
+  || { echo "KEY-LOAD SELF-CHECK FAILED"; exit 1; }
+
 TOTAL=0; PASS=0; FAIL=0
 
 run_case() {
@@ -108,6 +116,27 @@ run_case "attack tail-truncated + checkpoint (TAMPERED)"    "conformance/vectors
 run_case "attack tail-truncated no-checkpoint (VALID)"      "conformance/vectors/attack/tail-truncated.json" "$KR"
 run_case "attack forged-checkpoint-chain + forged-cp (TAMPERED)" "conformance/vectors/attack/forged-checkpoint-chain.json" "$KR" --checkpoint "conformance/vectors/attack/forged-checkpoint-cp.json"
 
+echo "== conformance/vectors/strict-ed25519 (refused at key load / non-canonical S) =="
+# STRICT Ed25519 KEY AND SCALAR VALIDATION (scripts/gen-vectors.ts 11). Each keyring maps the corpus kid to a
+# public key that strict public-key validation refuses at key load (non-canonical or small-order encoding,
+# RFC 8032 §5.1.3 decoding + small-order rejection); the chain is genuine, so every case must be TAMPERED.
+SE="conformance/vectors/strict-ed25519"
+run_case "strict-ed25519/low-order pubkey #0 (identity) (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-low-order-0.json"
+run_case "strict-ed25519/low-order pubkey #1 (order 2) (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-low-order-1.json"
+run_case "strict-ed25519/low-order pubkey #2 (order 4) (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-low-order-2.json"
+run_case "strict-ed25519/low-order pubkey #3 (order 4) (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-low-order-3.json"
+run_case "strict-ed25519/low-order pubkey #4 (order 8) (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-low-order-4.json"
+run_case "strict-ed25519/low-order pubkey #5 (order 8) (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-low-order-5.json"
+run_case "strict-ed25519/low-order pubkey #6 (order 8) (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-low-order-6.json"
+run_case "strict-ed25519/low-order pubkey #7 (order 8) (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-low-order-7.json"
+run_case "strict-ed25519/x0-sign y=1 non-canonical pubkey (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-x0-sign-y-1.json"
+run_case "strict-ed25519/x0-sign y=p-1 non-canonical pubkey (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-x0-sign-y-p-minus-1.json"
+run_case "strict-ed25519/y=p non-canonical pubkey (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-y-p-sign.json"
+run_case "strict-ed25519/y=p+1 non-canonical pubkey (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-y-p-plus-1.json"
+run_case "strict-ed25519/off-curve pubkey y=2 (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-off-curve-y-2.json"
+run_case "strict-ed25519/mixed-order pubkey (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-mixed-order.json"
+run_case "strict-ed25519/s-not-canonical malleability + kr (TAMPERED)" "$SE/chain-s-not-canonical.json" "$KR"
+echo
 echo "== conformance/vectors/malformed (parser/structural rejects) =="
 for f in deep-nest duplicate-key float-number lone-high-surrogate lone-low-surrogate pii-smuggle proto-pollution reversed-surrogate-pair trailing-garbage; do
   run_case "malformed $f (MALFORMED)" "conformance/vectors/malformed/$f.json" "$KR"
@@ -118,6 +147,7 @@ echo "excluded (non-receipt fixtures — consumed as auxiliary inputs, not stand
 echo "  - conformance/vectors/keyring.json                     : keyring (kid -> SPKI)"
 echo "  - conformance/vectors/checkpoint.json                  : signed checkpoint"
 echo "  - conformance/vectors/attack/forged-checkpoint-cp.json : signed checkpoint (aux for forged-checkpoint-chain)"
+echo "  - conformance/vectors/strict-ed25519/keyring-*.json   : keyrings holding refused keys (aux for valid-chain)"
 echo "  - conformance/golden/0.3.0/*/keyring.json              : keyrings"
 echo "  - conformance/golden/0.3.0/identity/manifest.json      : identity manifest"
 echo "  - conformance/golden/0.3.0/multi/checkpoint.json       : signed checkpoint"

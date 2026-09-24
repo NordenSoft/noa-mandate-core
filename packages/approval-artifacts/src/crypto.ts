@@ -16,7 +16,9 @@ import {
   generateKeyPairSync,
   sign as cryptoSign,
   verify as cryptoVerify,
+  type KeyObject,
 } from "node:crypto";
+import { isStrictEd25519PublicKeyBytes, isStrictEd25519SignatureRBytes } from "./inert-core/ed25519-strict.js";
 
 /** SHA-256 of a UTF-8 string or buffer, as lowercase hex. */
 export function sha256Hex(data: string | Buffer): string {
@@ -58,22 +60,6 @@ export interface KeyPair {
   privateKey: string;
 }
 
-/**
- * Canonical encodings of the eight points in Ed25519's small-order torsion subgroup.
- * OpenSSL's key acceptance admits some of these keys, while the protocol's strict
- * reference verifier rejects them. Keep this list in parity with `src/keys.ts` so a side
- * artifact cannot be accepted under a key that the receipt verifier rejects.
- */
-const SMALL_ORDER_PUBKEYS: ReadonlySet<string> = new Set([
-  "0100000000000000000000000000000000000000000000000000000000000000",
-  "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-  "0000000000000000000000000000000000000000000000000000000000000000",
-  "0000000000000000000000000000000000000000000000000000000000000080",
-  "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
-  "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
-  "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
-  "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
-]);
 
 /** Generate an Ed25519 keypair in the ecosystem's base64(DER) shape. */
 export function generateKeyPair(kid: string): KeyPair {
@@ -93,34 +79,57 @@ export function signEd25519(privateKeyB64: string, message: Buffer): string {
 }
 
 /**
+ * The strict Ed25519 PUBLIC-KEY rule as one function: canonical base64, a DER SPKI whose curve is
+ * Ed25519 and which re-encodes byte-for-byte, and a key that passes strict public-key validation
+ * (`isStrictEd25519PublicKeyBytes`, generated from `noa-receipt/src/keys.ts` into
+ * `./inert-core/ed25519-strict.ts`, so this package and the receipt verifier apply ONE rule).
+ * Returns the key object, or `null` for anything else. Never throws.
+ *
+ * `verifyEd25519` applies exactly this rule before it looks at a signature, and
+ * `isStrictEd25519PublicKey` publishes it, so a component that PINS a key at load time (the reference
+ * gate's roster loader) accepts exactly the keys this verifier will later accept. Two copies of the
+ * rule would be two rules.
+ */
+function strictEd25519PublicKey(publicKeyB64: unknown): KeyObject | null {
+  if (typeof publicKeyB64 !== "string") return null;
+  try {
+    const der = Buffer.from(publicKeyB64, "base64");
+    if (der.toString("base64") !== publicKeyB64) return null; // canonical base64 for the pubkey
+    const key = createPublicKey({ key: der, format: "der", type: "spki" });
+    if (key.asymmetricKeyType !== "ed25519") return null; // pin curve (CWE-347)
+    const canonical = key.export({ type: "spki", format: "der" }) as Buffer;
+    if (!canonical.equals(der)) return null; // reject non-canonical SPKI (trailing garbage)
+    if (!isStrictEd25519PublicKeyBytes(canonical.subarray(12))) return null;
+    return key;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True exactly when `verifyEd25519` would accept `publicKeyB64` as a key, signature checks aside.
+ * Never throws; a non-string is `false`.
+ */
+export function isStrictEd25519PublicKey(publicKeyB64: unknown): boolean {
+  return strictEd25519PublicKey(publicKeyB64) !== null;
+}
+
+/**
  * Verify an Ed25519 signature. Never throws — a malformed key/sig returns false. Ported from
  * `noa-receipt/src/keys.ts` `verifyEd25519` (the curve pin + canonical-SPKI + canonical-base64 +
- * S<L malleability checks kept, so this package rejects exactly what the reference verifier does).
+ * strict public-key and signature-R validation + S<L malleability checks kept, so this package
+ * rejects exactly what the reference verifier does). The key half of the rule is
+ * `strictEd25519PublicKey` above.
  */
 export function verifyEd25519(publicKeyB64: string, message: Buffer, signatureB64: string): boolean {
   try {
-    const der = Buffer.from(publicKeyB64, "base64");
-    if (der.toString("base64") !== publicKeyB64) return false; // canonical base64 for the pubkey
-    const key = createPublicKey({ key: der, format: "der", type: "spki" });
-    if (key.asymmetricKeyType !== "ed25519") return false; // pin curve (CWE-347)
-    const canonical = key.export({ type: "spki", format: "der" }) as Buffer;
-    if (!canonical.equals(der)) return false; // reject non-canonical SPKI (trailing garbage)
-
-    // Strict RFC 8032 public-key decoding, matching `noa-receipt/src/keys.ts`:
-    // the encoded y coordinate must be canonical and the key must not be a
-    // point in the order-dividing-8 torsion subgroup.
-    const raw = canonical.subarray(12);
-    if (raw.length !== 32) return false;
-    const yBytes = Buffer.from(raw);
-    yBytes[31] = yBytes[31]! & 0x7f;
-    const Q = (1n << 255n) - 19n;
-    let y = 0n;
-    for (let i = 31; i >= 0; i--) y = (y << 8n) | BigInt(yBytes[i]!);
-    if (y >= Q) return false;
-    if (SMALL_ORDER_PUBKEYS.has(raw.toString("hex"))) return false;
+    const key = strictEd25519PublicKey(publicKeyB64);
+    if (key === null) return false;
 
     const sigBytes = Buffer.from(signatureB64, "base64");
     if (sigBytes.length !== 64 || sigBytes.toString("base64") !== signatureB64) return false; // canonical b64 sig
+    // R must be canonically encoded and not small-order (the same rule as noa-receipt).
+    if (!isStrictEd25519SignatureRBytes(sigBytes.subarray(0, 32))) return false;
     // Explicit S < L (RFC 8032 §5.1.7) — reject signature malleability independent of OpenSSL runtime.
     const L = 2n ** 252n + 27742317777372353535851937790883648493n;
     let s = 0n;

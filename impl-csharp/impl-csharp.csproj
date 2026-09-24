@@ -31,4 +31,9 @@
     <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.1" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- selfcheck/ is a separate program (the key-load self-check conformance.sh runs); never part of the CLI. -->
+    <Compile Remove="selfcheck/**" />
+  </ItemGroup>
+
 </Project>

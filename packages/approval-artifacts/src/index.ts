@@ -11,7 +11,7 @@
 export { ARTIFACTS, SIGNED_SPECS } from "./domains.js";
 export type { ArtifactMeta, SignerType, ManifestRole } from "./domains.js";
 export { canonicalize, JcsError, MAX_DEPTH } from "./jcs.js";
-export { sha256Hex, sha256Prefixed, sha256Digest, signingMessage, signEd25519, verifyEd25519, generateKeyPair } from "./crypto.js";
+export { sha256Hex, sha256Prefixed, sha256Digest, signingMessage, signEd25519, verifyEd25519, isStrictEd25519PublicKey, generateKeyPair } from "./crypto.js";
 export type { KeyPair } from "./crypto.js";
 export { refHash, virtualHash, receiptRefHash, signHashInput } from "./refhash.js";
 export { evalSchema } from "./schema-eval.js";
@@ -23,6 +23,9 @@ export { verifyArtifact } from "./verify.js";
 // published so a consumer comparing artifact times uses the same arithmetic instead of `Date.parse`,
 // which truncates to milliseconds and collapses adjacent governance windows into one.
 export { rfc3339Nanos } from "./verify.js";
+// The F15 approver lattice, published so a component that must decide in advance whether an approver
+// role clears a risk class calls the one rule instead of restating it.
+export { requiredApproverRole } from "./verify.js";
 export type { VerifyContext, VerifyOutcome, KeyEntry } from "./verify.js";
 export { parseDocument } from "./parse-document.js";
 export { frozenTable } from "./inert-core/inert.js";

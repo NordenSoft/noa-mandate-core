@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { verifyChain, verifyChainText, verifyCheckpoint } from "../src/verify.js";
+import { verifyChain, verifyChainText, verifyCheckpoint, verifyHistoricalChain } from "../src/verify.js";
 import { safeParse } from "../src/safe-json.js";
-import { generateKeyPair } from "../src/keys.js";
+import { generateKeyPair, signEd25519 } from "../src/keys.js";
 import { buildReceipt, buildCheckpoint, type BuildInput } from "../src/builder.js";
 import { sha256Prefixed } from "../src/hash.js";
-import type { Keyring, Checkpoint } from "../src/index.js";
+import { receiptHashInput } from "../src/canonicalize.js";
+import { signingMessage, RECEIPT_SIG_DOMAIN } from "../src/signing.js";
+import type { Keyring, Checkpoint, Receipt } from "../src/index.js";
 import { b } from "./helpers/bytes.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -83,6 +85,29 @@ for (const a of ATTACKS) {
     assert.equal(r.status, "TAMPERED", `${a} -> expected TAMPERED, got ${r.status}: ${r.reason}`);
   });
 }
+
+// Strict public-key validation (scripts/gen-vectors.ts 11, conformance/vectors/strict-ed25519/):
+// a keyring whose key is a non-canonical, off-curve, small-order or mixed-order encoding makes the
+// valid chain TAMPERED (the verdict does not show the stage; test/keys.test.ts pins key-load refusal);
+// a signature scalar S >= L is refused as well.
+const STRICT_ED25519_KEYRINGS = [
+  "keyring-low-order-0.json", "keyring-low-order-1.json", "keyring-low-order-2.json", "keyring-low-order-3.json",
+  "keyring-low-order-4.json", "keyring-low-order-5.json", "keyring-low-order-6.json", "keyring-low-order-7.json",
+  "keyring-x0-sign-y-1.json", "keyring-x0-sign-y-p-minus-1.json", "keyring-y-p-sign.json", "keyring-y-p-plus-1.json",
+  "keyring-off-curve-y-2.json", "keyring-mixed-order.json",
+];
+test("strict-ed25519: every refused key encoding makes the genuine chain TAMPERED", () => {
+  for (const name of STRICT_ED25519_KEYRINGS) {
+    const r = verifyChain(doc("valid-chain.json"), { keyring: doc(`strict-ed25519/${name}`) });
+    assert.equal(r.status, "TAMPERED", `${name} -> expected TAMPERED, got ${r.status}: ${r.reason}`);
+    assert.equal(r.signaturesVerified, false, name);
+  }
+});
+test("strict-ed25519: a signature with a non-canonical scalar (S >= L) is TAMPERED", () => {
+  const r = verifyChain(doc("strict-ed25519/chain-s-not-canonical.json"), { keyring });
+  assert.equal(r.status, "TAMPERED", `${r.status}: ${r.reason}`);
+  assert.equal(r.signaturesVerified, false);
+});
 
 test("unknown-kid: TAMPERED with keyring, UNVERIFIED without (no silent TOFU on attacker input)", () => {
   const withKey = verifyChain(doc("attack/unknown-kid.json"), { keyring });
@@ -897,22 +922,321 @@ test("P0-14: every root chain/checkpoint surface refuses a lifecycle-retired key
   assert.equal(currentControl.status, "VALID", currentControl.reason ?? "");
   assert.equal(unknownControl.status, "TAMPERED");
   assert.match(unknownControl.reason ?? "", /unknown signing key/);
-  assert.equal(freshRetiredAttack.status, "TAMPERED", `retired at ${retirement}: ${freshRetiredAttack.reason ?? "accepted"}`);
-  assert.match(freshRetiredAttack.reason ?? "", /retired/i);
-  assert.equal(backdatedRetiredAttack.status, "TAMPERED", backdatedRetiredAttack.reason ?? "");
-  assert.match(backdatedRetiredAttack.reason ?? "", /retired/i);
-  assert.equal(backdatedRetiredTextAttack.status, "TAMPERED", backdatedRetiredTextAttack.reason ?? "");
-  assert.match(backdatedRetiredTextAttack.reason ?? "", /retired/i);
+  // A retired key's authentic signature is refused with its own status (G2-R1), never accepted:
+  // KEY_RETIRED is not VALID and carries no positive sub-claim, whatever timestamp the signer chose.
+  for (const [name, refused] of [
+    ["fresh", freshRetiredAttack],
+    ["backdated", backdatedRetiredAttack],
+    ["backdated text", backdatedRetiredTextAttack],
+  ] as const) {
+    assert.equal(refused.status, "KEY_RETIRED", `${name}, retired at ${retirement}: ${refused.reason ?? "accepted"}`);
+    assert.match(refused.reason ?? "", /retired/i);
+    assert.equal(refused.signaturesVerified, false, name);
+    assert.equal(refused.tailChecked, false, name);
+  }
   assert.equal(staticControl.status, "VALID", staticControl.reason ?? "");
   assert.equal(staticKeysKidControl.status, "VALID", staticKeysKidControl.reason ?? "");
   assert.equal(currentCheckpointControl.status, "VALID", currentCheckpointControl.reason ?? "");
   assert.equal(currentCheckpointControl.tailChecked, true);
-  assert.equal(retiredCheckpointAttack.status, "TAMPERED");
+  assert.equal(retiredCheckpointAttack.status, "KEY_RETIRED");
   assert.match(retiredCheckpointAttack.reason ?? "", /checkpoint signing key.*retired/i);
+  assert.equal(retiredCheckpointAttack.tailChecked, false);
   assert.equal(standaloneCurrentCheckpoint, "ok");
   assert.equal(standaloneBackdatedRetiredCheckpoint, "retired signing key");
-  assert.equal(chainWithBackdatedRetiredCheckpoint.status, "TAMPERED");
+  assert.equal(chainWithBackdatedRetiredCheckpoint.status, "KEY_RETIRED");
   assert.match(chainWithBackdatedRetiredCheckpoint.reason ?? "", /retired/i);
+  assert.equal(chainWithBackdatedRetiredCheckpoint.tailChecked, false);
   assert.equal(missingLifecycleData.status, "MALFORMED");
   assert.match(missingLifecycleData.reason ?? "", /publicKey \+ retiredAt/);
+});
+
+// ── G2-R1 — a retired key's authentic signature has its own current-use outcome ─────────────────
+//
+// Before this, the default path answered TAMPERED both for "these bytes were altered / this
+// signature is forged" and for "this signature is authentic, but the trust root has since retired
+// the key". A relying party could only tell them apart by matching `reason` text. KEY_RETIRED is
+// the distinct token: still a refusal (never VALID, both sub-claims false), reported only when every
+// other check passed, and it points in-band to the historical purpose. The negative half proves the
+// new branch cannot absorb tampering: every forgery that names a retired kid, and every later
+// integrity/identity failure in a chain that also carries a retired signature, stays where it was.
+test("G2-R1: default path reports an authentic retired-key signature as KEY_RETIRED, never as TAMPERED or VALID", () => {
+  const retired = generateKeyPair("g2r1-retired");
+  const current = generateKeyPair("g2r1-current");
+  const attacker = generateKeyPair("g2r1-attacker");
+  const retirement = "2026-02-01T00:00:00.000Z";
+  const lifecycle = b({
+    spec: "noa.signing-key-lifecycle/0.1",
+    keys: {
+      [retired.kid]: { publicKey: retired.publicKey, retiredAt: retirement },
+      [current.kid]: { publicKey: current.publicKey, retiredAt: null },
+    },
+  });
+  const input = (id: string, agentId: string, ts = "2026-01-01T00:00:00.000Z"): BuildInput => ({
+    id,
+    ts,
+    scope: { chain: "g2r1", tenant: "tenant-g2r1" },
+    agent: { id: agentId, model: null, principal: "SERVICE" },
+    action: { id: "inventory.read", canonical: "inventory.read", riskClass: "LOW", paramsHash: sha256Prefixed(id), reversible: true, rollbackRef: null },
+    governance: { mode: "on", verdict: "EXECUTED", ruleId: null, approval: null, sandboxed: false },
+  });
+  const byRetired = { kid: retired.kid, privateKey: retired.privateKey };
+  const byCurrent = { kid: current.kid, privateKey: current.privateKey };
+  const r0 = buildReceipt(input("g2r1-0", "old-agent"), null, byRetired);
+  const r1 = buildReceipt(input("g2r1-1", "old-agent"), r0, byRetired);
+  const r2 = buildReceipt(input("g2r1-2", "new-agent"), r1, byCurrent);
+  const honest = [r0, r1, r2];
+  const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+
+  const assertKeyRetired = (
+    label: string,
+    res: ReturnType<typeof verifyChain>,
+    seq: number,
+    subject: RegExp,
+    inputs: { checkpoint?: boolean; manifest?: boolean } = {},
+  ) => {
+    assert.equal(res.status, "KEY_RETIRED", `${label}: ${res.status} ${res.reason ?? ""}`);
+    assert.equal(res.signaturesVerified, false, `${label}: a refusal must not carry a positive sub-claim`);
+    assert.equal(res.tailChecked, false, label);
+    assert.equal(res.badSeq, seq, label);
+    assert.match(res.reason ?? "", subject, label);
+    assert.match(res.reason ?? "", /--purpose historical/, `${label}: the reason must point to the historical purpose`);
+    const retiredWarnings = res.warnings.filter((w) => w.startsWith("key-retired:"));
+    assert.equal(retiredWarnings.length, 1, `${label}: exactly one key-retired warning: ${JSON.stringify(res.warnings)}`);
+    const steer = retiredWarnings[0]!;
+    assert.match(steer, new RegExp(`^key-retired: seq ${seq} kid "`), label);
+    assert.match(steer, /--purpose historical/, label);
+    assert.match(steer, /verifyHistoricalChain/, label);
+    assert.match(steer, /does not establish when/, `${label}: the steer must not imply the signature predates retirement`);
+    // Caveat texts written for a VALID result (tailChecked:true, "a VALID result proves") are scoped.
+    assert.ok(!res.warnings.some((w) => /a VALID result|tailChecked:true/.test(w)), `${label}: VALID-only caveat text: ${JSON.stringify(res.warnings)}`);
+    // The run was complete, so the completeness caveats a VALID result would carry are carried too.
+    assert.ok(res.warnings.some((w) => w.startsWith("fork/equivocation is not detectable offline")), `${label}: fork caveat dropped`);
+    assert.equal(
+      res.warnings.some((w) => w.startsWith("no checkpoint supplied")),
+      inputs.checkpoint !== true,
+      `${label}: truncation caveat`,
+    );
+    assert.equal(
+      res.warnings.some((w) => w.startsWith("no identityManifest supplied")),
+      inputs.manifest !== true,
+      `${label}: attribution caveat`,
+    );
+  };
+  const assertRefusedNotRetired = (label: string, res: ReturnType<typeof verifyChain>, status: string, reason: RegExp) => {
+    assert.equal(res.status, status, `${label}: ${res.status} ${res.reason ?? ""}`);
+    assert.match(res.reason ?? "", reason, label);
+    assert.doesNotMatch(res.reason ?? "", /--purpose historical/, `${label}: the historical steer is for the retired-key case only`);
+    assert.equal(res.warnings.some((w) => /key-retired|--purpose historical/.test(w)), false, `${label}: ${JSON.stringify(res.warnings)}`);
+    assert.equal(res.signaturesVerified, false, label);
+  };
+
+  // ── POSITIVE: the new outcome ────────────────────────────────────────────────────────────────
+  assertKeyRetired("retired-signed prefix + current-signed head", verifyChain(b(honest), { keyring: lifecycle }), 0, /signing key "g2r1-retired" is retired/);
+  assertKeyRetired("text entry point", verifyChainText(JSON.stringify(honest), { keyring: lifecycle }), 0, /is retired/);
+  const late = [buildReceipt(input("g2r1-late-0", "new-agent"), null, byCurrent)];
+  late.push(buildReceipt(input("g2r1-late-1", "old-agent"), late[0]!, byRetired));
+  assertKeyRetired("first retired signature is mid-chain", verifyChain(b(late), { keyring: lifecycle }), 1, /is retired/);
+  const currentOnly = [buildReceipt(input("g2r1-cp-0", "new-agent"), null, byCurrent)];
+  const retiredCheckpoint = buildCheckpoint(currentOnly[0]!, "2026-01-01T00:00:01.000Z", byRetired);
+  assertKeyRetired(
+    "authentic checkpoint by a retired key",
+    verifyChain(b(currentOnly), { keyring: lifecycle, checkpoint: b(retiredCheckpoint) }),
+    0,
+    /checkpoint signing key "g2r1-retired" is retired/,
+    { checkpoint: true },
+  );
+  // A receipt finding outranks a checkpoint finding: both the receipts at seq 0-1 and the checkpoint
+  // over the head are authentic under the retired key, and the FIRST (receipt, seq 0) is reported.
+  const bothRetired = verifyChain(b(honest), {
+    keyring: lifecycle,
+    checkpoint: b(buildCheckpoint(r2, "2026-01-01T00:00:01.000Z", byRetired)),
+  });
+  assertKeyRetired("retired receipt and retired checkpoint", bothRetired, 0, /^signing key "g2r1-retired" is retired/, { checkpoint: true });
+  assert.match(bothRetired.warnings.find((w) => w.startsWith("key-retired:"))!, /^key-retired: seq 0 kid "g2r1-retired" \(receipt\)/);
+
+  // Controls: the identical bytes under a static root are VALID, and without a keyring the retired
+  // state is unknowable, so the result stays UNVERIFIED.
+  const staticRoot = b({ [retired.kid]: retired.publicKey, [current.kid]: current.publicKey } satisfies Keyring);
+  assert.equal(verifyChain(b(honest), { keyring: staticRoot }).status, "VALID");
+  assert.equal(verifyChain(b(currentOnly), { keyring: staticRoot, checkpoint: b(retiredCheckpoint) }).status, "VALID");
+  assert.equal(verifyChain(b(honest), {}).status, "UNVERIFIED");
+
+  // ── NEGATIVE: tampering that names a retired kid is still TAMPERED ───────────────────────────
+  const altered = clone(honest);
+  altered[0]!.action.paramsHash = sha256Prefixed("g2r1-altered");
+  assertRefusedNotRetired("byte alteration of a retired-key receipt", verifyChain(b(altered), { keyring: lifecycle }), "TAMPERED", /hash mismatch/);
+
+  const rehashed = clone(honest);
+  rehashed[0]!.action.paramsHash = sha256Prefixed("g2r1-altered");
+  rehashed[0]!.chain.hash = sha256Prefixed(receiptHashInput(rehashed[0]!));
+  assertRefusedNotRetired("altered + re-hashed, original retired-key signature", verifyChain(b(rehashed), { keyring: lifecycle }), "TAMPERED", /invalid signature/);
+
+  const forged = [buildReceipt(input("g2r1-forged", "old-agent"), null, { kid: retired.kid, privateKey: attacker.privateKey })];
+  assertRefusedNotRetired("signature by another key under the retired kid", verifyChain(b(forged), { keyring: lifecycle }), "TAMPERED", /invalid signature/);
+
+  const laterTamper = clone(honest);
+  laterTamper[2]!.action.paramsHash = sha256Prefixed("g2r1-altered");
+  assertRefusedNotRetired("retired signature at seq 0, altered bytes at seq 2", verifyChain(b(laterTamper), { keyring: lifecycle }), "TAMPERED", /hash mismatch/);
+
+  const laterForgery = [r0, r1, buildReceipt(input("g2r1-2", "new-agent"), r1, { kid: current.kid, privateKey: attacker.privateKey })];
+  assertRefusedNotRetired("retired signature at seq 0, forged signature at seq 2", verifyChain(b(laterForgery), { keyring: lifecycle }), "TAMPERED", /invalid signature/);
+
+  // Every signature authentic (seq 2 honestly re-signed by the current key), linkage broken.
+  const relinked = clone(honest);
+  relinked[2]!.chain.prevHash = r0.chain.hash;
+  relinked[2]!.chain.hash = sha256Prefixed(receiptHashInput(relinked[2]!));
+  relinked[2]!.sig.value = signEd25519(current.privateKey, signingMessage(RECEIPT_SIG_DOMAIN, receiptHashInput(relinked[2]!)));
+  assertRefusedNotRetired("retired signature at seq 0, authentic receipt with broken linkage at seq 2", verifyChain(b(relinked), { keyring: lifecycle }), "TAMPERED", /broken linkage at seq 2/);
+
+  const unknownKid = [buildReceipt(input("g2r1-unknown", "old-agent"), null, { kid: attacker.kid, privateKey: attacker.privateKey })];
+  assertRefusedNotRetired("unknown key", verifyChain(b(unknownKid), { keyring: lifecycle }), "TAMPERED", /unknown signing key/);
+
+  const swapped = [r0, buildReceipt(input("g2r1-swap", "old-agent"), r0, byCurrent)];
+  assertRefusedNotRetired("retired then current key for one agent.id", verifyChain(b(swapped), { keyring: lifecycle }), "TAMPERED", /key swap/);
+
+  const forgedCheckpoint = clone(retiredCheckpoint);
+  forgedCheckpoint.highestSeq = 0;
+  forgedCheckpoint.ts = "2026-01-01T00:00:02.000Z";
+  assertRefusedNotRetired(
+    "retired checkpoint kid over bytes it did not sign",
+    verifyChain(b(currentOnly), { keyring: lifecycle, checkpoint: b(forgedCheckpoint) }),
+    "TAMPERED",
+    /checkpoint not authenticated against keyring \(bad checkpoint signature\)/,
+  );
+  const truncating = buildCheckpoint(r1, "2026-01-01T00:00:01.000Z", byCurrent);
+  assertRefusedNotRetired(
+    "retired receipts, authentic checkpoint over a different head",
+    verifyChain(b(honest), { keyring: lifecycle, checkpoint: b(truncating) }),
+    "TAMPERED",
+    /tail truncated/,
+  );
+  const retiredTruncating = buildCheckpoint(r1, "2026-01-01T00:00:01.000Z", byRetired);
+  assertRefusedNotRetired(
+    "authentic retired checkpoint over a truncated head",
+    verifyChain(b(honest), { keyring: lifecycle, checkpoint: b(retiredTruncating) }),
+    "TAMPERED",
+    /tail truncated/,
+  );
+
+  // Identity binding outranks the retired-key finding: an unauthorized pairing is UNTRUSTED.
+  const manifest = b({ "old-agent": [current.kid], "new-agent": [current.kid] });
+  assertRefusedNotRetired("retired signature by a key the manifest does not authorize", verifyChain(b(honest), { keyring: lifecycle, identityManifest: manifest }), "UNTRUSTED", /not authorized/);
+  const authorizingManifest = b({ "old-agent": [retired.kid], "new-agent": [current.kid] });
+  assertKeyRetired("authorized retired signer", verifyChain(b(honest), { keyring: lifecycle, identityManifest: authorizingManifest }), 0, /is retired/, { manifest: true });
+
+  // ── HISTORICAL PURPOSE UNCHANGED ─────────────────────────────────────────────────────────────
+  const historical = verifyHistoricalChain(b(honest.slice(0, 2)), { keyring: lifecycle });
+  assert.equal(historical.classification, "UNVERIFIED");
+  assert.equal(historical.code, "NO_WITNESS");
+  assert.equal(historical.dimensions.integrity, "INTACT");
+  const historicalDamaged = verifyHistoricalChain(b(altered.slice(0, 2)), { keyring: lifecycle });
+  assert.equal(historicalDamaged.code, "RECEIPT_INTEGRITY_FAILURE");
+});
+
+// ── G2-R1 — every label the reorder moved ────────────────────────────────────────────────────────
+//
+// Authenticating a retired key BEFORE refusing it moves that refusal later in the walk, so checks
+// that used to be unreachable now answer first. Each row is one input class whose label changed; the
+// `before` column is what the verifier at the parent commit returned for the same input (measured,
+// recorded in CHANGELOG.md and VERSIONING.md §3.2), and this test pins the `after` column. No row
+// moves to or from VALID.
+test("G2-R1: every label transition created by authenticating retired keys first is pinned", () => {
+  const retired = generateKeyPair("g2r1t-retired");
+  const current = generateKeyPair("g2r1t-current");
+  const attacker = generateKeyPair("g2r1t-attacker");
+  const lifecycle = b({
+    spec: "noa.signing-key-lifecycle/0.1",
+    keys: {
+      [retired.kid]: { publicKey: retired.publicKey, retiredAt: "2026-02-01T00:00:00.000Z" },
+      [current.kid]: { publicKey: current.publicKey, retiredAt: null },
+    },
+  });
+  const input = (id: string, seq: number, agentId = "agent-t"): BuildInput => ({
+    id,
+    ts: `2026-01-01T00:00:0${seq}.000Z`,
+    scope: { chain: "g2r1t", tenant: "tenant-g2r1t" },
+    agent: { id: agentId, model: null, principal: "SERVICE" },
+    action: { id: "inventory.read", canonical: "inventory.read", riskClass: "LOW", paramsHash: sha256Prefixed(id), reversible: true, rollbackRef: null },
+    governance: { mode: "on", verdict: "EXECUTED", ruleId: null, approval: null, sandboxed: false },
+  });
+  const byRetired = { kid: retired.kid, privateKey: retired.privateKey };
+  const byCurrent = { kid: current.kid, privateKey: current.privateKey };
+  const reseal = (r: Receipt, privateKey: string): Receipt => {
+    r.chain.hash = sha256Prefixed(receiptHashInput(r));
+    r.sig.value = signEd25519(privateKey, signingMessage(RECEIPT_SIG_DOMAIN, receiptHashInput(r)));
+    return r;
+  };
+  const r0 = buildReceipt(input("t-0", 0), null, byRetired);
+  const r1 = buildReceipt(input("t-1", 1), r0, byRetired);
+  const retiredChain = [r0, r1];
+  const currentChain = [buildReceipt(input("c-0", 0), null, byCurrent)];
+  const currentChain2 = [currentChain[0]!, buildReceipt(input("c-1", 1), currentChain[0]!, byCurrent)];
+  const retiredCheckpoint = (head: Receipt) => b(buildCheckpoint(head, "2026-01-01T00:00:05.000Z", byRetired));
+
+  // requireNFC: the retired seq 0 is clean; seq 1 (another agent.id, honestly re-signed) is not NFC.
+  const nfcTail = JSON.parse(JSON.stringify(buildReceipt(input("t-nfc", 1), r0, byRetired))) as Receipt;
+  nfcTail.agent.id = "agent-e\u0301"; // decomposed e + combining acute; NFC composes it to U+00E9
+  reseal(nfcTail, retired.privateKey);
+  const forgedKid = [buildReceipt(input("t-forged", 0), null, { kid: retired.kid, privateKey: attacker.privateKey })];
+  const altered = JSON.parse(JSON.stringify(retiredChain)) as Receipt[];
+  altered[1]!.action.paramsHash = sha256Prefixed("altered");
+  const forgedCheckpoint = JSON.parse(JSON.stringify(buildCheckpoint(currentChain[0]!, "2026-01-01T00:00:05.000Z", byRetired))) as Checkpoint;
+  forgedCheckpoint.ts = "2026-01-01T00:00:06.000Z";
+  // Cross-phase rows: retired RECEIPTS with a CURRENT-key checkpoint, and retired receipts followed
+  // by a current-key receipt (another agent.id) that fails its own identity, signature or linkage.
+  const currentCheckpoint = (head: Receipt) => b(buildCheckpoint(head, "2026-01-01T00:00:05.000Z", byCurrent));
+  const forgedCurrentCheckpoint = JSON.parse(JSON.stringify(buildCheckpoint(r1, "2026-01-01T00:00:05.000Z", byCurrent))) as Checkpoint;
+  forgedCurrentCheckpoint.ts = "2026-01-01T00:00:06.000Z";
+  const tail = buildReceipt(input("t-2", 2, "agent-u"), r1, byCurrent);
+  const tailForged = buildReceipt(input("t-2", 2, "agent-u"), r1, { kid: current.kid, privateKey: attacker.privateKey });
+  const tailRelinked = JSON.parse(JSON.stringify(tail)) as Receipt;
+  tailRelinked.chain.prevHash = r0.chain.hash;
+  reseal(tailRelinked, current.privateKey);
+
+  const rows: ReadonlyArray<{
+    name: string; before: string; after: string; badSeq: number | undefined; reason: RegExp;
+    run: () => ReturnType<typeof verifyChain>;
+  }> = [
+    { name: "authentic retired receipts", before: "TAMPERED (exit 2)", after: "KEY_RETIRED", badSeq: 0, reason: /^signing key "g2r1t-retired" is retired/,
+      run: () => verifyChain(b(retiredChain), { keyring: lifecycle }) },
+    { name: "retired seq-0 receipt, manifest does not authorize its kid", before: "TAMPERED (exit 2)", after: "UNTRUSTED", badSeq: 0, reason: /not authorized for signing key "g2r1t-retired"/,
+      run: () => verifyChain(b(retiredChain), { keyring: lifecycle, identityManifest: b({ "agent-t": [current.kid] }) }) },
+    { name: "authentic retired checkpoint, kid not authorized for the opener", before: "TAMPERED (exit 2)", after: "UNTRUSTED", badSeq: 0, reason: /checkpoint signing key "g2r1t-retired" is not authorized for chain opener/,
+      run: () => verifyChain(b(currentChain), { keyring: lifecycle, checkpoint: retiredCheckpoint(currentChain[0]!), identityManifest: b({ "agent-t": [current.kid] }) }) },
+    { name: "retired seq 0, requireNFC, non-NFC string at seq 1", before: "TAMPERED (exit 2)", after: "MALFORMED", badSeq: 1, reason: /non-NFC string\(s\) at seq 1: agent\.id/,
+      run: () => verifyChain(b([r0, nfcTail]), { keyring: lifecycle, requireNFC: true }) },
+    { name: "retired receipts, checkpoint document is a JSON array", before: "TAMPERED (exit 2)", after: "MALFORMED", badSeq: undefined, reason: /^checkpoint must be an object$/,
+      run: () => verifyChain(b(retiredChain), { keyring: lifecycle, checkpoint: "[]" }) },
+    { name: "retired receipts, checkpoint document is JSON null", before: "TAMPERED (exit 2)", after: "MALFORMED", badSeq: undefined, reason: /^checkpoint must be an object$/,
+      run: () => verifyChain(b(retiredChain), { keyring: lifecycle, checkpoint: "null" }) },
+    { name: "retired kid carrying another key's signature", before: "TAMPERED badSeq 0 (retired)", after: "TAMPERED", badSeq: 0, reason: /^invalid signature \(kid g2r1t-retired\)$/,
+      run: () => verifyChain(b(forgedKid), { keyring: lifecycle }) },
+    { name: "authentic retired seq 0, altered bytes at seq 1", before: "TAMPERED badSeq 0 (retired)", after: "TAMPERED", badSeq: 1, reason: /^hash mismatch/,
+      run: () => verifyChain(b(altered), { keyring: lifecycle }) },
+    { name: "retired checkpoint kid over bytes it did not sign", before: "TAMPERED badSeq head (retired)", after: "TAMPERED", badSeq: undefined, reason: /bad checkpoint signature/,
+      run: () => verifyChain(b(currentChain), { keyring: lifecycle, checkpoint: b(forgedCheckpoint) }) },
+    { name: "authentic retired checkpoint over a truncated head", before: "TAMPERED badSeq head (retired)", after: "TAMPERED", badSeq: 1, reason: /tail truncated/,
+      run: () => verifyChain(b(currentChain2), { keyring: lifecycle, checkpoint: retiredCheckpoint(currentChain2[0]!) }) },
+    { name: "retired receipts, forged current-key checkpoint", before: "TAMPERED badSeq 0 (retired)", after: "TAMPERED", badSeq: undefined, reason: /checkpoint not authenticated against keyring \(bad checkpoint signature\)/,
+      run: () => verifyChain(b(retiredChain), { keyring: lifecycle, checkpoint: b(forgedCurrentCheckpoint) }) },
+    { name: "retired receipts, authentic current-key checkpoint over a truncated head", before: "TAMPERED badSeq 0 (retired)", after: "TAMPERED", badSeq: 1, reason: /tail truncated/,
+      run: () => verifyChain(b(retiredChain), { keyring: lifecycle, checkpoint: currentCheckpoint(r0) }) },
+    { name: "retired receipts, current-key checkpoint not authorized for the opener", before: "TAMPERED (exit 2)", after: "UNTRUSTED", badSeq: 1, reason: /checkpoint signing key "g2r1t-current" is not authorized for chain opener/,
+      run: () => verifyChain(b(retiredChain), { keyring: lifecycle, checkpoint: currentCheckpoint(r1), identityManifest: b({ "agent-t": [retired.kid] }) }) },
+    { name: "retired receipts, later receipt not authorized by the manifest", before: "TAMPERED (exit 2)", after: "UNTRUSTED", badSeq: 2, reason: /agent "agent-u" is not authorized for signing key "g2r1t-current"/,
+      run: () => verifyChain(b([r0, r1, tail]), { keyring: lifecycle, identityManifest: b({ "agent-t": [retired.kid] }) }) },
+    { name: "retired receipts, later receipt with another key's signature", before: "TAMPERED badSeq 0 (retired)", after: "TAMPERED", badSeq: 2, reason: /^invalid signature \(kid g2r1t-current\)$/,
+      run: () => verifyChain(b([r0, r1, tailForged]), { keyring: lifecycle }) },
+    { name: "retired receipts, later authentic receipt with broken linkage", before: "TAMPERED badSeq 0 (retired)", after: "TAMPERED", badSeq: 2, reason: /^broken linkage at seq 2$/,
+      run: () => verifyChain(b([r0, r1, tailRelinked]), { keyring: lifecycle }) },
+  ];
+  for (const row of rows) {
+    const res = row.run();
+    const label = `${row.name}: was ${row.before}`;
+    assert.equal(res.status, row.after, `${label}; got ${res.status} ${res.reason ?? ""}`);
+    assert.equal(res.badSeq, row.badSeq, label);
+    assert.match(res.reason ?? "", row.reason, label);
+    assert.equal(res.signaturesVerified, false, label);
+    assert.equal(res.warnings.some((w) => w.startsWith("key-retired:")), row.after === "KEY_RETIRED", label);
+  }
 });

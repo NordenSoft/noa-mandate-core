@@ -115,6 +115,8 @@ def ed25519_verify(public32, message, signature):
     """True iff `signature` (64 bytes) is a valid Ed25519 sig over `message` for `public32`."""
     try:
         if len(signature) != 64 or len(public32) != 32: return False
+        # R must be canonically encoded and not small-order (the same rule in all five verifiers).
+        if not _is_strict_signature_r(signature[:32]): return False
         R = _decodepoint(signature[:32])
         A = _decodepoint(public32)
         S = _decodeint(signature[32:])
@@ -125,7 +127,9 @@ def ed25519_verify(public32, message, signature):
         if S >= _L: return False
         # h is decoded from the FULL 512-bit SHA-512 digest (RFC 8032 "Hint" reads 2*b bits), NOT just
         # the low 256 — truncating it to 256 bits yields a wrong scalar and rejects valid signatures.
-        h = int.from_bytes(_H(_encodepoint(R) + public32 + message), "little")
+        # It is then reduced mod L (RFC 8032 §5.1.7) over the signature's own R bytes; with a key in
+        # the prime-order subgroup the reduction does not change [h]A, and the equation stays cofactorless.
+        h = int.from_bytes(_H(signature[:32] + public32 + message), "little") % _L
         return _scalarmult(_B, S) == _edwards(R, _scalarmult(A, h))
     except Exception:
         return False
@@ -135,12 +139,13 @@ _SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")  # AlgorithmIdentifier{
 
 # The 8 CANONICAL small-order Ed25519 public-key encodings (torsion subgroup of order dividing 8: identity,
 # order-2, two order-4, four order-8 points), as 32-byte little-endian point encodings. CROSS-IMPL CONSENSUS:
-# node:crypto/OpenSSL verify is COFACTORED and ACCEPTS a low-order public key; this strict
-# reference can reject it — the SAME signed bytes then split VALID(TS) / TAMPERED(PY). Both impls now reject
-# these so they agree. A legitimate signing key is NEVER a low-order point, so valid behavior is unchanged.
-# (NON-CANONICAL y >= q encodings of these points are already rejected by _decodepoint's y >= q guard — so
-# after that guard the only remaining encodings are these 8 canonical ones. Mirrors src/keys.ts
-# SMALL_ORDER_PUBKEYS; convention documented in THREAT-MODEL.md T15 + the spec verification section.)
+# which encodings a library admits as a public KEY differs between libraries and versions (OpenSSL admits
+# low-order keys at key load), so every verifier refuses them itself. A legitimate signing key is NEVER a
+# low-order point, so valid behavior is unchanged.
+# (Non-canonical spellings of these points — y >= q, or x = 0 with the sign bit set — are refused by
+# _is_strict_public_key's earlier steps, so after them the only remaining encodings are these 8 canonical
+# ones. Mirrors src/keys.ts SMALL_ORDER_PUBKEYS; convention documented in THREAT-MODEL.md T15 + the spec
+# verification section.)
 _SMALL_ORDER_PUBKEYS = frozenset([
     bytes.fromhex("0100000000000000000000000000000000000000000000000000000000000000"),  # order 1 (identity)
     bytes.fromhex("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),  # order 2
@@ -164,18 +169,68 @@ def _strict_b64decode(s):
         raise ValueError("non-canonical base64")
     return raw
 
+def _strict_decode(raw):
+    """Strict RFC 8032 §5.1.3 decoding of a 32-byte point encoding -> [x, y], or None when:
+      1. the y coordinate (the low 255 bits) is not canonical (y >= q);
+      2. y does not decode to a curve point (x^2 = (y^2 - 1) / (d*y^2 + 1) has no square root);
+      3. x = 0 and the sign bit is set (RFC 8032 §5.1.3 step 4).
+    Same steps, same order, as src/keys.ts decodeStrictEd25519Point and the Go / Rust / C# verifiers."""
+    if len(raw) != 32:
+        return None
+    x_sign = raw[31] >> 7
+    y = int.from_bytes(raw, "little") & ((1 << 255) - 1)
+    if y >= _q:
+        return None
+    u = (y * y - 1) % _q
+    v = (_d * y * y + 1) % _q
+    x = (u * pow(v, 3, _q) * pow(u * pow(v, 7, _q), (_q - 5) // 8, _q)) % _q
+    vx2 = (v * x * x) % _q
+    if vx2 != u:
+        if vx2 != (-u) % _q:
+            return None
+        x = (x * _I) % _q
+    if x == 0 and x_sign == 1:
+        return None
+    if x & 1 != x_sign:
+        x = _q - x
+    return [x, y]
+
+_PRIME_ORDER_CACHE = {}
+_PRIME_ORDER_CACHE_LIMIT = 4096
+
+def _is_strict_public_key(raw):
+    """STRICT PUBLIC-KEY VALIDATION: refuse non-canonical and small-order Ed25519 key encodings (RFC 8032
+    §5.1.3 decoding + small-order rejection) and keys outside the prime-order subgroup. Same rule, same
+    order, as src/keys.ts isStrictEd25519PublicKeyBytes and the Go / Rust / C# verifiers:
+      1-3. strict decoding (_strict_decode);
+      4. not one of the 8 small-order points (canonical encodings; steps 1-3 leave no other spelling);
+      5. in the prime-order subgroup: [L]A = identity (refuses mixed-order keys).
+    A key produced by Ed25519 key generation passes every step."""
+    point = _strict_decode(raw)
+    if point is None or bytes(raw) in _SMALL_ORDER_PUBKEYS:
+        return False
+    key = bytes(raw)
+    if key not in _PRIME_ORDER_CACHE:
+        if len(_PRIME_ORDER_CACHE) >= _PRIME_ORDER_CACHE_LIMIT:
+            _PRIME_ORDER_CACHE.clear()  # bounded, like the TypeScript cache
+        _PRIME_ORDER_CACHE[key] = _scalarmult(point, _L) == [0, 1]
+    return _PRIME_ORDER_CACHE[key]
+
+def _is_strict_signature_r(raw):
+    """STRICT SIGNATURE-R VALIDATION: R is canonically encoded (steps 1-3) and not small-order (step 4).
+    With a prime-order key and the cofactorless equation, no R outside the prime-order subgroup verifies."""
+    return _strict_decode(raw) is not None and bytes(raw) not in _SMALL_ORDER_PUBKEYS
+
 def spki_to_raw(pub_b64):
     der = _strict_b64decode(pub_b64)
     if len(der) != 44 or der[:12] != _SPKI_PREFIX:
         raise ValueError("not a canonical Ed25519 SPKI")
     raw = der[12:]
-    # CROSS-IMPL CONSENSUS: reject a SMALL-ORDER public key here so this strict reference and the
-    # node:crypto/OpenSSL reference (whose KEY ACCEPTANCE admits low-order keys) agree on the SAME verdict. Done at
-    # the key-decode boundary (not deep in ed25519_verify) so the rejection is deterministic regardless of the
-    # accompanying signature, exactly matching src/keys.ts. (Non-canonical y >= q encodings of these points are
-    # rejected separately by _decodepoint's y >= q guard during verification.) A legitimate key is never low-order.
-    if raw in _SMALL_ORDER_PUBKEYS:
-        raise ValueError("small-order Ed25519 public key rejected")
+    # CROSS-IMPL CONSENSUS: strict public-key validation at the key-decode boundary (not deep in
+    # ed25519_verify), so the refusal is deterministic regardless of the accompanying signature and of any
+    # library's key acceptance, exactly matching src/keys.ts. A legitimate key always passes.
+    if not _is_strict_public_key(raw):
+        raise ValueError("strict public-key validation: non-canonical or small-order Ed25519 key refused")
     return raw
 
 # ── Strict JSON parse — parity with safeParse (reject dup keys / floats / prototype pollution) ─

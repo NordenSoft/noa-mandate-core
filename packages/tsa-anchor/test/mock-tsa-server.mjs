@@ -2,9 +2,10 @@
  * In-process mock RFC 3161 TSA for tests — NO network dependency, NO real TSA needed. Decodes an
  * incoming TimeStampReq with this package's own der.mjs, echoes the submitted hashAlgorithm +
  * hashedMessage back inside a freshly-built (UNSIGNED — no CMS SignerInfo, no cert) TimeStampResp.
- * verify.mjs never checks the CMS signature (see its docstring), so an unsigned mock is sufficient
- * to exercise the full stamp/verify round-trip. `mode` lets a test simulate a TSA that rejects the
- * request or returns a WRONG hash (for the "reject a mismatched .tsr" test in verify.test.mjs).
+ * Being unsigned, it exercises the stamp client's request/transport binding only: authenticated
+ * `verifyStamp` (verify.mjs) requires exactly one verified CMS SignerInfo and rejects every response
+ * this mock produces (cli.test.mjs pins that refusal as CMS_SIGNER_COUNT_INVALID). `mode` lets a
+ * test simulate a TSA that rejects the request, returns a WRONG hash, or drops the nonce.
  */
 import { createServer } from "node:http";
 import { encInteger, encOid, encNull, encOctetString, encSequence, encSet, encContext, encGeneralizedTime, derDecode, readOid, readIntegerBig } from "../src/der.mjs";
@@ -26,7 +27,7 @@ function buildContentInfo(tstInfoBytes) {
     encInteger(3),
     encSet([encSequence([encOid(SHA256_OID), encNull()])]),
     encapContentInfo,
-    encSet([]), // signerInfos — EMPTY: this mock never signs; verify.mjs does not check this field
+    encSet([]), // signerInfos — EMPTY: this mock never signs, so verifyStamp refuses it (CMS_SIGNER_COUNT_INVALID)
   ]);
   return encSequence([encOid(ID_SIGNED_DATA), encContext(0, signedData)]);
 }
