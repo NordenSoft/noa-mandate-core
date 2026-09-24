@@ -10,7 +10,7 @@
  * Asserts: VALID (with keyring, exit 0) · UNVERIFIED (no keyring, exit 1) · TAMPERED (flip a byte, exit 2).
  * Run: node impl-py/conformance.mjs   (after `npm run build`)
  */
-import { generateKeyPair, signEd25519 } from "../dist/src/keys.js";
+import { generateKeyPair, isStrictEd25519PublicKeyBytes, signEd25519 } from "../dist/src/keys.js";
 import { buildReceipt, buildCheckpoint } from "../dist/src/builder.js";
 import { sha256Prefixed, sha256Hex } from "../dist/src/hash.js";
 import { receiptHashInput, checkpointHashInput } from "../dist/src/canonicalize.js";
@@ -589,6 +589,63 @@ expect("USAGE (--identity is the last token, no keyring) [PY verifier]", pyVerif
   console.log(`${tsNcLoOk ? "✓" : "✗"} TAMPERED (non-canonical y≥q low-order pubkey in keyring) [TS verifyChain]: ${tsNcLo} (want TAMPERED)`);
   if (!tsNcLoOk) failures++;
   expect("TAMPERED (non-canonical y≥q low-order pubkey in keyring) [PY verifier]", pyVerify([chainPath, ncLoKrPath]).code, 2);
+}
+
+// ── strict-ed25519/ (scripts/gen-vectors.ts 11): the SHARED file corpus Go, Rust and C# also run.
+// Strict public-key validation refuses non-canonical and small-order key encodings at key load
+// (RFC 8032 §5.1.3 decoding + small-order rejection), and a non-canonical scalar S >= L. The chain
+// is genuine, so every case must be TAMPERED; this block pins the EXPECTED verdict for TS and for the
+// Python ground truth the other three runners are compared against.
+{
+  const VEC = join(import.meta.dirname, "..", "conformance", "vectors");
+  const SE = join(VEC, "strict-ed25519");
+  const cases = [
+    ["low-order pubkey #0 (identity)", "keyring-low-order-0.json"],
+    ["low-order pubkey #1 (order 2)", "keyring-low-order-1.json"],
+    ["low-order pubkey #2 (order 4)", "keyring-low-order-2.json"],
+    ["low-order pubkey #3 (order 4)", "keyring-low-order-3.json"],
+    ["low-order pubkey #4 (order 8)", "keyring-low-order-4.json"],
+    ["low-order pubkey #5 (order 8)", "keyring-low-order-5.json"],
+    ["low-order pubkey #6 (order 8)", "keyring-low-order-6.json"],
+    ["low-order pubkey #7 (order 8)", "keyring-low-order-7.json"],
+    ["x0-sign y=1 non-canonical pubkey", "keyring-x0-sign-y-1.json"],
+    ["x0-sign y=p-1 non-canonical pubkey", "keyring-x0-sign-y-p-minus-1.json"],
+    ["y=p non-canonical pubkey", "keyring-y-p-sign.json"],
+    ["y=p+1 non-canonical pubkey", "keyring-y-p-plus-1.json"],
+    ["off-curve pubkey y=2", "keyring-off-curve-y-2.json"],
+  ];
+  const run = (label, chainFile, keyringFile) => {
+    const ts = verifyChain(bytesOf(chainFile), { keyring: bytesOf(keyringFile) });
+    const tsOk = ts.status === "TAMPERED" && ts.signaturesVerified === false;
+    console.log(`${tsOk ? "✓" : "✗"} TAMPERED (strict-ed25519/${label}) [TS verifyChain]: ${ts.status} (want TAMPERED)`);
+    if (!tsOk) failures++;
+    expect(`TAMPERED (strict-ed25519/${label}) [PY verifier]`, pyVerify([chainFile, keyringFile]).code, 2);
+  };
+  for (const [label, keyringName] of cases) run(label, join(VEC, "valid-chain.json"), join(SE, keyringName));
+  run("s-not-canonical malleability", join(SE, "chain-s-not-canonical.json"), join(VEC, "keyring.json"));
+
+  // The verdicts above are TAMPERED whether a key is refused at key load or only later at the
+  // signature check (the receipts are signed by a different key). These checks pin the STAGE: each
+  // refused key must fail the key-load function itself, in TS and in Python, and the corpus key must pass.
+  const keyOf = (file) => Object.values(JSON.parse(readFileSync(file, "utf8")))[0];
+  const pyKeyLoad = (spkiB64) => {
+    try {
+      execFileSync("python3", ["-c", "import sys; sys.path.insert(0, sys.argv[1]); import noa_verify; noa_verify.spki_to_raw(sys.argv[2])", import.meta.dirname, spkiB64], { stdio: "pipe" });
+      return "accepted";
+    } catch {
+      return "refused";
+    }
+  };
+  const tsKeyLoad = (spkiB64) => (isStrictEd25519PublicKeyBytes(Buffer.from(spkiB64, "base64").subarray(12)) ? "accepted" : "refused");
+  const stage = (label, spkiB64, want) => {
+    for (const [impl, got] of [["TS isStrictEd25519PublicKeyBytes", tsKeyLoad(spkiB64)], ["PY verifier", pyKeyLoad(spkiB64)]]) {
+      const ok = got === want;
+      console.log(`${ok ? "✓" : "✗"} key load (strict-ed25519/${label}) [${impl}]: ${got} (want ${want})`);
+      if (!ok) failures++;
+    }
+  };
+  for (const [label, keyringName] of cases) stage(label, keyOf(join(SE, keyringName)), "refused");
+  stage("corpus key, not a low-order pubkey", keyOf(join(VEC, "keyring.json")), "accepted");
 }
 
 // 13. KEY-SWAP (mid-chain kid change for the SAME agent.id, re-sealed so hash+sig are internally

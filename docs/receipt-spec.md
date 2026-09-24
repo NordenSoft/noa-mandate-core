@@ -207,14 +207,19 @@ checkpoint, the verifier emits an explicit tail-truncation warning; and it alway
 fork/equivocation caveat (an offline verifier sees only the branch it was given) plus a
 non-monotonic-timestamp warning if `ts` goes backwards.
 
-**Public-key strictness (interop-normative).** A conformant verifier MUST decode the Ed25519 public
-key `A` strictly: it **MUST reject** the 8 canonical small-order point encodings (the torsion subgroup
-of order dividing 8) and **MUST reject** any non-canonical encoding with `y ≥ q`. A verifier whose library admits low-order keys
-(e.g. OpenSSL) otherwise accepts low-order keys that a strict RFC-8032 verifier rejects, splitting the
-verdict on identical signed bytes (a legitimate signing key is never a low-order point, so this rejects
-no genuine key). This is the minimal pin for cross-impl agreement on `A` — **not** full ZIP-215
-semantics; the signature's `R` point needs no separate blocklist because it is bound by the verification
-equation, which both implementations enforce. The cross-impl conformance suite pins these vectors.
+**Public-key strictness (interop-normative).** A conformant verifier MUST apply strict public-key
+validation to the Ed25519 public key `A` at key load, from the key bytes alone and before any signature
+is examined: it refuses non-canonical and small-order key encodings (RFC 8032 §5.1.3 decoding +
+small-order rejection). It **MUST reject** a key whose `y` coordinate is not canonical (`y ≥ q`), whose
+`y` does not decode to a curve point, whose `x = 0` carries a set sign bit (RFC 8032 §5.1.3 step 4), or
+whose point lies in the torsion subgroup of order dividing 8 (any of the 8 points, in any spelling). A
+refused key authenticates nothing: every receipt or checkpoint under it is `TAMPERED`. Which encodings a
+library admits as a public key differs between libraries and versions (e.g. OpenSSL), so the rule is
+enforced by the verifier itself; a legitimate signing key always passes it, so it rejects no genuine key.
+This is the pin for cross-impl agreement on `A` — **not** full ZIP-215 semantics; the signature's `R`
+point needs no separate blocklist because it is bound by the verification equation, which both
+implementations enforce, and `S` MUST be canonical (`S < L`). The shared conformance corpus
+(`conformance/vectors/strict-ed25519/`) pins these vectors for all five verifiers.
 
 ---
 

@@ -122,6 +122,27 @@ run_case attack      "forged-checkpoint (+ forged cp)"           "$V/attack/forg
 run_case attack      "forged-checkpoint-cp as receipts (MALF)"   "$V/attack/forged-checkpoint-cp.json" "$KR"
 
 echo
+echo "── STRICT-ED25519 vectors (refused at key load / non-canonical S → TAMPERED) ──"
+# STRICT Ed25519 KEY AND SCALAR VALIDATION (scripts/gen-vectors.ts 11). Each keyring maps the corpus kid to a
+# public key that strict public-key validation refuses at key load (non-canonical or small-order encoding,
+# RFC 8032 §5.1.3 decoding + small-order rejection); the chain is genuine, so every case must be TAMPERED.
+SE="$V/strict-ed25519"
+run_case strict-key  "strict-ed25519/low-order pubkey #0 (identity)"  "$V/valid-chain.json" "$SE/keyring-low-order-0.json"
+run_case strict-key  "strict-ed25519/low-order pubkey #1 (order 2)"  "$V/valid-chain.json" "$SE/keyring-low-order-1.json"
+run_case strict-key  "strict-ed25519/low-order pubkey #2 (order 4)"  "$V/valid-chain.json" "$SE/keyring-low-order-2.json"
+run_case strict-key  "strict-ed25519/low-order pubkey #3 (order 4)"  "$V/valid-chain.json" "$SE/keyring-low-order-3.json"
+run_case strict-key  "strict-ed25519/low-order pubkey #4 (order 8)"  "$V/valid-chain.json" "$SE/keyring-low-order-4.json"
+run_case strict-key  "strict-ed25519/low-order pubkey #5 (order 8)"  "$V/valid-chain.json" "$SE/keyring-low-order-5.json"
+run_case strict-key  "strict-ed25519/low-order pubkey #6 (order 8)"  "$V/valid-chain.json" "$SE/keyring-low-order-6.json"
+run_case strict-key  "strict-ed25519/low-order pubkey #7 (order 8)"  "$V/valid-chain.json" "$SE/keyring-low-order-7.json"
+run_case strict-key  "strict-ed25519/x0-sign y=1 non-canonical pubkey"  "$V/valid-chain.json" "$SE/keyring-x0-sign-y-1.json"
+run_case strict-key  "strict-ed25519/x0-sign y=p-1 non-canonical pubkey"  "$V/valid-chain.json" "$SE/keyring-x0-sign-y-p-minus-1.json"
+run_case strict-key  "strict-ed25519/y=p non-canonical pubkey"  "$V/valid-chain.json" "$SE/keyring-y-p-sign.json"
+run_case strict-key  "strict-ed25519/y=p+1 non-canonical pubkey"  "$V/valid-chain.json" "$SE/keyring-y-p-plus-1.json"
+run_case strict-key  "strict-ed25519/off-curve pubkey y=2"  "$V/valid-chain.json" "$SE/keyring-off-curve-y-2.json"
+run_case strict-key  "strict-ed25519/s-not-canonical malleability + kr"  "$SE/chain-s-not-canonical.json" "$KR"
+
+echo
 echo "── MALFORMED vectors (strict parse / structural → MALFORMED) ──"
 for f in "$V"/malformed/*.json; do
   run_case malformed  "$(basename "$f")"                         "$f" "$KR"
@@ -159,6 +180,7 @@ cat <<'EOF'
   conformance/vectors/keyring.json              — trust root, consumed as [keyring.json]
   conformance/vectors/checkpoint.json           — signed checkpoint, consumed via --checkpoint
   conformance/vectors/attack/forged-checkpoint-cp.json — attacker checkpoint, consumed via --checkpoint
+  conformance/vectors/strict-ed25519/keyring-*.json — trust roots holding refused keys, consumed as [keyring.json]
   (each is nonetheless swept above as a bare receipts arg → both verifiers agree at MALFORMED)
   NOTE: the golden "multi-truncated dropLast" MANIFEST scenario is a DYNAMIC transform (no static file),
         so its static analogue here is the attack/tail-truncated vector (+ checkpoint) above.

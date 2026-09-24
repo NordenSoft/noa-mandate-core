@@ -123,6 +123,26 @@ run_case "attack/tail-truncated + keyring + checkpoint"  "$V/attack/tail-truncat
 run_case "attack/forged-checkpoint + keyring + forgedcp" "$V/attack/forged-checkpoint-chain.json" "$V/keyring.json" --checkpoint "$V/attack/forged-checkpoint-cp.json"
 run_case "attack/forged-checkpoint (no keyring)"         "$V/attack/forged-checkpoint-chain.json" --checkpoint "$V/attack/forged-checkpoint-cp.json"
 
+echo "=== VECTORS: strict-ed25519 (refused at key load / non-canonical S) ==="
+# STRICT Ed25519 KEY AND SCALAR VALIDATION (scripts/gen-vectors.ts 11). Each keyring maps the corpus kid to a
+# public key that strict public-key validation refuses at key load (non-canonical or small-order encoding,
+# RFC 8032 §5.1.3 decoding + small-order rejection); the chain is genuine, so every case must be TAMPERED.
+SE="$V/strict-ed25519"
+run_case "strict-ed25519/low-order pubkey #0 (identity)" "$V/valid-chain.json" "$SE/keyring-low-order-0.json"
+run_case "strict-ed25519/low-order pubkey #1 (order 2)" "$V/valid-chain.json" "$SE/keyring-low-order-1.json"
+run_case "strict-ed25519/low-order pubkey #2 (order 4)" "$V/valid-chain.json" "$SE/keyring-low-order-2.json"
+run_case "strict-ed25519/low-order pubkey #3 (order 4)" "$V/valid-chain.json" "$SE/keyring-low-order-3.json"
+run_case "strict-ed25519/low-order pubkey #4 (order 8)" "$V/valid-chain.json" "$SE/keyring-low-order-4.json"
+run_case "strict-ed25519/low-order pubkey #5 (order 8)" "$V/valid-chain.json" "$SE/keyring-low-order-5.json"
+run_case "strict-ed25519/low-order pubkey #6 (order 8)" "$V/valid-chain.json" "$SE/keyring-low-order-6.json"
+run_case "strict-ed25519/low-order pubkey #7 (order 8)" "$V/valid-chain.json" "$SE/keyring-low-order-7.json"
+run_case "strict-ed25519/x0-sign y=1 non-canonical pubkey" "$V/valid-chain.json" "$SE/keyring-x0-sign-y-1.json"
+run_case "strict-ed25519/x0-sign y=p-1 non-canonical pubkey" "$V/valid-chain.json" "$SE/keyring-x0-sign-y-p-minus-1.json"
+run_case "strict-ed25519/y=p non-canonical pubkey" "$V/valid-chain.json" "$SE/keyring-y-p-sign.json"
+run_case "strict-ed25519/y=p+1 non-canonical pubkey" "$V/valid-chain.json" "$SE/keyring-y-p-plus-1.json"
+run_case "strict-ed25519/off-curve pubkey y=2" "$V/valid-chain.json" "$SE/keyring-off-curve-y-2.json"
+run_case "strict-ed25519/s-not-canonical malleability + kr" "$SE/chain-s-not-canonical.json" "$V/keyring.json"
+
 echo "=== VECTORS: malformed (strict parse / structural rejects) ==="
 run_case "malformed/deep-nest"                           "$V/malformed/deep-nest.json"
 run_case "malformed/duplicate-key"                       "$V/malformed/duplicate-key.json"

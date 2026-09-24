@@ -65,6 +65,70 @@ const isSmallOrderPubkey = membership([
   "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa", // order 8
 ]);
 
+/** Field prime p = 2^255 - 19. */
+const P25519 = (1n << 255n) - 19n;
+/** Edwards curve constant d = -121665/121666 mod p (RFC 8032 §5.1). */
+const D25519 = 37095705934669439343138083508754565189542113879843219016388785533085940283555n;
+/** sqrt(-1) mod p = 2^((p-1)/4) mod p (RFC 8032 §5.1.3 step 3). */
+const SQRT_M1_25519 = 19681161376707505956807079304988542015446066515923890162744021073123829784752n;
+
+/** base^exp mod m by square-and-multiply. BigInt operators only — no bare global is called. */
+function modPow(base: bigint, exp: bigint, m: bigint): bigint {
+  let result = 1n;
+  let b = base % m;
+  let e = exp;
+  while (e > 0n) {
+    if ((e & 1n) === 1n) result = (result * b) % m;
+    b = (b * b) % m;
+    e >>= 1n;
+  }
+  return result;
+}
+
+/**
+ * STRICT PUBLIC-KEY VALIDATION for a raw 32-byte Ed25519 public key: refuse non-canonical and
+ * small-order key encodings (RFC 8032 §5.1.3 decoding + small-order rejection). Every verifier in
+ * this repository (impl-py, impl-go, impl-rust, impl-csharp) applies the same rule at key load, so a
+ * keyring key gets one verdict whatever the runtime:
+ *   1. the y coordinate (the low 255 bits) MUST be canonical: y < p;
+ *   2. y MUST decode to a curve point: x^2 = (y^2 - 1) / (d*y^2 + 1) must have a square root;
+ *   3. "If x = 0, and x_0 = 1, decoding fails" (RFC 8032 §5.1.3 step 4);
+ *   4. the point MUST NOT lie in the order-dividing-8 torsion subgroup. After steps 1-3 every
+ *      accepted encoding is the one canonical encoding of its point, so the exact-byte set is complete.
+ * A key produced by Ed25519 key generation passes every step. Exported for the unit tests only; the
+ * package entry point does not re-export it.
+ */
+export function isStrictEd25519PublicKeyBytes(raw: Uint8Array): boolean {
+  if (byteLength(raw) !== 32) return false;
+  const xSign = (raw[31]! & 0x80) !== 0;
+  const yBytes = bufferFrom(raw);
+  yBytes[31] = yBytes[31]! & 0x7f;
+  let y = 0n;
+  // T18: `BigInt` is a bare global; building y through it would let `globalThis.BigInt = () => 0n`
+  // collapse every key to y = 0. The captured `toBigInt` keeps this gate independent of the global.
+  for (let i = 31; i >= 0; i--) y = (y << 8n) | toBigInt(yBytes[i]!);
+  // 1. Canonical y. OpenSSL accepts a y >= p encoding AND re-exports it unchanged, so the
+  //    canonical-SPKI round-trip in verifyEd25519 cannot catch it.
+  if (y >= P25519) return false;
+  // 2. Recover x (RFC 8032 §5.1.3 steps 2-3); no square root means y is not on the curve.
+  const y2 = (y * y) % P25519;
+  const u = (y2 - 1n + P25519) % P25519;
+  const v = (D25519 * y2 + 1n) % P25519;
+  const v3 = (((v * v) % P25519) * v) % P25519;
+  const v7 = (((v3 * v3) % P25519) * v) % P25519;
+  let x = (((u * v3) % P25519) * modPow((u * v7) % P25519, (P25519 - 5n) / 8n, P25519)) % P25519;
+  const vx2 = (v * ((x * x) % P25519)) % P25519;
+  if (vx2 !== u) {
+    if (vx2 !== (P25519 - u) % P25519) return false;
+    x = (x * SQRT_M1_25519) % P25519;
+  }
+  // 3. x = 0 with the sign bit set is not a valid encoding.
+  if (x === 0n && xSign) return false;
+  // 4. Small-order torsion subgroup.
+  if (isSmallOrderPubkey(bufToString(bufferFrom(raw), "hex"))) return false;
+  return true;
+}
+
 /**
  * ── C-01 ROUTE 2, CLOSED AT THE SINK ──────────────────────────────────────────────────────────────
  * `Buffer.from` is a writable property of a mutable global. `c01_buffer.mjs` replaced it so that an
@@ -133,31 +197,13 @@ export function verifyEd25519(publicKeyB64: string, message: Buffer, signatureB6
     // 45-byte noncanonical key through; the captured method restores the real re-encoding.
     const canonical = keyExportSpkiDer(key);
     if (!bufEquals(canonical, der)) return false;
-    // CROSS-IMPL CONSENSUS on the PUBLIC KEY. node:crypto/OpenSSL verify is COFACTORED and
-    // accepts public keys the independent strict-equation Python reference rejects — splitting VALID(TS) /
-    // TAMPERED(PY) on identical signed bytes. Two divergent classes, BOTH closed here so A is decoded with
-    // the SAME strictness Python's _decodepoint enforces:
-    //   (a) NON-CANONICAL y (y >= q): the low 255 bits of the encoding (bit 255 is the x sign bit) MUST be a
-    //       canonical field element y < q. OpenSSL accepts a y >= q encoding AND re-exports it unchanged (so
-    //       the canonical-SPKI round-trip above does NOT catch it); Python's _decodepoint raises "y >= q".
-    //       Reject it so both agree. (RFC 8032: the y-coordinate MUST be canonical.)
-    //   (b) SMALL-ORDER points: a key in the order-dividing-8 torsion subgroup. After (a), the only remaining
-    //       encodings of those points are the 8 canonical ones in SMALL_ORDER_PUBKEYS → exact-byte reject.
+    // CROSS-IMPL CONSENSUS on the PUBLIC KEY. Which encodings a library admits as a public key is a
+    // property of the linked library version, so the key rule is enforced here, identically in all five
+    // verifiers, and decided from the key bytes alone before the signature is read:
+    // canonical y, RFC 8032 §5.1.3 decoding, no x = 0 with the sign bit, not small-order
+    // (see isStrictEd25519PublicKeyBytes above).
     const raw = bufSubarray(canonical, 12); // 12-byte Ed25519 SPKI prefix -> trailing 32 raw key bytes
-    // (a) y < q: zero bit 255 (sign), then require the resulting 255-bit little-endian integer < q.
-    const yBytes = bufferFrom(raw);
-    yBytes[31] = yBytes[31]! & 0x7f;
-    const Q = (1n << 255n) - 19n;
-    let y = 0n;
-    // T18: `BigInt` is a bare global and this loop is the ONLY control that rejects a y >= q key
-    // (OpenSSL accepts it AND re-exports it unchanged, so the canonical-SPKI round-trip above does
-    // not catch it, and a y = q+1 encoding is not one of the 8 small-order encodings either).
-    // `globalThis.BigInt = () => 0n` collapses y to 0 and the gate passes everything; measured end to
-    // end, a universal `R = identity, S = 0` signature then verified an arbitrary message.
-    for (let i = 31; i >= 0; i--) y = (y << 8n) | toBigInt(yBytes[i]!);
-    if (y >= Q) return false;
-    // (b) small-order torsion subgroup (the canonical encodings; non-canonical variants already rejected by (a)).
-    if (isSmallOrderPubkey(bufToString(raw, "hex"))) return false;
+    if (!isStrictEd25519PublicKeyBytes(raw)) return false;
     // STRICT, CANONICAL base64 for the signature. sig.value is NOT covered by the receipt hash, so its
     // exact byte string is unconstrained by the chain — only the decoded 64 bytes matter cryptographically.
     // node's Buffer.from(…, "base64") is LENIENT (silently ignores embedded whitespace, missing '='

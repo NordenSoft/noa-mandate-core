@@ -84,6 +84,28 @@ for (const a of ATTACKS) {
   });
 }
 
+// Strict public-key validation (scripts/gen-vectors.ts 11, conformance/vectors/strict-ed25519/):
+// a keyring whose key is a non-canonical, off-curve or small-order encoding is refused at key load,
+// so the genuine valid chain is TAMPERED under it; a signature scalar S >= L is refused as well.
+const STRICT_ED25519_KEYRINGS = [
+  "keyring-low-order-0.json", "keyring-low-order-1.json", "keyring-low-order-2.json", "keyring-low-order-3.json",
+  "keyring-low-order-4.json", "keyring-low-order-5.json", "keyring-low-order-6.json", "keyring-low-order-7.json",
+  "keyring-x0-sign-y-1.json", "keyring-x0-sign-y-p-minus-1.json", "keyring-y-p-sign.json", "keyring-y-p-plus-1.json",
+  "keyring-off-curve-y-2.json",
+];
+test("strict-ed25519: every refused key encoding makes the genuine chain TAMPERED", () => {
+  for (const name of STRICT_ED25519_KEYRINGS) {
+    const r = verifyChain(doc("valid-chain.json"), { keyring: doc(`strict-ed25519/${name}`) });
+    assert.equal(r.status, "TAMPERED", `${name} -> expected TAMPERED, got ${r.status}: ${r.reason}`);
+    assert.equal(r.signaturesVerified, false, name);
+  }
+});
+test("strict-ed25519: a signature with a non-canonical scalar (S >= L) is TAMPERED", () => {
+  const r = verifyChain(doc("strict-ed25519/chain-s-not-canonical.json"), { keyring });
+  assert.equal(r.status, "TAMPERED", `${r.status}: ${r.reason}`);
+  assert.equal(r.signaturesVerified, false);
+});
+
 test("unknown-kid: TAMPERED with keyring, UNVERIFIED without (no silent TOFU on attacker input)", () => {
   const withKey = verifyChain(doc("attack/unknown-kid.json"), { keyring });
   assert.equal(withKey.status, "TAMPERED");

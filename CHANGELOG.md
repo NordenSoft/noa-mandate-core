@@ -36,6 +36,16 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Fixed
 
+- Strict public-key validation: refuse non-canonical and small-order Ed25519 key encodings (RFC 8032
+  §5.1.3 decoding + small-order rejection). All five verifiers (TypeScript `src/keys.ts`, Python
+  `impl-py`, Go `impl-go`, Rust `impl-rust`, C# `impl-csharp`) now apply one rule at key load, before
+  any signature is examined: a public key is refused when its `y` is not canonical (`y ≥ p`), when `y`
+  does not decode to a curve point, when `x = 0` carries a set sign bit, or when the point is one of the
+  8 small-order points in any spelling. A refused keyring key yields `TAMPERED` (exit `2`) in every
+  verifier. The shared corpus gains `conformance/vectors/strict-ed25519/` (13 refused-key keyrings and
+  one `S ≥ L` signature vector), run by all five verifiers; the conformance matrix now asserts the
+  `malleability` class for Go, Rust and C# from that corpus. Keys produced by Ed25519 key generation
+  are unaffected; no committed positive fixture key changes verdict.
 - A lifecycle retirement added after an honestly signed receipt no longer changes that receipt's
   historical integrity to `TAMPERED`. The side API verifies with retained public material, attributes
   only through a separately trusted checkpoint inside the covered signer's explicit

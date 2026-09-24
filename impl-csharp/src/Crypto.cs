@@ -10,8 +10,8 @@ namespace NoaReceipt;
 /// to a library's runtime behavior:
 ///   - canonical base64 (round-trip) for both the signature and the keyring SPKI;
 ///   - exact 12-byte Ed25519 SPKI prefix + 44-byte length;
-///   - small-order public-key rejection (the 8 canonical torsion encodings);
-///   - non-canonical y &gt;= q public-key rejection;
+///   - strict public-key validation at key load (IsStrictPublicKey): refuse non-canonical and
+///     small-order key encodings (RFC 8032 §5.1.3 decoding + small-order rejection);
 ///   - S &lt; L scalar check (Ed25519 signature malleability, RFC 8032 §5.1.7).
 /// </summary>
 public static class Crypto
@@ -61,7 +61,8 @@ public static class Crypto
     }
 
     /// <summary>base64(DER SPKI Ed25519) → raw 32-byte key. Rejects non-canonical base64, a wrong
-    /// SPKI prefix/length, and small-order keys (parity with spki_to_raw).</summary>
+    /// SPKI prefix/length, and any key that fails strict public-key validation (parity with
+    /// spki_to_raw).</summary>
     public static byte[] SpkiToRaw(string pubB64)
     {
         byte[] der = StrictB64Decode(pubB64);
@@ -69,9 +70,50 @@ public static class Crypto
             throw new FormatException("not a canonical Ed25519 SPKI");
         var raw = new byte[32];
         Array.Copy(der, 12, raw, 0, 32);
-        if (SmallOrder.Contains(ToHex(raw)))
-            throw new FormatException("small-order Ed25519 public key rejected");
+        if (!IsStrictPublicKey(raw))
+            throw new FormatException("strict public-key validation: non-canonical or small-order Ed25519 key refused");
         return raw;
+    }
+
+    // Edwards curve constant d = -121665/121666 mod q, and sqrt(-1) mod q (RFC 8032 §5.1, §5.1.3).
+    private static readonly BigInteger D = BigInteger.Parse(
+        "37095705934669439343138083508754565189542113879843219016388785533085940283555");
+    private static readonly BigInteger SqrtM1 = BigInteger.Parse(
+        "19681161376707505956807079304988542015446066515923890162744021073123829784752");
+
+    /// <summary>
+    /// STRICT PUBLIC-KEY VALIDATION: refuse non-canonical and small-order Ed25519 key encodings
+    /// (RFC 8032 §5.1.3 decoding + small-order rejection). Same rule, same order, as impl-py
+    /// _is_strict_public_key and src/keys.ts isStrictEd25519PublicKeyBytes:
+    ///   1. canonical y (the low 255 bits): y &lt; q;
+    ///   2. y decodes to a curve point: x^2 = (y^2 - 1) / (d*y^2 + 1) has a square root;
+    ///   3. x = 0 with the sign bit set fails (RFC 8032 §5.1.3 step 4);
+    ///   4. not one of the 8 small-order points (canonical encodings; steps 1-3 leave no other spelling).
+    /// A key produced by Ed25519 key generation passes every step.
+    /// </summary>
+    public static bool IsStrictPublicKey(byte[] raw)
+    {
+        if (raw.Length != 32) return false;
+        bool xSign = (raw[31] & 0x80) != 0;
+        if (!PublicKeyYCanonical(raw)) return false;
+        var yBytes = new byte[32];
+        Array.Copy(raw, yBytes, 32);
+        yBytes[31] = (byte)(yBytes[31] & 0x7f);
+        BigInteger y = LittleEndianToBig(yBytes, 0, 32);
+        BigInteger y2 = (y * y) % Q;
+        BigInteger u = ((y2 - 1) % Q + Q) % Q;
+        BigInteger v = (D * y2 + 1) % Q;
+        BigInteger v3 = BigInteger.ModPow(v, 3, Q);
+        BigInteger v7 = BigInteger.ModPow(v, 7, Q);
+        BigInteger x = (u * v3 % Q) * BigInteger.ModPow(u * v7 % Q, (Q - 5) / 8, Q) % Q;
+        BigInteger vx2 = v * (x * x % Q) % Q;
+        if (vx2 != u)
+        {
+            if (vx2 != (Q - u) % Q) return false;
+            x = x * SqrtM1 % Q;
+        }
+        if (x.IsZero && xSign) return false;
+        return !SmallOrder.Contains(ToHex(raw));
     }
 
     /// <summary>True iff <paramref name="signature"/> (64 bytes) is a valid Ed25519 signature over
