@@ -4725,18 +4725,24 @@ const KNOCKOUTS = [
   // ── `noa.ledger.transfer/1` (docs/ledger-transfer-spec.md) ────────────────────────────────────
   //
   // Registered in the same change that creates the module. Each entry names the corpus vector (or
-  // property test) that must go RED without the control. Nine of the ten are scoped to
-  // `npm run test:ledger-transfer`, where every detector lives; the gate's risk floor is measured by
-  // the gate package's own suite. Three mutations (strict parse, hash over canonical, Salt row) edit
-  // `projectLedgerTransfer`'s own body, so the implementation-digest test ALSO goes red; the corpus
-  // replay runs first in that file, so the reported first failures are the vectors that measure the
-  // control rather than the digest.
+  // property test) that must go RED without the control; the gate's risk floor is measured by the gate
+  // package's own suite.
+  //
+  // THREE MUTATIONS EDIT `projectLedgerTransfer`'s OWN BODY (strict parse, hash over canonical, Salt
+  // row). The implementation-digest test hashes that body, so on the whole-file suite it would kill
+  // these arms by itself — the arm would then say nothing about the named vector. A `[proof: ID]`
+  // binding cannot express this detector: the proof resolver (`scripts/lib/proof-resolve.mjs`,
+  // `proofRecipePackage`) only resolves files under `packages/<name>/test/`, and this suite lives in
+  // the root `test/`. So each of the three runs a script that builds and then executes ONLY its named
+  // detector (`--test-name-pattern`, one test): the digest test is not in the run, and the only way
+  // the arm can be killed is by the vector it names.
   {
     id: "ledger-transfer-bytes-in-strict-parse",
     control:
-      "spec §3.1 — the transfer enters through the kernel's STRICT parser. A lenient parser is " +
+      "spec §4.1 — the transfer enters through the kernel's STRICT parser. A lenient parser is " +
       "last-wins on duplicate keys, so `reject-parse-duplicate-amount` ({amount:\"1\", amount:\"100000\"}) " +
-      "would be ACCEPTED with the second amount — the value a first reader saw and the value bound differ.",
+      "would be ACCEPTED with the second amount — the value a first reader saw and the value bound differ. " +
+      "The suite runs that one vector only.",
     file: "src/ledger-transfer.ts",
     find: '  const parsed = parseDocument(paramsBytes, "params");',
     replace:
@@ -4749,12 +4755,12 @@ const KNOCKOUTS = [
       '    }\n' +
       '  })();',
     kind: "tests",
-    suite: [".", "npm", ["run", "test:ledger-transfer"]],
+    suite: [".", "npm", ["run", "test:ledger-transfer:duplicate-key"]],
   },
   {
     id: "ledger-transfer-closed-member-set",
     control:
-      "spec §2 — the closed world, enforced in code. Without it `reject-extra-memo` is ACCEPTED with the " +
+      "spec §3/§6 — the closed world, enforced in code. Without it `reject-extra-memo` is ACCEPTED with the " +
       "BASE paramsHash: the memo rides along invisibly while the approver sees an unchanged transfer.",
     file: "src/ledger-transfer.ts",
     find: "    if (!hasOwn(RECOGNIZED_TRANSFER_KEYS, presentKeys[i] as string)) {",
@@ -4765,7 +4771,7 @@ const KNOCKOUTS = [
   {
     id: "ledger-transfer-same-account-refused",
     control:
-      "spec §2 — fromAccount !== toAccount, compared after parsing. Without it `reject-same-account` " +
+      "spec §3 — fromAccount !== toAccount, compared after parsing. Without it `reject-same-account` " +
       "(and its escaped-spelling twin) is ACCEPTED as a self-transfer.",
     file: "src/ledger-transfer.ts",
     find: '  if (fromAccount === toAccount) return { ok: false, code: "TRANSFER_SAME_ACCOUNT" };',
@@ -4776,7 +4782,7 @@ const KNOCKOUTS = [
   {
     id: "ledger-transfer-identifier-charset",
     control:
-      "spec §2.1 — identifier interiors are [a-z0-9-] only. Widening the interior charset lets " +
+      "spec §3.1 — identifier interiors are [a-z0-9-] only. Widening the interior charset lets " +
       "`reject-from-escaped-newline` (\"acct-\\nexample-1\") through: a newline can rewrite what the " +
       "approver reads below it.",
     file: "src/ledger-transfer.ts",
@@ -4788,7 +4794,7 @@ const KNOCKOUTS = [
   {
     id: "ledger-transfer-amount-one-spelling",
     control:
-      "spec §2.2 — one spelling per amount. Replacing the digit grammar with integer normalization " +
+      "spec §3.2 — one spelling per amount. Replacing the digit grammar with integer normalization " +
       "(Number then String) makes `reject-amount-leading-zero` (\"012345\") ACCEPTED with the base hash " +
       "and the base display: two spellings, one bound value — the normalizer is the forgery surface.",
     file: "src/ledger-transfer.ts",
@@ -4805,7 +4811,7 @@ const KNOCKOUTS = [
   {
     id: "ledger-transfer-salt-validated",
     control:
-      "spec §2 — the salt is exactly 32 LOWERCASE hex. Skipping the validator makes " +
+      "spec §3 — the salt is exactly 32 LOWERCASE hex. Skipping the validator makes " +
       "`reject-salt-uppercase` ACCEPTED: a second spelling of one salt, hence two hashes for one transfer.",
     file: "src/ledger-transfer.ts",
     find: '  const salt = asSalt(o["salt"]);',
@@ -4816,26 +4822,27 @@ const KNOCKOUTS = [
   {
     id: "ledger-transfer-hash-over-canonical",
     control:
-      "spec §3 — paramsHash covers the RE-EMITTED canonical bytes, never the input bytes. Hashing the " +
+      "spec §4.2 — paramsHash covers the RE-EMITTED canonical bytes, never the input bytes. Hashing the " +
       "input makes `accept-escaped-spelling` (a \\u0061 spelling of the base tuple) bind a hash that is " +
-      "not the base hash, so one transfer would carry two commitments.",
+      "not the base hash, so one transfer would carry two commitments. The suite runs that one vector only.",
     file: "src/ledger-transfer.ts",
     find: "  const paramsHash = sha256Prefixed(canonical);",
     replace: '  const paramsHash = sha256Prefixed(typeof paramsBytes === "string" ? paramsBytes : canonical);',
     kind: "tests",
-    suite: [".", "npm", ["run", "test:ledger-transfer"]],
+    suite: [".", "npm", ["run", "test:ledger-transfer:escaped-spelling"]],
   },
   {
     id: "ledger-transfer-display-shows-salt",
     control:
-      "spec §5 — the display is complete: every bound member is visible, so an auditor can rebuild the " +
+      "spec §5.1 — the display is complete: every bound member is visible, so an auditor can rebuild the " +
       "tuple from the rows and re-project it. Dropping the Salt row leaves a display that still looks " +
-      "complete; the mechanical completeness test (not a hand-written expectation) must go red.",
+      "complete; the mechanical `display completeness` test (not a hand-written expectation) must go " +
+      "red, and the suite runs that one test only.",
     file: "src/ledger-transfer.ts",
     find: "      Salt: b.salt,",
     replace: "",
     kind: "tests",
-    suite: [".", "npm", ["run", "test:ledger-transfer"]],
+    suite: [".", "npm", ["run", "test:ledger-transfer:completeness"]],
   },
   {
     id: "ledger-transfer-implementation-pin",

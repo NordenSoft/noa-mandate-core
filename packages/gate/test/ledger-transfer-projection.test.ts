@@ -29,7 +29,7 @@ import {
   projectLedgerTransfer,
 } from "noa-receipt";
 import { getProjection, ledgerTransferProjection } from "../src/projections.js";
-import { setupGate, body } from "./helpers.js";
+import { setupGate, body, sampleCommandParams } from "./helpers.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // dist/test -> packages/gate -> packages -> repository root
@@ -76,7 +76,20 @@ test("a hold for noa.ledger.transfer is refused as UNREGISTERED_CRITICAL_ACTION 
   }));
   assert.equal(created.status, 422, JSON.stringify(created.body));
   assert.equal((created.body as { error: string }).error, "UNREGISTERED_CRITICAL_ACTION");
-  assert.equal(fx.store.getHold("chain-ledger-transfer"), undefined, "a refused request must create no hold");
+  // The store is keyed by a gate-generated hold id, so a lookup by chain name could never find
+  // anything. Count every hold, and look the request up by the key the store actually indexes.
+  assert.equal(fx.store.listHolds({}).length, 0, "a refused request must create no hold");
+  assert.equal(fx.store.getHoldByIdem(fx.agent.id, "idem-ledger-transfer"), undefined);
+  // Anti-vacuity: the same probes DO see a hold when one is created — here the registered adapter.
+  const control = fx.engine.createHold(fx.agent, "idem-command-control", body({
+    mode: "ENFORCED",
+    action: { canonical: "noa.command.exec", riskClass: "HIGH", reversible: false },
+    params: sampleCommandParams(),
+    chain: "chain-command-control",
+  }));
+  assert.equal(control.status, 201, JSON.stringify(control.body));
+  assert.equal(fx.store.listHolds({}).length, 1, "the probe must be able to see a created hold");
+  assert.ok(fx.store.getHoldByIdem(fx.agent.id, "idem-command-control"));
 });
 
 test("the gate measures the same identity the kernel publishes", () => {
@@ -96,10 +109,14 @@ test("the adapter is sealed: it cannot be repointed after load", () => {
 
 // ── ONE DERIVATION: the corpus, replayed through the gate's object entry point ──────────────────
 let replayed = 0;
+const notReplayed: string[] = [];
 for (const vec of corpus.vectors) {
   if (typeof vec.paramsText !== "string") continue; // identity vectors and byte-level vectors
   const parsed = parseDocument(new TextEncoder().encode(vec.paramsText), "params");
-  if (!parsed.ok) continue; // parse-layer vectors never reach an object entry point
+  if (!parsed.ok) { // parse-layer vectors never reach an object entry point
+    notReplayed.push(`${vec.name}:${vec.expect.reasonCode}`);
+    continue;
+  }
   replayed++;
   test(`ledger-transfer gate replay/${vec.name} → ${vec.expect.ok ? "ACCEPT at HIGH" : `REJECT ${vec.expect.reasonCode}`}`, () => {
     const res = run(parsed.value);
@@ -119,7 +136,13 @@ for (const vec of corpus.vectors) {
 }
 
 test("the gate replay covers the corpus (every vector that can reach an object entry point)", () => {
-  assert.ok(replayed >= 110, `only ${replayed} vectors replayed through the gate`);
+  // Pinned exactly: 132 text vectors, of which the 11 that are TRANSFER_PARSE cannot be expressed as
+  // an object. Move this number only together with the corpus, and say which vectors moved it.
+  assert.equal(replayed, 121, `the gate replayed ${replayed} vectors`);
+  assert.equal(notReplayed.length, 11);
+  for (const entry of notReplayed) {
+    assert.ok(entry.endsWith(":TRANSFER_PARSE"), `${entry}: only parse-layer vectors may be skipped`);
+  }
 });
 
 // ── ONE READ: hostile live objects ───────────────────────────────────────────────────────────────

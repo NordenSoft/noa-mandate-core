@@ -21,7 +21,8 @@
  *     params     = { amount, fromAccount, ledger, salt, toAccount, unit }
  *                  every member REQUIRED, every member a JSON string, any OTHER own member REFUSED
  *                  · amount                       — 1..15 ASCII digits, no leading zero (1 .. 10^15-1
- *                    whole units; below 2^53, so every numeric type represents it exactly)
+ *                    whole units; below 2^53, so binary64, int64 and arbitrary-precision integers
+ *                    represent it exactly — binary32 and int32 do not)
  *                  · fromAccount / toAccount / ledger — 1..64 of [a-z0-9-], first [a-z], last [a-z0-9]
  *                  · salt                         — exactly 32 lowercase hex (128 bits)
  *                  · unit                         — the closed enum { "XTS" }, scale 0

@@ -14,8 +14,12 @@
  *      equal the vector they name;
  *   4. accept displays are pairwise distinct on the same terms, and every display rebuilds its
  *      canonical tuple (rows back to members) and re-projects to the same `paramsHash`;
- *   5. the canonical bytes of every accept equal the sorted-key template, byte for byte;
- *   6. every reachable refusal code occurs at least once, and every group has its declared count.
+ *   5. the canonical bytes of every accept equal the sorted-key template built from the FIXTURE the
+ *      vector was generated from — an independent read path, not the implementation's output;
+ *   6. every reachable refusal code occurs at least once, and every group has its declared count;
+ *   7. every ADJACENT pair of the normative refusal order has a precedence vector whose input
+ *      violates both rules (repairing the winning violation yields the losing code), so an
+ *      implementation that checks the rules in any other order fails the corpus.
  * A corpus that no longer matches the code it describes is never committed, and the pins move only
  * in a deliberate commit that says why.
  *
@@ -49,6 +53,7 @@ import {
   LEDGER_TRANSFER_DISPLAY_ID,
   projectLedgerTransfer,
   type LedgerTransferResult,
+  type LedgerTransferRefusalCode,
 } from "../src/ledger-transfer.js";
 import { projectionIdentityHash, type ProjectionIdentityDescriptor } from "../src/deploy-release.js";
 
@@ -147,7 +152,7 @@ interface IdentityVector {
   expect: { hash: string };
 }
 interface AcceptExpect { ok: true; paramsHash: string; canonical: string; display: Record<string, string> }
-interface RejectExpect { ok: false; reasonCode: string; reasonContains?: string }
+interface RejectExpect { ok: false; reasonCode: LedgerTransferRefusalCode; reasonContains?: string }
 interface ParamsVector {
   name: string;
   group: Group;
@@ -158,21 +163,78 @@ interface ParamsVector {
   paramsHex?: string;
   /** An accept that must bind exactly what the named vector binds. */
   equivalentTo?: string;
+  /** A precedence vector: the SECOND rule its input violates, which `expect.reasonCode` must beat. */
+  beats?: LedgerTransferRefusalCode;
   expect: AcceptExpect | RejectExpect;
 }
 
 const GROUP_COUNTS: Readonly<Record<Group, number>> = {
-  accept: 15, parse: 12, "not-object": 5, amount: 21, from: 21, ledger: 7, salt: 8, to: 7, unit: 8,
-  unrecognized: 14, "same-account": 2, precedence: 5,
+  accept: 20, parse: 12, "not-object": 5, amount: 21, from: 21, ledger: 7, salt: 8, to: 7, unit: 8,
+  unrecognized: 14, "same-account": 2, precedence: 9,
 };
 
-/** Every code of `/1`. The last one guards the render node and is unreachable by construction. */
-const REFUSAL_CODES = [
-  "TRANSFER_PARSE", "TRANSFER_NOT_OBJECT", "TRANSFER_AMOUNT_INVALID", "TRANSFER_FROM_INVALID",
-  "TRANSFER_LEDGER_INVALID", "TRANSFER_SALT_INVALID", "TRANSFER_TO_INVALID", "TRANSFER_UNIT_INVALID",
-  "TRANSFER_UNRECOGNIZED_MEMBER", "TRANSFER_SAME_ACCOUNT", "TRANSFER_CANONICAL_REPARSE",
-] as const;
-const UNREACHABLE_CODES = new Set<string>(["TRANSFER_CANONICAL_REPARSE"]);
+/**
+ * Every code of `/1` with its position in the normative refusal order. Typed as a Record over the
+ * published `LedgerTransferRefusalCode` union: a code missing here, or present here but absent from
+ * the union, is a COMPILE error, so this list cannot drift from the type it describes.
+ */
+const CODE_ORDER: Readonly<Record<LedgerTransferRefusalCode, number>> = {
+  TRANSFER_PARSE: 0,
+  TRANSFER_NOT_OBJECT: 1,
+  TRANSFER_AMOUNT_INVALID: 2,
+  TRANSFER_FROM_INVALID: 3,
+  TRANSFER_LEDGER_INVALID: 4,
+  TRANSFER_SALT_INVALID: 5,
+  TRANSFER_TO_INVALID: 6,
+  TRANSFER_UNIT_INVALID: 7,
+  TRANSFER_UNRECOGNIZED_MEMBER: 8,
+  TRANSFER_SAME_ACCOUNT: 9,
+  TRANSFER_CANONICAL_REPARSE: 10,
+};
+const REFUSAL_CODES: readonly LedgerTransferRefusalCode[] =
+  (Object.keys(CODE_ORDER) as LedgerTransferRefusalCode[]).sort((a, b) => CODE_ORDER[a] - CODE_ORDER[b]);
+REFUSAL_CODES.forEach((c, i) => {
+  if (CODE_ORDER[c] !== i) fail(`CODE_ORDER is not a dense 0..n order at ${c}`);
+});
+/** The render-node guard: unreachable by any input, so no vector may carry it. */
+const UNREACHABLE_CODES = new Set<LedgerTransferRefusalCode>(["TRANSFER_CANONICAL_REPARSE"]);
+
+/**
+ * The adjacent pairs the precedence vectors must pin, DERIVED from the order: every consecutive pair
+ * from the first member rule to the two-member rule. If every adjacent pair is pinned, every other
+ * order of these rules inverts at least one pinned pair. PARSE and NOT_OBJECT are not in the chain:
+ * a non-object has no members to violate, and the parse layer's precedence has its own vector.
+ */
+const ADJACENT_PAIRS: ReadonlyArray<readonly [LedgerTransferRefusalCode, LedgerTransferRefusalCode]> = (() => {
+  const chain = REFUSAL_CODES.slice(CODE_ORDER.TRANSFER_AMOUNT_INVALID, CODE_ORDER.TRANSFER_SAME_ACCOUNT + 1);
+  return chain.slice(0, -1).map((c, i) => [c, chain[i + 1] as LedgerTransferRefusalCode] as const);
+})();
+
+/** The member each member-rule code belongs to. */
+const MEMBER_OF_CODE: Partial<Record<LedgerTransferRefusalCode, string>> = {
+  TRANSFER_AMOUNT_INVALID: "amount",
+  TRANSFER_FROM_INVALID: "fromAccount",
+  TRANSFER_LEDGER_INVALID: "ledger",
+  TRANSFER_SALT_INVALID: "salt",
+  TRANSFER_TO_INVALID: "toAccount",
+  TRANSFER_UNIT_INVALID: "unit",
+};
+
+/** Remove exactly the violation `code` names from a tuple; everything else is left as it was. */
+function repair(o: Record<string, unknown>, code: LedgerTransferRefusalCode): Record<string, unknown> {
+  const c: Record<string, unknown> = { ...o };
+  const member = MEMBER_OF_CODE[code];
+  if (member !== undefined) {
+    c[member] = BASE[member];
+  } else if (code === "TRANSFER_UNRECOGNIZED_MEMBER") {
+    for (const k of Object.keys(c)) if (!(MEMBERS as readonly string[]).includes(k)) delete c[k];
+  } else if (code === "TRANSFER_SAME_ACCOUNT") {
+    c["toAccount"] = c["fromAccount"] === ACCT_2 ? ACCT_3 : ACCT_2;
+  } else {
+    fail(`repair: there is no generic repair for ${code}`);
+  }
+  return c;
+}
 
 const inputOf = (v: ParamsVector): string | Uint8Array =>
   typeof v.paramsText === "string" ? v.paramsText : Uint8Array.from(Buffer.from(v.paramsHex as string, "hex"));
@@ -240,10 +302,17 @@ function check(v: ParamsVector): ParamsVector {
   return v;
 }
 
-/** An ACCEPT vector whose expectation is the implementation's own output for `text`. */
-function accept(name: string, note: string, text: string, equivalentTo?: string): ParamsVector {
+/**
+ * An ACCEPT vector. `fixture` is the tuple the vector is MEANT to bind; `text` is the exact input
+ * (defaults to the fixture's JSON). The implementation's canonical bytes must equal the template
+ * built from the fixture — a check that does not read the implementation's own output.
+ */
+function accept(
+  name: string, note: string, fixture: Record<string, unknown>, text: string = jsonText(fixture), equivalentTo?: string,
+): ParamsVector {
   const r = projectLedgerTransfer(text);
   if (!r.ok) fail(`${name}: expected a valid transfer, got ${r.reason}`);
+  if (template(fixture) !== r.canonical) fail(`${name}: canonical bytes differ from the fixture's template: ${r.canonical}`);
   const v: ParamsVector = {
     name, group: "accept", note, paramsText: text,
     expect: { ok: true, paramsHash: r.paramsHash, canonical: r.canonical, display: { ...r.display } },
@@ -252,7 +321,9 @@ function accept(name: string, note: string, text: string, equivalentTo?: string)
   return check(v);
 }
 
-function reject(name: string, group: Group, note: string, text: string, reasonCode: string, reasonContains?: string): ParamsVector {
+function reject(
+  name: string, group: Group, note: string, text: string, reasonCode: LedgerTransferRefusalCode, reasonContains?: string,
+): ParamsVector {
   const expect: RejectExpect = { ok: false, reasonCode };
   if (reasonContains !== undefined) expect.reasonContains = reasonContains;
   return check({ name, group, note, paramsText: text, expect });
@@ -278,17 +349,20 @@ const baseText = jsonText(BASE);
 const acceptBase = accept(
   "accept-base",
   "The conformance tuple. Its paramsHash is the normative base pin; its canonical bytes are the template.",
-  baseText,
+  BASE,
 );
 if ((acceptBase.expect as AcceptExpect).paramsHash !== PIN_PARAMS_HASH) {
   fail(`the base paramsHash ${(acceptBase.expect as AcceptExpect).paramsHash} does not reproduce the pin ${PIN_PARAMS_HASH}`);
 }
+const escapedKeyText = baseText.replace(`"amount":`, `"\\u0061mount":`);
+if (escapedKeyText === baseText) fail("escaped-key spelling did not apply");
 const accepts: ParamsVector[] = [
   acceptBase,
   accept(
     "accept-key-order-and-whitespace",
     "Reverse key order plus insignificant whitespace binds the SAME value: JCS sorts keys and the hash " +
       "covers the re-emitted canonical bytes, never the input bytes.",
+    BASE,
     `{ "unit" : "${UNIT}",\n  "toAccount":"${ACCT_2}",\t"salt":"${SALT_A}", "ledger":"${LEDGER_1}",\r\n` +
       ` "fromAccount":"${ACCT_1}" , "amount":"12345" }`,
     "accept-base",
@@ -297,35 +371,50 @@ const accepts: ParamsVector[] = [
     "accept-escaped-spelling",
     "`\\u0061` is a JSON escape for `a`; after parsing the value is identical, so the hash is the base hash. " +
       "A hash over input bytes would differ here.",
+    BASE,
     baseText.replace(`"fromAccount":"${ACCT_1}"`, `"fromAccount":"\\u0061${ACCT_1.slice(1)}"`),
     "accept-base",
   ),
-  accept("accept-drift-amount", "One character of the amount (12345 -> 12346) moves the hash.", jsonText(withMembers({ amount: "12346" }))),
-  accept("accept-drift-from", "One character of the source account moves the hash.", jsonText(withMembers({ fromAccount: ACCT_3 }))),
-  accept("accept-drift-to", "One character of the destination account moves the hash.", jsonText(withMembers({ toAccount: ACCT_3 }))),
-  accept("accept-drift-ledger", "One character of the ledger moves the hash.", jsonText(withMembers({ ledger: LEDGER_2 }))),
-  accept("accept-drift-salt", "One character of the salt moves the hash.", jsonText(withMembers({ salt: SALT_A_DRIFT }))),
+  accept(
+    "accept-escaped-key",
+    "The KEY spelled `\\u0061mount` is the key `amount` after parsing: the closed world and the hash both " +
+      "see the parsed name, so this binds the base value.",
+    BASE,
+    escapedKeyText,
+    "accept-base",
+  ),
+  accept("accept-drift-amount", "One character of the amount (12345 -> 12346) moves the hash.", withMembers({ amount: "12346" })),
+  accept("accept-drift-from", "One character of the source account moves the hash.", withMembers({ fromAccount: ACCT_3 })),
+  accept("accept-drift-to", "One character of the destination account moves the hash.", withMembers({ toAccount: ACCT_3 })),
+  accept("accept-drift-ledger", "One character of the ledger moves the hash.", withMembers({ ledger: LEDGER_2 })),
+  accept("accept-drift-salt", "One character of the salt moves the hash.", withMembers({ salt: SALT_A_DRIFT })),
   accept(
     "accept-direction-swap",
     "The same two accounts in the opposite direction is a DIFFERENT transfer, with a different hash and display.",
-    jsonText(withMembers({ fromAccount: ACCT_2, toAccount: ACCT_1 })),
+    withMembers({ fromAccount: ACCT_2, toAccount: ACCT_1 }),
   ),
-  accept("accept-amount-min", "The smallest amount, 1 whole unit.", jsonText(withMembers({ amount: "1" }))),
-  accept("accept-amount-max", "The largest amount: 15 nines, below 2^53.", jsonText(withMembers({ amount: "9".repeat(15) }))),
-  accept("accept-identifier-64", "64 characters is the identifier bound, not 63.", jsonText(withMembers({ fromAccount: "a".repeat(64) }))),
-  accept("accept-identifier-one-char", "A one-character identifier: its first and last character are the same letter.", jsonText(withMembers({ ledger: "a" }))),
-  accept("accept-identifier-inner-hyphens", "Hyphens and digits are legal inside an identifier.", jsonText(withMembers({ toAccount: "a-1-b" }))),
+  accept("accept-amount-min", "The smallest amount, 1 whole unit.", withMembers({ amount: "1" })),
+  accept("accept-amount-max", "The largest amount: 15 nines, below 2^53.", withMembers({ amount: "9".repeat(15) })),
+  // Both identifier bounds, for EVERY identifier member: a per-member bound that differs from the
+  // others would otherwise pass the corpus.
+  accept("accept-from-64", "fromAccount: 64 characters is the bound, not 63 (reject-from-65-chars holds the other side).", withMembers({ fromAccount: "a".repeat(64) })),
+  accept("accept-to-64", "toAccount: 64 characters is the bound (reject-to-65-chars holds the other side).", withMembers({ toAccount: "b".repeat(64) })),
+  accept("accept-ledger-64", "ledger: 64 characters is the bound (reject-ledger-65-chars holds the other side).", withMembers({ ledger: "l".repeat(64) })),
+  accept("accept-from-1-char", "fromAccount: one character, first and last at once.", withMembers({ fromAccount: "a" })),
+  accept("accept-to-1-char", "toAccount: one character, first and last at once.", withMembers({ toAccount: "b" })),
+  accept("accept-ledger-1-char", "ledger: one character, first and last at once.", withMembers({ ledger: "a" })),
+  accept("accept-identifier-inner-hyphens", "Hyphens and digits are legal inside an identifier.", withMembers({ toAccount: "a-1-b" })),
   accept(
     "accept-salt-all-zero",
     "An all-zero salt is ACCEPTED: a projection cannot test randomness. This pins the non-claim that salt " +
       "privacy depends on an honest producer (NON-CLAIMS.md §S7).",
-    jsonText(withMembers({ salt: "0".repeat(32) })),
+    withMembers({ salt: "0".repeat(32) }),
   ),
 ];
 vectors.push(...accepts);
 
 // ── REFUSALS: parse layer (the kernel parser's reasons, measured) ────────────────────────────────
-const P = "TRANSFER_PARSE";
+const P: LedgerTransferRefusalCode = "TRANSFER_PARSE";
 const tail = baseText.slice(`{"amount":"12345",`.length);
 if (`{"amount":"12345",${tail}` !== baseText) fail("base text does not start with the amount member");
 const parseVectors: ParamsVector[] = [
@@ -364,7 +453,7 @@ const parseVectors: ParamsVector[] = [
 vectors.push(...parseVectors);
 
 // ── REFUSALS: not an object ──────────────────────────────────────────────────────────────────────
-const N = "TRANSFER_NOT_OBJECT";
+const N: LedgerTransferRefusalCode = "TRANSFER_NOT_OBJECT";
 vectors.push(
   reject("reject-not-object-null", "not-object", "null is not a params object.", "null", N),
   reject("reject-not-object-array", "not-object", "An array is not a params object.", "[]", N),
@@ -374,7 +463,7 @@ vectors.push(
 );
 
 /** absent / null / empty — one refusal for one member (an optional bound concept is a second spelling of absent). */
-function missing(member: string, group: Group, code: string, label: string): ParamsVector[] {
+function missing(member: string, group: Group, code: LedgerTransferRefusalCode, label: string): ParamsVector[] {
   return [
     reject(`reject-${label}-absent`, group, `\`${member}\` missing entirely.`, jsonText(withoutMember(member)), code),
     reject(`reject-${label}-null`, group, `\`${member}\`: null is not a value.`, jsonText(withMembers({ [member]: null })), code),
@@ -383,7 +472,7 @@ function missing(member: string, group: Group, code: string, label: string): Par
 }
 
 // ── REFUSALS: amount ─────────────────────────────────────────────────────────────────────────────
-const A = "TRANSFER_AMOUNT_INVALID";
+const A: LedgerTransferRefusalCode = "TRANSFER_AMOUNT_INVALID";
 const amountCase = (name: string, note: string, value: unknown): ParamsVector =>
   reject(`reject-amount-${name}`, "amount", note, jsonText(withMembers({ amount: value })), A);
 vectors.push(
@@ -409,7 +498,7 @@ vectors.push(
 );
 
 // ── REFUSALS: identifiers ────────────────────────────────────────────────────────────────────────
-const F = "TRANSFER_FROM_INVALID";
+const F: LedgerTransferRefusalCode = "TRANSFER_FROM_INVALID";
 const fromCase = (name: string, note: string, value: unknown): ParamsVector =>
   reject(`reject-from-${name}`, "from", note, jsonText(withMembers({ fromAccount: value })), F);
 vectors.push(
@@ -424,7 +513,7 @@ vectors.push(
   fromCase("zero-width-space", "U+200B is invisible.", "acct-example​-1"),
   fromCase("cyrillic-homoglyph", "U+0430 CYRILLIC SMALL A renders as `a` and is not ASCII.", "acct-exаmple-1"),
   fromCase("rtl-override", "U+202E reverses the visual order of what follows.", "acct-‮example-1"),
-  fromCase("65-chars", "65 characters is past the bound (accept-identifier-64 holds the other side).", "a".repeat(65)),
+  fromCase("65-chars", "65 characters is past the bound (accept-from-64 holds the other side).", "a".repeat(65)),
   fromCase("leading-hyphen", "The first character must be a letter.", `-${ACCT_1}`),
   fromCase("leading-digit", "The first character must be a letter.", "1acct-example"),
   fromCase("trailing-hyphen", "The last character must be a letter or digit.", `${ACCT_1}-`),
@@ -434,7 +523,7 @@ vectors.push(
   fromCase("slash", "`/` is not in the charset.", "acct/example-1"),
 );
 
-const L = "TRANSFER_LEDGER_INVALID";
+const L: LedgerTransferRefusalCode = "TRANSFER_LEDGER_INVALID";
 vectors.push(
   ...missing("ledger", "ledger", L, "ledger"),
   reject("reject-ledger-number", "ledger", "A number is not an identifier.", jsonText(withMembers({ ledger: 7 })), L),
@@ -443,7 +532,7 @@ vectors.push(
   reject("reject-ledger-escaped-ansi", "ledger", "An escaped ANSI clear-screen sequence.", jsonText(withMembers({ ledger: "ledger-\u001b[2Jexample-1" })), L),
 );
 
-const T = "TRANSFER_TO_INVALID";
+const T: LedgerTransferRefusalCode = "TRANSFER_TO_INVALID";
 vectors.push(
   ...missing("toAccount", "to", T, "to"),
   reject("reject-to-boolean", "to", "A boolean is not an identifier.", jsonText(withMembers({ toAccount: false })), T),
@@ -453,7 +542,7 @@ vectors.push(
 );
 
 // ── REFUSALS: unit ───────────────────────────────────────────────────────────────────────────────
-const U = "TRANSFER_UNIT_INVALID";
+const U: LedgerTransferRefusalCode = "TRANSFER_UNIT_INVALID";
 vectors.push(
   reject("reject-unit-lowercase", "unit", "The enum is exact; case variants are refused.", jsonText(withMembers({ unit: "xts" })), U),
   reject("reject-unit-trailing-space", "unit", "No whitespace.", jsonText(withMembers({ unit: "XTS " })), U),
@@ -464,7 +553,7 @@ vectors.push(
 );
 
 // ── REFUSALS: salt ───────────────────────────────────────────────────────────────────────────────
-const S = "TRANSFER_SALT_INVALID";
+const S: LedgerTransferRefusalCode = "TRANSFER_SALT_INVALID";
 vectors.push(
   reject("reject-salt-uppercase", "salt", "Uppercase hex is refused, never normalized.", jsonText(withMembers({ salt: SALT_A.toUpperCase() })), S),
   reject("reject-salt-31-hex", "salt", "31 hex characters.", jsonText(withMembers({ salt: SALT_A.slice(0, 31) })), S),
@@ -475,7 +564,7 @@ vectors.push(
 );
 
 // ── REFUSALS: the closed world ───────────────────────────────────────────────────────────────────
-const X = "TRANSFER_UNRECOGNIZED_MEMBER";
+const X: LedgerTransferRefusalCode = "TRANSFER_UNRECOGNIZED_MEMBER";
 const extras: Array<[string, string, Record<string, unknown>]> = [
   ["memo", "Free text the approver would not see.", { memo: "rent" }],
   ["fee", "A fee is policy, not a bound member.", { fee: "1" }],
@@ -497,7 +586,7 @@ for (const [name, why, o] of extras) {
 }
 
 // ── REFUSALS: same account ───────────────────────────────────────────────────────────────────────
-const SA = "TRANSFER_SAME_ACCOUNT";
+const SA: LedgerTransferRefusalCode = "TRANSFER_SAME_ACCOUNT";
 vectors.push(
   reject("reject-same-account", "same-account", "A transfer from an account to itself is refused.", jsonText(withMembers({ toAccount: ACCT_1 })), SA),
   reject("reject-same-account-escaped-spelling", "same-account",
@@ -506,22 +595,51 @@ vectors.push(
 );
 
 // ── PRECEDENCE ───────────────────────────────────────────────────────────────────────────────────
+/**
+ * A precedence vector: `fixture` violates exactly two rules, `winner` and `beats`. The generator
+ * proves the second violation is really there — repairing the winner must yield `beats` — so the
+ * vector distinguishes the normative order from the reversed one instead of passing either way.
+ */
+function precedes(
+  name: string, note: string, fixture: Record<string, unknown>,
+  winner: LedgerTransferRefusalCode, beats: LedgerTransferRefusalCode,
+): ParamsVector {
+  const repaired = projectLedgerTransfer(JSON.stringify(repair(fixture, winner)));
+  if (repaired.ok || repaired.code !== beats) {
+    fail(`${name}: repairing ${winner} must leave ${beats}, got ${repaired.ok ? "ACCEPT" : repaired.code}`);
+  }
+  const v = reject(name, "precedence", note, jsonText(fixture), winner);
+  v.beats = beats;
+  return v;
+}
 vectors.push(
   reject("reject-precedence-parse-first", "precedence",
     "A duplicate key, a bad amount and an extra member at once: the parse layer answers first.",
     `{"amount":"012","amount":"012","memo":"x",${tail}`, P, "duplicate object key 'amount'"),
-  reject("reject-precedence-amount-before-from", "precedence",
-    "Bad amount and bad fromAccount: members are checked in JCS key order, so amount answers.",
-    jsonText(withMembers({ amount: "0", fromAccount: "ACCT" })), A),
-  reject("reject-precedence-unit-before-closed-world", "precedence",
+  precedes("reject-precedence-amount-before-from",
+    "Bad amount and bad fromAccount: amount is checked first.",
+    withMembers({ amount: "0", fromAccount: "ACCT" }), A, F),
+  precedes("reject-precedence-from-before-ledger",
+    "Bad fromAccount and empty ledger: fromAccount is checked before ledger.",
+    withMembers({ fromAccount: "ACCT", ledger: "" }), F, L),
+  precedes("reject-precedence-ledger-before-salt",
+    "Empty ledger and empty salt: ledger is checked before salt.",
+    withMembers({ ledger: "", salt: "" }), L, S),
+  precedes("reject-precedence-salt-before-to",
+    "Uppercase salt and empty toAccount: salt is checked before toAccount.",
+    withMembers({ salt: SALT_A.toUpperCase(), toAccount: "" }), S, T),
+  precedes("reject-precedence-to-before-unit",
+    "Empty toAccount and a foreign unit: toAccount is checked before unit.",
+    withMembers({ toAccount: "", unit: "USD" }), T, U),
+  precedes("reject-precedence-unit-before-closed-world",
     "Bad unit and an extra member: member rules run before the closed world.",
-    jsonText({ ...withMembers({ unit: "USD" }), memo: "x" }), U),
-  reject("reject-precedence-closed-world-before-same-account", "precedence",
+    { ...withMembers({ unit: "USD" }), memo: "x" }, U, X),
+  precedes("reject-precedence-closed-world-before-same-account",
     "An extra member and a self-transfer: the closed world runs before the two-member rule.",
-    jsonText({ ...withMembers({ toAccount: ACCT_1 }), memo: "x" }), X),
-  reject("reject-precedence-salt-before-same-account", "precedence",
-    "Bad salt and a self-transfer: member rules run before the two-member rule.",
-    jsonText(withMembers({ salt: SALT_A.toUpperCase(), toAccount: ACCT_1 })), S),
+    { ...withMembers({ toAccount: ACCT_1 }), memo: "x" }, X, SA),
+  precedes("reject-precedence-salt-before-same-account",
+    "Bad salt and a self-transfer: member rules run before the two-member rule (a non-adjacent pair).",
+    withMembers({ salt: SALT_A.toUpperCase(), toAccount: ACCT_1 }), S, SA),
 );
 
 // ── CORPUS-WIDE CHECKS ───────────────────────────────────────────────────────────────────────────
@@ -539,10 +657,24 @@ for (const g of Object.keys(GROUP_COUNTS) as Group[]) {
 }
 
 const seenCodes = new Set(params.filter((v) => !v.expect.ok).map((v) => (v.expect as RejectExpect).reasonCode));
-for (const c of seenCodes) if (!(REFUSAL_CODES as readonly string[]).includes(c)) fail(`unknown refusal code ${c}`);
+for (const c of seenCodes) if (!REFUSAL_CODES.includes(c)) fail(`unknown refusal code ${c}`);
 for (const c of REFUSAL_CODES) {
   if (!UNREACHABLE_CODES.has(c) && !seenCodes.has(c)) fail(`refusal code ${c} has no vector`);
   if (UNREACHABLE_CODES.has(c) && seenCodes.has(c)) fail(`refusal code ${c} is declared unreachable yet a vector reaches it`);
+}
+
+// Every adjacent pair of the refusal order is pinned by a vector that violates both rules.
+const pinnedPairs = new Set(
+  params.filter((v) => v.beats !== undefined).map((v) => `${(v.expect as RejectExpect).reasonCode}>${v.beats}`),
+);
+for (const [first, second] of ADJACENT_PAIRS) {
+  if (!pinnedPairs.has(`${first}>${second}`)) fail(`no precedence vector pins ${first} before ${second}`);
+}
+for (const v of params) {
+  if (v.beats !== undefined && (v.group !== "precedence" || v.expect.ok)) fail(`${v.name}: beats belongs on precedence refusals only`);
+  if (v.beats !== undefined && CODE_ORDER[(v.expect as RejectExpect).reasonCode] >= CODE_ORDER[v.beats]) {
+    fail(`${v.name}: ${(v.expect as RejectExpect).reasonCode} does not precede ${v.beats} in the normative order`);
+  }
 }
 
 const acceptVectors = params.filter((v) => v.expect.ok);
@@ -583,7 +715,9 @@ const out = {
     "is a pure function of the fixtures, which are synthetic by construction (acct-example-N, ledger-example-N, " +
     "the ISO 4217 testing code XTS, counting-pattern salts). ACCEPT vectors pin paramsHash, canonical and the " +
     "full display; REJECT vectors pin reasonCode, and TRANSFER_PARSE vectors also pin reasonContains (the " +
-    "reference kernel parser's reason; informative for other implementations). paramsHex carries inputs no " +
+    "reference kernel parser's reason; informative for other implementations). A precedence vector's `beats` " +
+    "names the second rule its input violates, which reasonCode must win over; `equivalentTo` names the accept " +
+    "vector whose binding an alternative spelling must equal. paramsHex carries inputs no " +
     "text form can (bytes are lowercase hex); every other vector carries paramsText. The pinned hashes are " +
     "NORMATIVE EXPECTED VALUES, not attestations about any running system (NON-CLAIMS.md §S7). " +
     "TRANSFER_CANONICAL_REPARSE guards the render node and is unreachable by any input, so no vector carries it.",

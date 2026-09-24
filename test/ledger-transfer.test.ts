@@ -28,6 +28,7 @@ import {
   LEDGER_TRANSFER_DISPLAY_ID,
   projectLedgerTransfer,
   type LedgerTransferResult,
+  type LedgerTransferRefusalCode,
 } from "../src/ledger-transfer.js";
 import { projectionIdentityHash } from "../src/deploy-release.js";
 
@@ -41,12 +42,26 @@ const PIN_SCHEMA_HASH = "sha256:f34d508cfa9080eadaa771ed8852a0d34c09246d03f818d7
 const PIN_DISPLAY_HASH = "sha256:bb6e72d64700383a4ceabefeb8e8eb170a2877ca95a5522c90901466e9a421db";
 const PIN_PARAMS_HASH = "sha256:aa9256899837f204583f28e483ed67129b204e7edabf378eaf60f296915aebd0";
 
-/** The eleven codes of /1, in precedence order. */
-const CODES = [
-  "TRANSFER_PARSE", "TRANSFER_NOT_OBJECT", "TRANSFER_AMOUNT_INVALID", "TRANSFER_FROM_INVALID",
-  "TRANSFER_LEDGER_INVALID", "TRANSFER_SALT_INVALID", "TRANSFER_TO_INVALID", "TRANSFER_UNIT_INVALID",
-  "TRANSFER_UNRECOGNIZED_MEMBER", "TRANSFER_SAME_ACCOUNT", "TRANSFER_CANONICAL_REPARSE",
-];
+/**
+ * The eleven codes of /1 and their position in the normative refusal order. A Record over the
+ * published `LedgerTransferRefusalCode` union: a code missing here, or one the union does not name,
+ * is a compile error — the list is tied to the type rather than restated beside it.
+ */
+const CODE_ORDER: Readonly<Record<LedgerTransferRefusalCode, number>> = {
+  TRANSFER_PARSE: 0,
+  TRANSFER_NOT_OBJECT: 1,
+  TRANSFER_AMOUNT_INVALID: 2,
+  TRANSFER_FROM_INVALID: 3,
+  TRANSFER_LEDGER_INVALID: 4,
+  TRANSFER_SALT_INVALID: 5,
+  TRANSFER_TO_INVALID: 6,
+  TRANSFER_UNIT_INVALID: 7,
+  TRANSFER_UNRECOGNIZED_MEMBER: 8,
+  TRANSFER_SAME_ACCOUNT: 9,
+  TRANSFER_CANONICAL_REPARSE: 10,
+};
+const CODES: readonly LedgerTransferRefusalCode[] =
+  (Object.keys(CODE_ORDER) as LedgerTransferRefusalCode[]).sort((a, b) => CODE_ORDER[a] - CODE_ORDER[b]);
 
 // ── THE FIXTURE, SYNTHETIC BY CONSTRUCTION, SPELLED ONCE ─────────────────────────────────────────
 const ACCT_1 = "acct-example-1";
@@ -54,7 +69,7 @@ const ACCT_2 = "acct-example-2";
 const LEDGER_1 = "ledger-example-1";
 const SALT_A = "000102030405060708090a0b0c0d0e0f";
 const MEMBERS = ["amount", "fromAccount", "ledger", "salt", "toAccount", "unit"] as const;
-const MEMBER_CODE: Record<string, string> = {
+const MEMBER_CODE: Readonly<Record<(typeof MEMBERS)[number], LedgerTransferRefusalCode>> = {
   amount: "TRANSFER_AMOUNT_INVALID",
   fromAccount: "TRANSFER_FROM_INVALID",
   ledger: "TRANSFER_LEDGER_INVALID",
@@ -83,6 +98,7 @@ interface ParamsVector {
   paramsText?: string;
   paramsHex?: string;
   equivalentTo?: string;
+  beats?: string;
   expect: {
     ok: boolean;
     paramsHash?: string;
@@ -149,8 +165,8 @@ test("the corpus is the shape the runner expects and covers every class", () => 
   const counts: Record<string, number> = {};
   for (const v of paramsVectors) counts[v.group] = (counts[v.group] ?? 0) + 1;
   assert.deepEqual(counts, {
-    accept: 15, parse: 12, "not-object": 5, amount: 21, from: 21, ledger: 7, to: 7, unit: 8, salt: 8,
-    unrecognized: 14, "same-account": 2, precedence: 5,
+    accept: 20, parse: 12, "not-object": 5, amount: 21, from: 21, ledger: 7, to: 7, unit: 8, salt: 8,
+    unrecognized: 14, "same-account": 2, precedence: 9,
   });
   assert.equal(corpus.vectors.filter(isIdentity).length, 2);
 
@@ -164,7 +180,7 @@ test("the corpus is the shape the runner expects and covers every class", () => 
       assert.equal(typeof v.expect.canonical, "string", `${v.name}: accept must pin its canonical bytes`);
       assert.equal(Object.keys(v.expect.display ?? {}).length, 6, `${v.name}: accept must pin the full six-row display`);
     } else {
-      assert.ok(CODES.includes(String(v.expect.reasonCode)), `${v.name}: unknown code ${v.expect.reasonCode}`);
+      assert.ok((CODES as readonly string[]).includes(String(v.expect.reasonCode)), `${v.name}: unknown code ${v.expect.reasonCode}`);
       if (v.expect.reasonCode === "TRANSFER_PARSE") {
         assert.ok((v.expect.reasonContains ?? "").length > 0, `${v.name}: a parse vector must pin the kernel reason`);
       } else {
@@ -175,7 +191,7 @@ test("the corpus is the shape the runner expects and covers every class", () => 
   assert.ok(paramsVectors.filter((v) => typeof v.paramsHex === "string").length <= 2, "at most two byte-level vectors");
 
   // Every reachable code has a vector; the render-node guard has none (no input reaches it).
-  const codes = new Set(paramsVectors.filter((v) => !v.expect.ok).map((v) => v.expect.reasonCode));
+  const codes = new Set<string | undefined>(paramsVectors.filter((v) => !v.expect.ok).map((v) => v.expect.reasonCode));
   for (const c of CODES) {
     if (c === "TRANSFER_CANONICAL_REPARSE") assert.ok(!codes.has(c), "the render-node guard must be unreachable");
     else assert.ok(codes.has(c), `no vector exercises ${c}`);
@@ -202,7 +218,47 @@ test("accept vectors bind pairwise-distinct transfers, except the declared equiv
     assert.ok(!displays.has(shown), `${v.name}: two different transfers render the same display`);
     displays.add(shown);
   }
-  assert.equal(accepts.filter((v) => v.equivalentTo === "accept-base").length, 2);
+  assert.equal(accepts.filter((v) => v.equivalentTo === "accept-base").length, 3);
+});
+
+/** Remove exactly the violation `code` names from a parsed tuple (this suite's own repair, not the generator's). */
+function repairViolation(o: Record<string, unknown>, code: string): Record<string, unknown> {
+  const c: Record<string, unknown> = { ...o };
+  const member = MEMBERS.find((m) => MEMBER_CODE[m] === code);
+  if (member !== undefined) c[member] = baseParams()[member];
+  else if (code === "TRANSFER_UNRECOGNIZED_MEMBER") {
+    for (const k of Object.keys(c)) if (!(MEMBERS as readonly string[]).includes(k)) delete c[k];
+  } else if (code === "TRANSFER_SAME_ACCOUNT") c["toAccount"] = c["fromAccount"] === ACCT_2 ? "acct-example-3" : ACCT_2;
+  else assert.fail(`no repair for ${code}`);
+  return c;
+}
+
+test("the corpus pins EVERY adjacent pair of the normative refusal order", () => {
+  // The chain from the first member rule to the two-member rule, derived from the code order. If every
+  // adjacent pair is pinned, an implementation that checks these rules in any other order inverts at
+  // least one pinned pair and fails the corpus.
+  const chain = CODES.slice(CODE_ORDER.TRANSFER_AMOUNT_INVALID, CODE_ORDER.TRANSFER_SAME_ACCOUNT + 1);
+  assert.equal(chain.length, 8);
+  const precedence = paramsVectors.filter((v) => v.beats !== undefined);
+  for (let i = 0; i + 1 < chain.length; i++) {
+    const [first, second] = [chain[i] as string, chain[i + 1] as string];
+    const pin = precedence.find((v) => v.expect.reasonCode === first && v.beats === second);
+    assert.ok(pin, `no precedence vector pins ${first} before ${second}`);
+  }
+  for (const v of precedence) {
+    assert.equal(v.group, "precedence");
+    assert.equal(v.expect.ok, false);
+    // Both violations must really be present: repairing the winner yields the loser, and repairing
+    // the loser still yields the winner. Parsed with JSON.parse — an independent read of the input.
+    const parsed = JSON.parse(String(v.paramsText)) as Record<string, unknown>;
+    const winner = String(v.expect.reasonCode);
+    const loser = String(v.beats);
+    assert.ok(CODE_ORDER[winner as LedgerTransferRefusalCode] < CODE_ORDER[loser as LedgerTransferRefusalCode], `${v.name}: winner must precede loser`);
+    const r1 = run(repairViolation(parsed, winner));
+    assert.ok(!r1.ok && r1.code === loser, `${v.name}: repairing ${winner} must leave ${loser}, got ${JSON.stringify(r1)}`);
+    const r2 = run(repairViolation(parsed, loser));
+    assert.ok(!r2.ok && r2.code === winner, `${v.name}: repairing ${loser} must leave ${winner}, got ${JSON.stringify(r2)}`);
+  }
 });
 
 // ── THE PINS, AGAINST THE MODULE DIRECTLY ────────────────────────────────────────────────────────
@@ -398,15 +454,21 @@ test("results are inert: value, display and identities are frozen and null-roote
   assert.throws(() => { (LEDGER_TRANSFER_SCHEMA_ID as { hash: string }).hash = "sha256:" + "0".repeat(64); }, TypeError);
 });
 
-test("canonical bytes equal the sorted-key template for every accept vector", () => {
-  for (const v of paramsVectors.filter((x) => x.expect.ok)) {
-    const r = projectLedgerTransfer(inputOf(v));
-    assert.ok(r.ok);
-    const p = r.value;
+test("for every accept, the pinned canonical bytes equal the template built from the INPUT, not from the output", () => {
+  // Independent read path: the vector's input text through JSON.parse (not the kernel's parser, not
+  // the implementation's returned tuple), then the §4.3 template, compared with the pinned bytes.
+  const accepts = paramsVectors.filter((x) => x.expect.ok);
+  assert.equal(accepts.length, 20);
+  for (const v of accepts) {
+    const p = JSON.parse(String(v.paramsText)) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(p).sort(), [...MEMBERS], `${v.name}: an accept input carries exactly the six members`);
+    for (const m of MEMBERS) assert.equal(typeof p[m], "string", `${v.name}: ${m} is a string`);
     const template =
-      `{"amount":"${p.amount}","fromAccount":"${p.fromAccount}","ledger":"${p.ledger}",` +
-      `"salt":"${p.salt}","toAccount":"${p.toAccount}","unit":"${p.unit}"}`;
-    assert.equal(r.canonical, template, `${v.name}: JCS output must equal the template`);
+      `{"amount":"${p["amount"]}","fromAccount":"${p["fromAccount"]}","ledger":"${p["ledger"]}",` +
+      `"salt":"${p["salt"]}","toAccount":"${p["toAccount"]}","unit":"${p["unit"]}"}`;
+    assert.equal(v.expect.canonical, template, `${v.name}: the pinned canonical bytes must equal the input's template`);
+    assert.equal(v.expect.paramsHash, "sha256:" + createHash("sha256").update(template, "utf8").digest("hex"),
+      `${v.name}: the pinned paramsHash must be SHA-256 of that template`);
   }
 });
 
@@ -419,10 +481,9 @@ test("anti-vacuity: a one-character drift in ANY pin fails the check that rests 
     const last = hash.slice(-1);
     return hash.slice(0, -1) + (last === "0" ? "1" : "0");
   };
-  const measured = "sha256:" + createHash("sha256").update(funcToString.call(projectLedgerTransfer), "utf8").digest("hex");
-  assert.equal(measured, PIN_IMPLEMENTATION, "control");
-  assert.notEqual(measured, drift(PIN_IMPLEMENTATION), "the implementation pin is not load-bearing");
-
+  // Whether the module's own implementation pin is load-bearing is measured mechanically by the
+  // `ledger-transfer-implementation-pin` knockout (scripts/lint-control-knockout.mjs), which drifts it
+  // by one character and requires this file to go red. What is checked here can fail on its own.
   const schema = (impl: string, kind: "actionSchema" | "displayProjection" = "actionSchema", id = "noa.ledger.transfer.schema", version = 1) =>
     projectionIdentityHash({ id, version, kind, implementation: impl });
   assert.equal(schema(PIN_IMPLEMENTATION), PIN_SCHEMA_HASH, "control");
@@ -430,11 +491,14 @@ test("anti-vacuity: a one-character drift in ANY pin fails the check that rests 
   assert.notEqual(schema(PIN_IMPLEMENTATION, "displayProjection"), PIN_SCHEMA_HASH, "`kind` does not affect the identity");
   assert.notEqual(schema(PIN_IMPLEMENTATION, "actionSchema", "noa.ledger.transfer.display"), PIN_SCHEMA_HASH, "`id` does not affect the identity");
   assert.notEqual(schema(PIN_IMPLEMENTATION, "actionSchema", "noa.ledger.transfer.schema", 2), PIN_SCHEMA_HASH, "`version` does not affect the identity");
-  assert.notEqual(schema(PIN_IMPLEMENTATION, "displayProjection", "noa.ledger.transfer.display"), drift(PIN_DISPLAY_HASH), "the display pin is not load-bearing");
 
-  const r = run(baseParams());
-  assert.ok(r.ok);
-  assert.notEqual(r.paramsHash, drift(PIN_PARAMS_HASH), "the paramsHash pin is not load-bearing");
+  // Every published copy of every pin agrees: the normative text states all four values verbatim, and
+  // an implementer reading the specification must reach the same bytes this suite checks.
+  const spec = readFileSync(join(ROOT, "docs", "ledger-transfer-spec.md"), "utf8");
+  for (const pin of [PIN_IMPLEMENTATION, PIN_SCHEMA_HASH, PIN_DISPLAY_HASH, PIN_PARAMS_HASH]) {
+    assert.ok(spec.includes(pin), `the specification does not state the pin ${pin}`);
+    assert.ok(!spec.includes(drift(pin)), `the specification states a drifted copy of ${pin}`);
+  }
 
   // The corpus's own copies must equal these literals.
   const schemaVec = corpus.vectors.find((v) => v.name === "identity-action-schema") as IdentityVector | undefined;

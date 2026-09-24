@@ -18,9 +18,9 @@ All notable changes to `noa-receipt` are documented here. The format follows
   `LEDGER_TRANSFER_IMPLEMENTATION_DIGEST` (recomputable from the published build), the spec and
   canonical-name constants, and the `LedgerTransferParams` / `LedgerTransferResult` /
   `LedgerTransferRefusalCode` / `LedgerTransferUnit` types. A generated, diff-gated corpus lands with
-  it (`conformance/ledger-transfer/vectors.json`, 127 vectors: 2 identity pins, 15 accepts, 110
-  refusals) over a synthetic fixture (`acct-example-N`, `ledger-example-N`, the ISO 4217 testing code
-  `XTS`). The reference Gate gains a sealed adapter for the action that is deliberately not
+  it (`conformance/ledger-transfer/vectors.json`, 136 vectors: 2 identity pins, 20 accepts, 114
+  refusals, with every adjacent pair of the refusal order pinned) over a synthetic fixture
+  (`acct-example-N`, `ledger-example-N`, the ISO 4217 testing code `XTS`). The reference Gate gains a sealed adapter for the action that is deliberately not
   registered. See `NON-CLAIMS.md` §S7. Additive: the frozen `noa.receipt/0.1` wire format gains no
   field.
 - `noa.deploy.release/1` publishes the wire form of the deployment action bind
