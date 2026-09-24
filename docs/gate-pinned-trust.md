@@ -183,10 +183,12 @@ It follows the key file's owner rule: the gate's uid or root, no group or other 
 
 The read, the comparison and the write happen under one exclusive lock,
 `<NOA_GATE_KEY_FILE>.roster-state.lock`. The lock is created `O_EXCL | O_NOFOLLOW` at mode 0600 and
-holds the booting process's pid. A second boot on the same key file while a live process holds the lock
-is `STATE_LOCKED`. A lock whose holder has died is taken over once, by identity: it is renamed aside
-and deleted only if it is the same file (device and inode) that was read, and otherwise put back and
-refused `STATE_LOCKED`. A boot releases only the lock file it created. A lock that names no readable
+holds the booting process's pid and a fresh random nonce. A second boot on the same key file while a live
+process holds the lock is `STATE_LOCKED`. A lock whose holder has died is taken over once, by identity:
+it is renamed aside and deleted only if it is the same lock (device, inode and bytes) that was read, and
+otherwise put back and refused `STATE_LOCKED`. The bytes are part of the identity because Linux gives a
+freed inode number to the next file created at once, so a fresh lock can carry a removed lock's device
+and inode. A boot releases only the lock it created (the same three). A lock that names no readable
 pid is `STATE_LOCKED` until an administrator removes it. The key file's directory must be writable by
 the gate, because the lock and the state file live there; if it is not, the boot is refused with
 `STATE_DIR_NOT_WRITABLE`. At commit the state is read and

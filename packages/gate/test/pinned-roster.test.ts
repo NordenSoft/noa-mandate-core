@@ -879,6 +879,44 @@ test("K13 lock release — a boot releases only the lock file it created, never 
   rmSync(lockPath);
 });
 
+// Linux hands a freed inode number to the next file created on that filesystem at once, so device and
+// inode alone cannot tell a fresh lock from the one that was read (both tests above failed on Linux for
+// that reason while passing on macOS). Rewriting a lock IN PLACE keeps its device and inode and changes
+// only its bytes, which reproduces that situation deterministically on every platform.
+test("[PROOF:GATE-LOCK-IDENTITY-BYTES] K13 lock identity — a lock with the same device and inode but other bytes is another boot's lock: a takeover refuses it and a release leaves it", () => {
+  const world = newWorld();
+  const disk = onDisk(world, rosterDoc(world, NOW));
+  const lockPath = `${disk.keyFile}.roster-state.lock`;
+  const otherLock = `31337\n${"a".repeat(32)}\n`;
+
+  // Takeover: B reads a dead holder's lock; before B acts, that same inode comes to hold another boot's lock.
+  writeFileSync(lockPath, "424242\n", { mode: 0o600 });
+  const staleInode = statSync(lockPath).ino;
+  const b = loadPinnedTrust({
+    ...disk.input,
+    isProcessAlive: () => {
+      writeFileSync(lockPath, otherLock);
+      return false;
+    },
+  });
+  assert.equal(b.ok, false, "consequence: a boot must not take over a lock that is no longer the one it read");
+  refusedWith(b, "STATE_LOCKED");
+  assert.equal(statSync(lockPath).ino, staleInode, "fixture: the other boot's lock kept the stale lock's inode");
+  assert.equal(readPrivate(lockPath).text, otherLock, "the other boot's lock is back in place");
+  rmSync(lockPath);
+
+  // Release: this boot's lock is replaced in place by another boot's (same inode, other bytes).
+  const boot = loadPinnedTrust(disk.input);
+  booted(boot);
+  const heldInode = statSync(lockPath).ino;
+  writeFileSync(lockPath, otherLock);
+  assert.equal(statSync(lockPath).ino, heldInode, "fixture: the other boot's lock kept this lock's inode");
+  boot.release();
+  assert.equal(existsSync(lockPath), true, "consequence: another boot's lock must survive this boot's release");
+  assert.equal(readPrivate(lockPath).text, otherLock);
+  rmSync(lockPath);
+});
+
 test("stage 11 — a key directory the gate cannot write is STATE_DIR_NOT_WRITABLE, not a lock someone must remove", { skip: process.geteuid?.() === 0 ? "root ignores directory permissions" : false }, () => {
   const world = newWorld();
   const disk = onDisk(world, rosterDoc(world, NOW));

@@ -1033,13 +1033,13 @@ function acquireStateLock(lockPath: string, isAlive: (pid: number) => boolean): 
     if (a.kind === "unwritable") {
       return bootRefusal("STATE_DIR_NOT_WRITABLE", `${a.detail}; the key file's directory must be writable by the gate (the high-water state and its lock live there)`);
     }
-    if (a.holderPid === null || a.holderId === null) {
+    if (a.holderPid === null || a.holderIdentity === null) {
       return bootRefusal("STATE_LOCKED", `${a.detail} and names no readable holder; an administrator must inspect and remove it`);
     }
     if (isAlive(a.holderPid)) {
       return bootRefusal("STATE_LOCKED", `the roster high-water state is locked by live process ${a.holderPid}; another gate is starting on this key file`);
     }
-    if (attempt === 0 && takeOverStaleLock(lockPath, a.holderId) === "changed") {
+    if (attempt === 0 && takeOverStaleLock(lockPath, a.holderIdentity) === "changed") {
       return bootRefusal("STATE_LOCKED", `${JSON.stringify(lockPath)} changed hands while its dead holder's lock was being taken over; another gate is starting on this key file`);
     }
   }

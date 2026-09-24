@@ -1869,6 +1869,10 @@
     "GATE-REPORT-OWNERSHIP": {
       "file": "packages/gate/test/cross-agent-authz.test.ts",
       "marker": "[PROOF:GATE-REPORT-OWNERSHIP]"
+    },
+    "GATE-LOCK-IDENTITY-BYTES": {
+      "file": "packages/gate/test/pinned-roster.test.ts",
+      "marker": "[PROOF:GATE-LOCK-IDENTITY-BYTES]"
     }
   },
   "exceptions": {

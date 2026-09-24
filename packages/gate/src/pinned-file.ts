@@ -326,15 +326,45 @@ export function writeFileAtomic(filePath: string, bytes: Uint8Array): { ok: true
 }
 
 /**
+ * A lock file's identity: the device and inode `fstat` reports AND the file's exact bytes. Device and
+ * inode alone are not an identity over time: Linux hands a freed inode number to the next file created
+ * on that filesystem at once (measured on overlayfs, 20 of 20 unlink-then-create pairs; APFS, 0 of 20),
+ * so a fresh lock created after a stale one was removed can carry the stale lock's device AND inode.
+ * Every lock this module creates therefore carries a fresh random nonce, which makes its bytes differ
+ * from every earlier lock's, and a lock matches only when device, inode and bytes all match.
+ */
+export interface LockIdentity {
+  readonly id: FileId;
+  readonly bytes: Uint8Array;
+}
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+const sameLock = (a: LockIdentity, b: LockIdentity): boolean => sameFile(a.id, b.id) && sameBytes(a.bytes, b.bytes);
+
+/** How a lock file is read back: no symlink, a regular 0600-style file, one link, small. */
+const LOCK_READ_POLICY: PinnedReadPolicy = { maxBytes: 64, forbiddenModeBits: 0o022, requireSingleLink: true, ownerAllowed: null, checkAncestors: false };
+
+/** The identity of the lock file at `lockPath` now, or `null` when it cannot be read as one. */
+function readLockIdentity(lockPath: string): LockIdentity | null {
+  const r = readPinnedFile(lockPath, LOCK_READ_POLICY);
+  return r.ok ? { id: r.id, bytes: r.bytes } : null;
+}
+
+/**
  * An exclusive lock file: created `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW` at 0600 and holding the
- * creating process's pid. Existence IS the lock. `release` removes ONLY the file this attempt created
- * (same device and inode): if the path now names another boot's lock, that lock is left alone. When the
- * file already exists its holder's pid and identity are returned, so the caller can decide whether the
- * holder is alive and take a dead holder's lock over by identity. Never throws.
+ * creating process's pid and a fresh random nonce (`<pid>\n<32 hex>\n`). Existence IS the lock.
+ * `release` removes ONLY the lock this attempt created (same device, inode AND bytes): if the path now
+ * names another boot's lock, even one that reuses this lock's inode number, that lock is left alone.
+ * When the file already exists its holder's pid and identity are returned, so the caller can decide
+ * whether the holder is alive and take a dead holder's lock over by identity. A holder file of the
+ * older `<pid>\n` form is still read. Never throws.
  */
 export type LockAttempt =
   | { readonly ok: true; release(): void }
-  | { readonly ok: false; readonly kind: "held"; readonly holderPid: number | null; readonly holderId: FileId | null; readonly detail: string }
+  | { readonly ok: false; readonly kind: "held"; readonly holderPid: number | null; readonly holderIdentity: LockIdentity | null; readonly detail: string }
   | { readonly ok: false; readonly kind: "unwritable"; readonly detail: string };
 
 export function tryCreateLock(lockPath: string): LockAttempt {
@@ -344,15 +374,16 @@ export function tryCreateLock(lockPath: string): LockAttempt {
   } catch (err) {
     if (thrownCode(err) === "EEXIST") {
       const holder = readLockHolder(lockPath);
-      return { ok: false, kind: "held", holderPid: holder?.pid ?? null, holderId: holder?.id ?? null, detail: `${JSON.stringify(lockPath)} exists` };
+      return { ok: false, kind: "held", holderPid: holder?.pid ?? null, holderIdentity: holder?.identity ?? null, detail: `${JSON.stringify(lockPath)} exists` };
     }
     return { ok: false, kind: "unwritable", detail: `${JSON.stringify(lockPath)} could not be created (${describeThrown(err)})` };
   }
-  let id: FileId;
+  let own: LockIdentity;
   try {
+    const bytes = new TextEncoder().encode(`${process.pid}\n${randomBytes(16).toString("hex")}\n`);
     const st = fstatSync(fd);
-    id = { dev: st.dev, ino: st.ino };
-    writeSync(fd, `${process.pid}\n`);
+    own = { id: { dev: st.dev, ino: st.ino }, bytes };
+    writeSync(fd, bytes);
     fsyncSync(fd);
   } catch (err) {
     closeSync(fd);
@@ -371,9 +402,11 @@ export function tryCreateLock(lockPath: string): LockAttempt {
       if (released) return;
       released = true;
       try {
-        // Only the inode this attempt created: after a takeover race the path may name another boot's
-        // live lock, and deleting THAT would let a third boot in.
-        if (sameFile(id, lstatSync(lockPath))) unlinkSync(lockPath);
+        // Only the lock this attempt created: after a takeover race the path may name another boot's
+        // live lock, even under this lock's recycled inode number, and deleting THAT would let a third
+        // boot in.
+        const now = readLockIdentity(lockPath);
+        if (now !== null && sameLock(own, now)) unlinkSync(lockPath);
       } catch {
         // already gone: an administrator removed it, and the next holder will re-check the state
       }
@@ -381,42 +414,56 @@ export function tryCreateLock(lockPath: string): LockAttempt {
   };
 }
 
-/** The pid and identity of an existing lock file, or `null` when it cannot be read as one. */
-function readLockHolder(lockPath: string): { pid: number; id: FileId } | null {
-  const r = readPinnedFile(lockPath, { maxBytes: 64, forbiddenModeBits: 0o022, requireSingleLink: true, ownerAllowed: null, checkAncestors: false });
-  if (!r.ok) return null;
-  const text = new TextDecoder().decode(r.bytes).trim();
-  if (text.length === 0 || text.length > 10) return null;
-  for (let i = 0; i < text.length; i++) {
-    const c = text.charCodeAt(i);
-    if (c < 0x30 || c > 0x39) return null;
+const isDigits = (s: string): boolean => {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x30 || c > 0x39) return false;
   }
-  const pid = Number(text);
-  return pid > 0 ? { pid, id: r.id } : null;
+  return s.length > 0;
+};
+const isNonce = (s: string): boolean => {
+  if (s.length !== 32) return false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (!((c >= 0x30 && c <= 0x39) || (c >= 0x61 && c <= 0x66))) return false;
+  }
+  return true;
+};
+
+/**
+ * The pid and identity of an existing lock file, or `null` when it cannot be read as one: `<pid>` on
+ * the first line, optionally followed by one line holding a 32-hex nonce, and nothing else.
+ */
+function readLockHolder(lockPath: string): { pid: number; identity: LockIdentity } | null {
+  const identity = readLockIdentity(lockPath);
+  if (identity === null) return null;
+  const lines = new TextDecoder().decode(identity.bytes).trim().split("\n");
+  if (lines.length > 2) return null;
+  const pidText = lines[0]!.trim();
+  if (!isDigits(pidText) || pidText.length > 10) return null;
+  if (lines.length === 2 && !isNonce(lines[1]!.trim())) return null;
+  const pid = Number(pidText);
+  return pid > 0 ? { pid, identity } : null;
 }
 
 /**
  * Take over a lock whose holder was found DEAD, atomically: rename it aside under a unique name, then
- * check that the file now aside IS the one that was read (same device and inode). Only then is it
- * deleted. If it is not — another boot replaced the stale lock with its own live one between our read
- * and our rename — it is put back (a hard link, which never overwrites a newer lock) and the takeover
- * reports "changed". Removing the stale lock by PATH instead let two boots that both saw the dead
- * holder each delete the other's fresh lock and both proceed. Never throws.
+ * check that the file now aside IS the one that was read (same device, inode AND bytes). Only then is
+ * it deleted. If it is not — another boot replaced the stale lock with its own live one between our
+ * read and our rename, possibly under the stale lock's recycled inode number — it is put back (a hard
+ * link, which never overwrites a newer lock) and the takeover reports "changed". Removing the stale
+ * lock by PATH instead let two boots that both saw the dead holder each delete the other's fresh lock
+ * and both proceed. Never throws.
  */
-export function takeOverStaleLock(lockPath: string, expected: FileId): "taken" | "gone" | "changed" {
+export function takeOverStaleLock(lockPath: string, expected: LockIdentity): "taken" | "gone" | "changed" {
   const aside = `${lockPath}.stale-${randomBytes(8).toString("hex")}`;
   try {
     renameSync(lockPath, aside);
   } catch (err) {
     return thrownCode(err) === "ENOENT" ? "gone" : "changed";
   }
-  let moved;
-  try {
-    moved = lstatSync(aside);
-  } catch {
-    return "changed";
-  }
-  if (sameFile(expected, moved)) {
+  const moved = readLockIdentity(aside);
+  if (moved !== null && sameLock(expected, moved)) {
     try {
       unlinkSync(aside);
     } catch {
