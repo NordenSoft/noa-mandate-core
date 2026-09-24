@@ -22,7 +22,7 @@ import { randomUUID, randomBytes } from "node:crypto";
 import type { RelayConfig } from "./config.js";
 import { classifyManifestPut, ManifestPutConflictError, type Store } from "./store.js";
 import type { PushProvider, PushMessage } from "./push.js";
-import { verifyReceiptSignature, safeRefHash, inertSnapshot } from "./crypto.js";
+import { verifyReceiptSignature, safeRefHash, inertSnapshot, isStrictEd25519PublicKeyHex } from "./crypto.js";
 import { hashSecret } from "./auth.js";
 import type {  AgentRecord,
   DeviceRecord,
@@ -302,7 +302,7 @@ export class RelayEngine {
     if (!token || !kid || !publicKeyHex) {
       return err(400, "MISSING_FIELDS", { need: ["token", "kid", "publicKeyHex"] });
     }
-    if (!isRawEd25519Hex(publicKeyHex)) return err(422, "BAD_PUBLIC_KEY");
+    if (!isRawEd25519Hex(publicKeyHex) || !isStrictEd25519PublicKeyHex(publicKeyHex)) return err(422, "BAD_PUBLIC_KEY");
 
     // NAMESPACE, CHECKED BEFORE ANYTHING ELSE. An agent token must not redeem as a device and vice
     // versa: the two mint different authorities, and a confusion here hands an approver key to an
@@ -375,7 +375,7 @@ export class RelayEngine {
     const publicKeyHex = asString(input["publicKeyHex"]);
     const custodyTier = asString(input["custodyTier"]) ?? "software-browser";
     if (!kid || !publicKeyHex) return err(400, "MISSING_FIELDS", { need: ["kid", "publicKeyHex"] });
-    if (!isRawEd25519Hex(publicKeyHex)) return err(422, "BAD_PUBLIC_KEY");
+    if (!isRawEd25519Hex(publicKeyHex) || !isStrictEd25519PublicKeyHex(publicKeyHex)) return err(422, "BAD_PUBLIC_KEY");
     if (this.store.getDeviceByKid(kid)) return err(409, "KID_ALREADY_REGISTERED");
 
     const deviceSecret = "noa_device_" + randomBytes(24).toString("base64url");

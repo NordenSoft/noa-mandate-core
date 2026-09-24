@@ -16,7 +16,8 @@ RFC 8032):
   `additionalProperties:false` at every level, the frozen enum sets, `spec` / `id`-length (code
   points) / RFC-3339 `ts` / hash-format / `sig.alg=="ed25519"` rules, and the optional B4
   `governance.compliance` block — run **before any hashing**,
-- its **own** SPKI decode + small-order-public-key rejection (`keys.go`), using stdlib
+- its **own** SPKI decode + strict public-key validation at key load (non-canonical and small-order
+  key encodings refused, `keys.go`), using stdlib
   `crypto/ed25519` (which enforces the canonical scalar `S < L`) for the signature check,
 - its own hash-chain walk, key-continuity pinning, identity binding, checkpoint tail-truncation
   (`--checkpoint`) + §5b genesis binding, and verdict mapping.

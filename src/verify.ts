@@ -17,7 +17,11 @@ export type VerifyStatus =
   | "UNVERIFIED" // hash-chain ok, but NO keyring supplied so signatures were not authenticated
   | "UNTRUSTED" // signature authenticated, but the (agent.id, sig.kid) pairing is NOT authorized by the supplied identity manifest (cross-agent impersonation)
   | "TAMPERED" // an integrity check failed (incl. an unknown signing key when a keyring IS supplied)
-  | "MALFORMED"; // not a well-formed receipt chain
+  | "MALFORMED" // not a well-formed receipt chain
+  // Every other check passed and every signature AUTHENTICATED against the supplied lifecycle root,
+  // but a receipt or checkpoint key is lifecycle-retired. A refusal, never an acceptance: it does not
+  // establish when the signature was made. Historical attribution is `verifyHistoricalChain`.
+  | "KEY_RETIRED";
 
 /**
  * ── OPTIONS ARE CONFIGURATION; DOCUMENTS ARE BYTES ───────────────────────────────────────────────
@@ -42,8 +46,10 @@ export interface VerifyOptions {
    * Trust root as JSON bytes. A static consumer supplies `{ kid: base64-SPKI }`. A rotatable signer
    * supplies the atomic `noa.signing-key-lifecycle/0.1` document containing public keys, optional
    * explicit `validFrom`, and `retiredAt` (`null` for a current key). The lifecycle form refuses
-   * every non-null retirement outright; signer-chosen receipt/checkpoint timestamps are never
-   * lifecycle evidence. `validFrom` is evaluated only by the explicit historical side API.
+   * every non-null retirement: an authentic signature by a retired key is `KEY_RETIRED`, and a
+   * forged or altered one naming that key stays `TAMPERED`. Signer-chosen receipt/checkpoint
+   * timestamps are never lifecycle evidence. `validFrom` is evaluated only by the explicit
+   * historical side API.
    */
   keyring?: Uint8Array | string;
   /** Signed checkpoint as JSON bytes, asserting the expected head — enables tail-truncation detection. */
@@ -124,10 +130,11 @@ export interface VerifyResult {
    * having skipped its tests. A run that did not complete must never report its sub-checks as
    * passed.
    *
-   * The success path computes this meaning EXACTLY rather than loosely: loop 4c (`:481-495`) has no
-   * skip path — a retired kid, an unknown kid and a bad signature all `return fail(...)` — so
-   * reaching `:658` with a keyring PROVES every receipt signature authenticated. `haveKeyring` is
-   * therefore an exact witness there, not a proxy. Pinned by `test/signatures-verified-contract.test.ts`.
+   * The success path computes this meaning EXACTLY rather than loosely: loop 4c has no skip path —
+   * an unknown kid and a bad signature `return fail(...)`, and an authentic signature by a retired kid
+   * is recorded so the run ends `KEY_RETIRED` — so reaching the VALID return with a keyring PROVES
+   * every receipt signature authenticated under a current key. `haveKeyring` is therefore an exact
+   * witness there, not a proxy. Pinned by `test/signatures-verified-contract.test.ts`.
    */
   signaturesVerified: boolean;
   /**
@@ -151,7 +158,7 @@ export interface VerifyResult {
  * Versioned result contract for survivable historical verification.
  *
  * This is deliberately a side API. `verifyChain` remains the current-use authorization surface and
- * continues to refuse every lifecycle-retired key outright. Historical verification first proves
+ * continues to refuse every lifecycle-retired key (`KEY_RETIRED`). Historical verification first proves
  * the receipt bytes with retained public material, then evaluates separately supplied witness
  * evidence. A caller must read the dimensions; `classification` is only their summary and never
  * rewrites an intact chain into the legacy word `TAMPERED` because later policy evidence arrived.
@@ -277,6 +284,62 @@ function fail(
   return r;
 }
 
+/**
+ * The ONE machine-readable `key-retired:` warning (G2-R1). It is the only place that names the
+ * historical purpose: no TAMPERED/MALFORMED/UNTRUSTED path emits it, because pointing a forgery at
+ * the historical API would invite a relying party to "rescue" it.
+ */
+function keyRetiredWarning(subject: "receipt" | "checkpoint", kid: string, seq: number): string {
+  return `key-retired: seq ${seq} kid "${kid}" (${subject}): the signature authenticates, but the trust root retired this key. ` +
+    "Current use is refused, and this result does not establish when the signature was made. For historical attribution " +
+    "re-run with --purpose historical (library: verifyHistoricalChain) and an independently trusted checkpoint witness.";
+}
+
+/**
+ * The `KEY_RETIRED` refusal (G2-R1). Built on `fail`, so it carries the same false/false sub-claim
+ * contract. Unlike other refusals it keeps the run's `warnings`: KEY_RETIRED is reached only after
+ * the whole input was checked, so every caveat computed on the way (tenant drift under opt-out,
+ * non-NFC, non-monotonic time, checkpoint scope, truncation, fork, attribution level) is still true
+ * of it, and `warnings` already carries exactly one `key-retired:` entry.
+ */
+function keyRetired(
+  subject: "receipt" | "checkpoint",
+  kid: string,
+  chain: string,
+  count: number,
+  seq: number,
+  warnings: string[],
+): VerifyResult {
+  const who = subject === "receipt" ? "signing key" : "checkpoint signing key";
+  const r = fail(
+    "KEY_RETIRED",
+    `${who} "${kid}" is retired; signer-chosen ${subject} time is not an independent witness. ` +
+      "The signature authenticates against the retired key's retained public material, but current use is refused; " +
+      "for historical attribution use --purpose historical (verifyHistoricalChain) with an independently trusted checkpoint witness",
+    chain,
+    count,
+    seq,
+  );
+  r.warnings = warnings;
+  return r;
+}
+
+/**
+ * The same trust root with its retired-kid projection emptied: every retained public key stays, so a
+ * signature by a retired key can be AUTHENTICATED, and nothing else changes. It grants no authority
+ * on its own — each caller evaluates retirement separately after authentication (historical:
+ * `WITNESS_KEY_RETIRED`; current use: `KEY_RETIRED`), so a retired key is never revived as current.
+ */
+function retainedPublicMaterial(v: ParsedVerificationKeyring): ParsedVerificationKeyring {
+  const retained = objectCreateNull<Mutable<ParsedVerificationKeyring>>();
+  retained.keyring = v.keyring;
+  retained.retiredKids = objectCreateNull<Record<string, true>>();
+  retained.validFromByKid = v.validFromByKid;
+  retained.retiredAtByKid = v.retiredAtByKid;
+  retained.lifecycle = v.lifecycle;
+  return retained;
+}
+
 /** Human/machine-readable label for a `scope.tenant` value in a drift message: quoted string, or `(none)`. */
 function describeTenant(t: string | undefined): string {
   return t === undefined ? "(none)" : (jsonStringify(t) as string);
@@ -290,6 +353,11 @@ function describeTenant(t: string | undefined): string {
  *    key is held continuous per (agent.id): a mid-chain key swap is rejected, and an unknown
  *    kid is treated as TAMPERED (not silently accepted — that would be TOFU on attacker input).
  *  - Without a keyring, signatures cannot be authenticated → status UNVERIFIED (never VALID).
+ *  - RETIRED KEYS (lifecycle keyring): a signature is authenticated against the retired key's
+ *    retained public material FIRST, so a forged or altered one stays TAMPERED. An authentic one is
+ *    remembered and the walk continues; only if every other check passes is the result KEY_RETIRED
+ *    — a refusal that says "authentic, but by a key the trust root retired" and points to
+ *    `verifyHistoricalChain`. Any other failure anywhere in the input outranks it.
  *  - IDENTITY: with an `identityManifest` (agent.id -> authorized kid(s)), a receipt whose
  *    (agent.id, sig.kid) pairing is not authorized is UNTRUSTED — this upgrades attribution from
  *    "a keyring-trusted key signed" to "THIS agent.id signed". Without it, attribution is kid-level:
@@ -588,6 +656,11 @@ function verifyParsedChain(receipts: unknown, o: InertVerifyOptions): VerifyResu
   // 4. Walk the chain: hash, key-pinning, signature, linkage, timestamp monotonicity.
   const pinnedKid = newMap<string, string>(); // agent.id -> kid (key continuity)
   let prev: Receipt | null = null;
+  // The FIRST authentic signature by a lifecycle-retired key (receipt here, checkpoint in step 5).
+  // It is a verdict only if nothing else fails: see step 5c and the KEY_RETIRED return at the end.
+  let retiredSeq = -1;
+  let retiredKid = "";
+  let retiredSubject: "receipt" | "checkpoint" = "receipt";
 
   // Fail-closed backstop for our own helpers, not a hostile-accessor guard (see above).
   try {
@@ -652,19 +725,20 @@ function verifyParsedChain(receipts: unknown, o: InertVerifyOptions): VerifyResu
 
     // 4c. Signature. With a keyring, an unknown kid is TAMPERED, not a soft pass.
     if (haveKeyring) {
-      if (verification!.retiredKids[r.sig.kid] === true) {
-        return fail(
-          "TAMPERED",
-          `signing key "${r.sig.kid}" is retired; signer-chosen receipt time is not an independent witness`,
-          chainId,
-          list.length,
-          seq,
-        );
-      }
       const pub = keyring[r.sig.kid];
       if (!pub) return fail("TAMPERED", `unknown signing key "${r.sig.kid}" not in keyring`, chainId, list.length, seq);
       const ok = verifyEd25519(pub, signingMessage(RECEIPT_SIG_DOMAIN, hashInput), r.sig.value);
       if (!ok) return fail("TAMPERED", `invalid signature (kid ${r.sig.kid})`, chainId, list.length, seq);
+      // 4c-ter. Lifecycle retirement, judged AFTER authentication (G2-R1). A lifecycle keyring keeps a
+      // retired key's public material, so the signature above was checked against it: a forged or
+      // altered receipt naming a retired kid has already returned TAMPERED. What reaches here is an
+      // authentic signature by a key the trust root retired. It is never accepted — the run cannot
+      // end VALID once this is set — but it is not "tampered" either, and it must not stop the walk:
+      // a later hash, signature, linkage, identity or checkpoint failure outranks it.
+      if (retiredSeq < 0 && verification!.retiredKids[r.sig.kid] === true) {
+        retiredSeq = seq;
+        retiredKid = r.sig.kid;
+      }
     }
 
     // 4c-bis. Identity binding — ONLY meaningful once the signature is AUTHENTICATED (gated on
@@ -730,9 +804,19 @@ function verifyParsedChain(receipts: unknown, o: InertVerifyOptions): VerifyResu
     // to the tail-match — VALID + tailChecked over an erased tail. Parsed bytes cannot differ
     // between two reads.
     const cp = checkpointSnap as Checkpoint;
-    const cpVerify = verifyCheckpointParsed(cp, verification);
+    let cpVerify = verifyCheckpointParsed(cp, verification);
     if (cpVerify === "bad spec" || cpVerify === "malformed checkpoint") {
       return fail("TAMPERED", `checkpoint invalid: ${cpVerify}`, chainId, list.length);
+    }
+    // A retired checkpoint key is judged exactly like a retired receipt key (4c-ter): authenticate
+    // the checkpoint against the retained public material first. `verifyCheckpointParsed` answers
+    // "retired signing key" BEFORE it checks the signature, so that answer alone says nothing about
+    // whether these bytes were signed by that key. Only an authentic checkpoint can become
+    // KEY_RETIRED; a forged one falls through to the TAMPERED refusal below.
+    let checkpointKeyRetired = false;
+    if (cpVerify === "retired signing key") {
+      cpVerify = verifyCheckpointParsed(cp, retainedPublicMaterial(verification!));
+      checkpointKeyRetired = cpVerify === "ok";
     }
     // The checkpoint signature is held to the SAME trust root as receipts: with a keyring, a
     // checkpoint that is not authenticated (bad signature OR a kid not in the keyring) is
@@ -740,15 +824,6 @@ function verifyParsedChain(receipts: unknown, o: InertVerifyOptions): VerifyResu
     // the tail, and forge a checkpoint over the truncated head (a trust-root bypass on the only
     // anti-truncation control). Mirrors the receipt unknown-kid rule above.
     if (haveKeyring && cpVerify !== "ok") {
-      if (cpVerify === "retired signing key") {
-        return fail(
-          "TAMPERED",
-          `checkpoint signing key "${cp.sig.kid}" is retired; signer-chosen checkpoint time is not an independent witness`,
-          chainId,
-          list.length,
-          head.chain.seq,
-        );
-      }
       return fail("TAMPERED", `checkpoint not authenticated against keyring (${cpVerify})`, chainId, list.length);
     }
     if (cp.chain !== chainId) return fail("TAMPERED", "checkpoint chain mismatch", chainId, list.length);
@@ -788,6 +863,13 @@ function verifyParsedChain(receipts: unknown, o: InertVerifyOptions): VerifyResu
         arrayPush(warnings, "checkpoint completeness is opener-scoped: the chain has more than one agent.id, and a co-agent's tail is NOT separately certified by the opener's checkpoint (the opener dropping a co-agent's tail needs the v1.0 external anchor)");
       }
     }
+    // Recorded only now, after the chain/head/identity checks above passed for this checkpoint, and
+    // only if no receipt finding came first (the report names the first retired signature).
+    if (checkpointKeyRetired && retiredSeq < 0) {
+      retiredSeq = head.chain.seq;
+      retiredKid = cp.sig.kid;
+      retiredSubject = "checkpoint";
+    }
     // tailChecked is true ONLY for an authenticated checkpoint — an unauthenticated head match
     // is not a tail check and must not be reported as one.
     tailChecked = cpVerify === "ok";
@@ -807,13 +889,23 @@ function verifyParsedChain(receipts: unknown, o: InertVerifyOptions): VerifyResu
       // (which agent.id signed); this states the TRUNCATION consequence, which is the sharper
       // one and was previously unstated at runtime. Additive: no verdict, no tailChecked value,
       // and no existing warning changes.
-      arrayPush(warnings,
-        "checkpoint authenticated but no identityManifest supplied: the tail check is KID-LEVEL — any keyring-trusted key can mint a checkpoint over any head, so a co-trusted key holder can truncate the tail and still produce tailChecked:true (supply an identityManifest to bind checkpoint authority to the chain opener)",
+      //
+      // `retiredSeq` is final here, so a run that will end KEY_RETIRED (tailChecked false) gets the
+      // same caveat without the sentence about producing tailChecked:true, which it never does.
+      arrayPush(warnings, retiredSeq >= 0
+        ? "checkpoint authenticated but no identityManifest supplied: checkpoint authority is KID-LEVEL — any keyring-trusted key can mint a checkpoint over any head, so this checkpoint does not show that the chain opener certified the tail (supply an identityManifest to bind checkpoint authority to the chain opener)"
+        : "checkpoint authenticated but no identityManifest supplied: the tail check is KID-LEVEL — any keyring-trusted key can mint a checkpoint over any head, so a co-trusted key holder can truncate the tail and still produce tailChecked:true (supply an identityManifest to bind checkpoint authority to the chain opener)",
       );
     }
   } else {
     arrayPush(warnings, "no checkpoint supplied: tail-truncation (deleting most-recent receipts) cannot be detected offline");
   }
+
+  // 5c. The retired-key finding (G2-R1). Reached only when every hash, signature, linkage, identity
+  // and checkpoint check above passed, so KEY_RETIRED can never stand in for any of those failures.
+  // Its one warning goes in here, in step order; the refusal itself is returned at the end, after the
+  // remaining completeness caveats, because each of them is as true of this input as of a VALID one.
+  if (retiredSeq >= 0) arrayPush(warnings, keyRetiredWarning(retiredSubject, retiredKid, retiredSeq));
 
   // 6. Equivocation/fork is fundamentally undetectable offline from a single branch.
   arrayPush(warnings, "fork/equivocation is not detectable offline: this verifies the branch you were given, not that the signer signed no other history at the same seq (needs an external witness — v1.0)");
@@ -822,19 +914,27 @@ function verifyParsedChain(receipts: unknown, o: InertVerifyOptions): VerifyResu
     arrayPush(warnings, "no keyring supplied: signatures were NOT authenticated (status UNVERIFIED, not VALID)");
   }
   if (!haveManifest) {
-    arrayPush(warnings, "no identityManifest supplied: attribution is kid-level — a VALID result proves a keyring-trusted key signed, NOT which agent.id (cross-agent impersonation undefended in a multi-key keyring)");
+    // A KEY_RETIRED run is not VALID, so its copy of this caveat speaks of the authenticated
+    // signature rather than of "a VALID result"; the VALID/UNVERIFIED text is unchanged.
+    arrayPush(warnings, retiredSeq >= 0
+      ? "no identityManifest supplied: attribution is kid-level — an authenticated signature proves a keyring-trusted key signed, NOT which agent.id (cross-agent impersonation undefended in a multi-key keyring)"
+      : "no identityManifest supplied: attribution is kid-level — a VALID result proves a keyring-trusted key signed, NOT which agent.id (cross-agent impersonation undefended in a multi-key keyring)");
   } else if (!haveKeyring) {
     arrayPush(warnings, "identityManifest supplied but no keyring: identity NOT bound — signatures are unauthenticated, so the (agent.id, kid) pairing was not enforced (status stays UNVERIFIED, never UNTRUSTED)");
   }
 
+  // The LAST refusal, and unconditional: an authentic retired-key signature never ends VALID.
+  if (retiredSeq >= 0) return keyRetired(retiredSubject, retiredKid, chainId, list.length, retiredSeq, warnings);
+
   const status: VerifyStatus = haveKeyring ? "VALID" : "UNVERIFIED";
   // `signaturesVerified: haveKeyring` is EXACT here, not a proxy, and the invariant that makes it so
-  // is worth stating because it is invisible from this line: loop 4c above has NO SKIP PATH. A
-  // retired kid, an unknown kid and a bad signature each `return fail(...)`. So control cannot reach
-  // this line with a keyring unless every receipt signature authenticated — `haveKeyring` and "every
-  // signature verified" are the same fact at this point. If anyone ever adds a `continue` to that
-  // loop, this line silently becomes a lie and the contract on `VerifyResult.signaturesVerified`
-  // breaks with it.
+  // is worth stating because it is invisible from this line: loop 4c above has NO SKIP PATH. An
+  // unknown kid and a bad signature each `return fail(...)`, and an authentic retired-key signature
+  // sets `retiredSeq`, which returns KEY_RETIRED just above this line. So control cannot reach
+  // this line with a keyring unless every signature authenticated under a CURRENT key — `haveKeyring`
+  // and "every signature verified" are the same fact at this point. If anyone ever adds a `continue`
+  // to that loop, or removes the KEY_RETIRED return, this line silently becomes a lie and the contract on
+  // `VerifyResult.signaturesVerified` breaks with it.
   return { status, chain: chainId, count: list.length, signaturesVerified: haveKeyring, tailChecked, warnings };
 }
 
@@ -1085,12 +1185,7 @@ export function verifyHistoricalChain(
   // reconciled bytes. Retirement is evaluated separately below, after the signature is checked, so
   // retained witness public material can establish cryptographic integrity without reviving the
   // key as a current witness.
-  const retainedWitnessTrust = objectCreateNull<Mutable<ParsedVerificationKeyring>>();
-  retainedWitnessTrust.keyring = witnessTrust.keyring;
-  retainedWitnessTrust.retiredKids = objectCreateNull<Record<string, true>>();
-  retainedWitnessTrust.validFromByKid = witnessTrust.validFromByKid;
-  retainedWitnessTrust.retiredAtByKid = witnessTrust.retiredAtByKid;
-  retainedWitnessTrust.lifecycle = witnessTrust.lifecycle;
+  const retainedWitnessTrust = retainedPublicMaterial(witnessTrust);
   const checkpoint = checkpointParsed.value as Checkpoint;
   const checkpointVerdict = verifyCheckpointParsed(checkpoint, retainedWitnessTrust);
   if (checkpointVerdict === "unverified") {

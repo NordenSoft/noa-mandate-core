@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign as cryptoSign } from "node:crypto";
-import { generateKeyPair, signEd25519, verifyEd25519 } from "../src/keys.js";
+import { generateKeyPair, isStrictEd25519PublicKeyBytes, isStrictEd25519SignatureRBytes, signEd25519, verifyEd25519 } from "../src/keys.js";
+import { keyHolderRCases } from "./helpers/ed25519-keyholder.js";
 
 // ── Ed25519 curve/algorithm-confusion regression (CWE-347) ──────────────
 test("verifyEd25519 PINS the curve — a genuine Ed448 key+signature is REJECTED", () => {
@@ -74,6 +75,98 @@ test("a genuine full-order key still verifies (no false-negative from the low-or
   const msg = Buffer.from("genuine", "utf8");
   const sig = signEd25519(kp.privateKey, msg);
   assert.equal(verifyEd25519(kp.publicKey, msg, sig), true);
+});
+
+// ── strict public-key validation: refuse non-canonical and small-order Ed25519 key encodings ──
+// (RFC 8032 §5.1.3 decoding + small-order rejection), decided at key load from the key bytes alone.
+// Same encodings as conformance/vectors/strict-ed25519/, the Go and Rust unit tests and the C# self-check.
+const NON_CANONICAL_OR_OFF_CURVE_RAW: Array<[string, string]> = [
+  ["x = 0 with sign bit: y = 1", "0100000000000000000000000000000000000000000000000000000000000080"],
+  ["x = 0 with sign bit: y = p - 1", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+  ["non-canonical y: y = p, sign bit set", "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+  ["non-canonical y: y = p + 1", "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"],
+  ["not a curve point: y = 2", "0200000000000000000000000000000000000000000000000000000000000000"],
+];
+
+test("strict public-key validation refuses every non-canonical, off-curve and small-order key encoding at key load", () => {
+  const all: Array<[string, string]> = [
+    ...SMALL_ORDER_RAW.map((h, i): [string, string] => [`small-order #${i}`, h]),
+    ...NON_CANONICAL_OR_OFF_CURVE_RAW,
+  ];
+  for (const [label, rawHex] of all) {
+    assert.equal(isStrictEd25519PublicKeyBytes(Buffer.from(rawHex, "hex")), false, `${label} must be refused at key load`);
+  }
+});
+
+test("verifyEd25519 refuses a non-canonical or off-curve public key whatever the signature", () => {
+  const msg = Buffer.from("any message", "utf8");
+  const sig = Buffer.alloc(64, 7).toString("base64");
+  for (const [label, rawHex] of NON_CANONICAL_OR_OFF_CURVE_RAW) {
+    assert.equal(verifyEd25519(rawToSpkiB64(rawHex), msg, sig), false, `${label} must be refused`);
+  }
+});
+
+test("strict public-key validation accepts generated keys and the committed corpus test key", () => {
+  for (let i = 0; i < 128; i++) {
+    const der = Buffer.from(generateKeyPair(`k${i}`).publicKey, "base64");
+    assert.equal(isStrictEd25519PublicKeyBytes(der.subarray(12)), true, `generated key ${der.toString("hex")} refused`);
+  }
+  // conformance/vectors/keyring.json
+  const corpus = Buffer.from("MCowBQYDK2VwAyEAfCMjakcMSx1Azeehv+DU2bchtPTvB+uoloJ0kJNWI24=", "base64");
+  assert.equal(isStrictEd25519PublicKeyBytes(corpus.subarray(12)), true);
+  // wrong length is refused, never thrown
+  assert.equal(isStrictEd25519PublicKeyBytes(Buffer.alloc(31)), false);
+});
+
+/** A genuine key plus the order-2 point: (x, y) -> (-x, -y). Same curve, mixed order. */
+function mixedOrderRaw(raw: Buffer): Buffer {
+  const p = (1n << 255n) - 19n;
+  let y = 0n;
+  for (let i = 31; i >= 0; i--) y = (y << 8n) | BigInt(i === 31 ? raw[i]! & 0x7f : raw[i]!);
+  const out = Buffer.alloc(32);
+  let v = p - y;
+  for (let i = 0; i < 32; i++) {
+    out[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  out[31] = (out[31]! & 0x7f) | ((raw[31]! & 0x80) ^ 0x80);
+  return out;
+}
+
+test("strict public-key validation refuses a mixed-order key (a genuine key plus a small-order component)", () => {
+  for (let i = 0; i < 8; i++) {
+    const raw = Buffer.from(generateKeyPair(`m${i}`).publicKey, "base64").subarray(12);
+    const mixed = mixedOrderRaw(raw);
+    assert.equal(isStrictEd25519PublicKeyBytes(mixed), false, `mixed-order key ${mixed.toString("hex")} accepted`);
+    // ...and it is refused at key load by verifyEd25519 too
+    assert.equal(verifyEd25519(rawToSpkiB64(mixed.toString("hex")), Buffer.from("m"), Buffer.alloc(64, 7).toString("base64")), false);
+  }
+});
+
+test("knockout proof (signature-R rule): verifyEd25519 refuses key-holder signatures whose R is the identity, the identity with the sign bit, or rB + a small-order point", () => {
+  // A fresh key and signatures made WITH its private scalar at test time; nothing is committed as bytes.
+  const kp = generateKeyPair("r-rule");
+  const seed = Buffer.from(kp.privateKey, "base64").subarray(16);
+  const message = Buffer.from("signature-R rule", "utf8");
+  const cases = keyHolderRCases(seed, message);
+  assert.equal(cases.publicRaw.toString("hex"), Buffer.from(kp.publicKey, "base64").subarray(12).toString("hex"), "helper key derivation");
+  assert.equal(verifyEd25519(kp.publicKey, message, cases.control.toString("base64")), true, "the control signature must verify");
+  for (const [label, sig] of cases.refused) {
+    assert.equal(verifyEd25519(kp.publicKey, message, sig.toString("base64")), false, `${label} must be refused`);
+  }
+});
+
+test("strict signature-R validation refuses non-canonical and small-order R and admits a genuine R", () => {
+  const all: Array<[string, string]> = [
+    ...SMALL_ORDER_RAW.map((h, i): [string, string] => [`small-order #${i}`, h]),
+    ...NON_CANONICAL_OR_OFF_CURVE_RAW,
+  ];
+  for (const [label, rawHex] of all) {
+    assert.equal(isStrictEd25519SignatureRBytes(Buffer.from(rawHex, "hex")), false, `R ${label} must be refused`);
+  }
+  const kp = generateKeyPair("r");
+  const sig = Buffer.from(signEd25519(kp.privateKey, Buffer.from("r")), "base64");
+  assert.equal(isStrictEd25519SignatureRBytes(sig.subarray(0, 32)), true);
 });
 
 // ── T14: Ed25519 signature malleability (S' = S+L) — explicit S < L scalar check ──────────────

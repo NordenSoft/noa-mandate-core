@@ -18,6 +18,9 @@
  *                          INVALID_INPUT; only emitted in the opt-in --anchors/--trust-set mode)
  *   7  HISTORICAL_CONFLICT (authenticated checkpoint contradicts or is ahead of the presented history)
  *   8  HISTORICAL_INTEGRITY_FAILURE (supplied receipt/checkpoint cryptography is broken)
+ *   9  KEY_RETIRED  (every check passed and every signature authenticated, but a receipt or
+ *                    checkpoint key is lifecycle-retired: current use is refused; the result does not
+ *                    say when it was signed — re-run with --purpose historical and a separate witness)
  *
  * CI rule: treat ANY non-zero exit as failure. Do not special-case "==2".
  *
@@ -57,6 +60,7 @@ const EXIT = {
   WITNESS_INCOMPLETE: 6,
   HISTORICAL_CONFLICT: 7,
   HISTORICAL_INTEGRITY_FAILURE: 8,
+  KEY_RETIRED: 9,
 } as const;
 
 function historicalResultToExit(result: {
@@ -150,9 +154,25 @@ function statusToExit(status: VerifyStatus): number {
       return EXIT.UNTRUSTED;
     case "TAMPERED":
       return EXIT.TAMPERED;
+    case "KEY_RETIRED":
+      return EXIT.KEY_RETIRED;
     default:
       return EXIT.MALFORMED;
   }
+}
+
+/**
+ * The human-facing half of the KEY_RETIRED steer (the JSON result on stdout carries the
+ * machine-readable half). Written for that status only: a TAMPERED result gets no pointer to the
+ * historical purpose, because historical mode cannot rescue altered bytes and must not look as if it could.
+ */
+function noteRetiredKey(status: VerifyStatus): void {
+  if (status !== "KEY_RETIRED") return;
+  process.stderr.write(
+    "note: a signature authenticated under a lifecycle-retired key, so current use is refused (exit 9). " +
+      "This does not establish when it was signed. For historical attribution re-run with --purpose historical " +
+      "--keyring <lifecycle.json> --checkpoint <checkpoint.json> --checkpoint-keyring <independent-witness-root.json>\n",
+  );
 }
 
 function main(argv: string[]): number {
@@ -299,6 +319,7 @@ function main(argv: string[]): number {
     const chainExit = statusToExit(result.chain.status);
     if (chainExit !== EXIT.VALID) {
       process.stderr.write(`chain did not verify (${result.chain.status}): witness acceptance is moot\n`);
+      noteRetiredKey(result.chain.status);
       return chainExit;
     }
     if (result.witness.classification === "QUORUM_CONFIRMED") return EXIT.VALID;
@@ -308,6 +329,7 @@ function main(argv: string[]): number {
 
   const result = verifyChain(receipts, opts);
   process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+  noteRetiredKey(result.status);
   return statusToExit(result.status);
 }
 

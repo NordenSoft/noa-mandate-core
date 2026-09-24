@@ -15,7 +15,8 @@ parsing** with the TypeScript reference (`src/`, `node:crypto`/OpenSSL), the Pyt
   sort, RFC-8785 escaping, no NFC,
 - its **own** strict structural validator (`src/schema.rs`) — exact-keys /
   `additionalProperties:false` at every level, the frozen enum sets, run **before any hashing**,
-- SPKI decode + small-order-public-key rejection (`src/keys.rs`), with `ed25519-dalek`'s
+- SPKI decode + strict public-key validation at key load (non-canonical and small-order key encodings
+  refused, `src/keys.rs`), with `ed25519-dalek`'s
   `verify_strict` for the signature check,
 - its own hash-chain walk, key-continuity pinning, identity binding, checkpoint handling, and
   verdict mapping (`src/verify.rs`) — including the chain-wide `scope.tenant` consistency check

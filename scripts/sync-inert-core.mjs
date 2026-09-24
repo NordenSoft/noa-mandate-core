@@ -36,6 +36,36 @@ const SOURCES = ["intrinsics.ts", "inert.ts", "scan.ts", "safe-json.ts", "bytes.
 const RETIRED = ["ingest.ts"];
 /** Packages that cannot depend on `noa-receipt` and therefore carry a generated copy. */
 const TARGETS = [join(ROOT, "packages", "approval-artifacts", "src", "inert-core")];
+/**
+ * Marked REGIONS of a source file, vendored the same way as SOURCES. The strict Ed25519 public-key
+ * and signature-R rule lives in src/keys.ts (whose lines the knockout registry pins); its marked
+ * region is generated into each target so every package that verifies Ed25519 enforces ONE rule.
+ * A missing or repeated marker is a hard failure in both modes, never an empty copy.
+ */
+const FRAGMENTS = [
+  {
+    source: "keys.ts",
+    begin: "// ── BEGIN SHARED STRICT-ED25519 RULE",
+    end: "// ── END SHARED STRICT-ED25519 RULE",
+    dest: "ed25519-strict.ts",
+    imports:
+      'import { bufferFrom, bufToString, byteLength, mapGet, mapSet, mapSize, newMap, toBigInt } from "./intrinsics.js";\n' +
+      'import { membership } from "./inert.js";\n\n',
+  },
+];
+
+/** The text from the BEGIN marker line through the END marker line, inclusive. */
+function fragmentText(fragment) {
+  const text = readFileSync(join(ROOT, "src", fragment.source), "utf8");
+  const begin = text.indexOf(fragment.begin);
+  const end = text.indexOf(fragment.end);
+  if (begin < 0 || end < begin || text.indexOf(fragment.begin, begin + 1) >= 0 || text.indexOf(fragment.end, end + 1) >= 0) {
+    console.error(`::error::src/${fragment.source} must contain exactly one "${fragment.begin}" followed by exactly one "${fragment.end}"`);
+    process.exit(1);
+  }
+  const lineEnd = text.indexOf("\n", end);
+  return text.slice(begin, lineEnd < 0 ? text.length : lineEnd + 1);
+}
 
 const BANNER = (name) =>
   `// ────────────────────────────────────────────────────────────────────────────────────────────────\n` +
@@ -60,8 +90,11 @@ for (const dir of TARGETS) {
     if (check) console.error(`::error::inert-core copy is RETIRED but still present: ${dead.slice(ROOT.length + 1)} (run: node scripts/sync-inert-core.mjs)`);
     else { rmSync(dead); console.log(`removed ${dead.slice(ROOT.length + 1)}`); }
   }
-  for (const name of SOURCES) {
-    const want = BANNER(name) + readFileSync(join(ROOT, "src", name), "utf8");
+  const wanted = SOURCES.map((name) => [name, BANNER(name) + readFileSync(join(ROOT, "src", name), "utf8")]);
+  for (const fragment of FRAGMENTS) {
+    wanted.push([fragment.dest, BANNER(`${fragment.source} (the marked strict-Ed25519 region only)`) + fragment.imports + fragmentText(fragment)]);
+  }
+  for (const [name, want] of wanted) {
     const dest = join(dir, name);
     const have = existsSync(dest) ? readFileSync(dest, "utf8") : null;
     if (have === want) continue;

@@ -89,7 +89,10 @@ test("a foreign agent cannot RESERVE another agent's grant, and the rejected cal
   assert.equal(fx.engine.reserve(grantId, fx.agent).status, 200, "the owner must still be able to reserve");
 });
 
-test("a foreign agent cannot REPORT on another agent's grant — no forged EXECUTED receipt, no Consumption", () => {
+// [PROOF:GATE-REPORT-OWNERSHIP] — the knockout grant-ownership-before-cas removes the ownership check on
+// /report. The protected outcome (no Consumption, no terminal lock, grant still RESERVED) is asserted
+// BEFORE the status code, so the knockout is credited on the consequence, not on the 404 label.
+test("[PROOF:GATE-REPORT-OWNERSHIP] a foreign agent cannot REPORT on another agent's grant — no forged EXECUTED receipt, no Consumption", () => {
   const fx = setupGate({ approverRole: "approve-high" });
   const attacker = coTenant(fx);
   const { grantId } = victimGrant(fx, "chain-report");
@@ -98,14 +101,15 @@ test("a foreign agent cannot REPORT on another agent's grant — no forged EXECU
   assert.equal(fx.engine.reserve(grantId, fx.agent).status, 200);
 
   const foreign = fx.engine.report(grantId, body({ result: "DISPATCHED" }), attacker);
+
+  const rec = fx.store.getGrant(grantId)!;
+  assert.equal(rec.consumption, null, "a refused foreign report must never mint a gate-signed Execution Consumption");
+  assert.equal(rec.reportedAt, null, "a refused foreign report must not set the one-shot terminal lock");
+  assert.equal(rec.status, "RESERVED", "a refused foreign report must not drive the grant terminal");
+
   const absent = fx.engine.report("id-does-not-exist", body({ result: "DISPATCHED" }), attacker);
   assert.equal(foreign.status, 404, `foreign report must be refused, got ${foreign.status}`);
   assert.deepEqual(foreign.body, absent.body, "no existence oracle on /report either");
-
-  const rec = fx.store.getGrant(grantId)!;
-  assert.equal(rec.status, "RESERVED", "a refused foreign report must not drive the grant terminal");
-  assert.equal(rec.reportedAt, null, "a refused foreign report must not set the one-shot terminal lock");
-  assert.equal(rec.consumption, null, "a refused foreign report must never mint a gate-signed Execution Consumption");
 
   // The rightful owner still completes normally — the fix is authorization, not new behaviour.
   const own = fx.engine.report(grantId, body({ result: "DISPATCHED" }), fx.agent);

@@ -38,6 +38,13 @@ policy verdict, universal action digest, or proof that a human reviewed the para
 Verification establishes the integrity of records supplied to the verifier. It cannot prove that no
 record was withheld, especially after the presented tail.
 
+### NC-1.6 — `KEY_RETIRED` does not prove a receipt was signed before its key was retired
+
+`KEY_RETIRED` means the bytes are intact and the signature authenticates against a key the trust
+root has retired. It is a refusal, not an acceptance. Anyone who still holds the retired private key
+can produce such a signature today, and the signer-chosen timestamp is not evidence of when it was
+made. Only historical verification with an independently trusted checkpoint can attribute it.
+
 ## 2. Execution outcomes
 
 ### NC-2.1 — A tool's claim that it failed is not proof that no side effect occurred
@@ -388,6 +395,187 @@ Identity equality is a necessary signal for substitution, never a sufficient one
 An enforcing implementation derives a risk tier from `environment` with its own reviewed policy
 table. That table is authorization-side policy, is not published here, and must not be inferred from
 this specification.
+
+## S7. `noa.ledger.transfer/1` — what an accepted transfer does and does not establish
+
+`noa.ledger.transfer/1` (`src/ledger-transfer.ts`, `docs/ledger-transfer-spec.md`) publishes the rule
+for turning a six-member ledger transfer into canonical bytes, a `paramsHash` and a six-row display,
+plus two pinned projection identities. An accepted result establishes only that the disclosed tuple
+is well-formed under that rule and binds exactly the hash and display it returns.
+
+### NC-S7.1 — An accepted transfer is not authorization, execution or settlement
+
+It says nothing about whether the transfer was approved, by whom or under what policy, whether it was
+dispatched or committed, or whether it settled. Those are separate claims with their own evidence
+(§1, §2).
+
+### NC-S7.2 — Acceptance does not check accounts, balances or ledgers
+
+The projection is pure and network-less. Account existence, balance sufficiency, overdraft and
+whether `ledger` names the committing ledger are facts only the effect owner holds at commit time.
+
+### NC-S7.3 — A bound display does not prove what was rendered or understood
+
+The display is complete and recomputable from the bound tuple. Whether a device drew it faithfully,
+and whether a person read and understood it, is outside this construct (§3, NC-S5.5).
+
+### NC-S7.4 — The character set does not remove in-set confusables
+
+Non-ASCII homoglyphs, invisible characters and bidirectional overrides are refused. Confusable pairs
+inside the permitted set (`l`/`1`, `o`/`0`, `rn`/`m`) remain.
+
+### NC-S7.5 — Nothing here limits splitting or rate
+
+Many small transfers are each well-formed. Limits on count, rate or aggregate amount are policy.
+
+### NC-S7.6 — `XTS` is not money
+
+The only unit in `/1` is the ISO 4217 testing code. No real-currency semantics, scale or rounding is
+defined or implied.
+
+### NC-S7.7 — `paramsHash` is not a uniqueness or deduplication key
+
+Identical tuples, including an identical salt, bind the same `paramsHash` by construction. Request
+identity belongs to the authorization layer, and per-attempt correlation to `noa.action-digest/0.1`.
+
+### NC-S7.8 — The salt hides the tuple only from hash holders, and only with an honest producer
+
+The salt prevents a holder of `paramsHash` alone from confirming a guessed transfer, provided it is
+random, secret from that holder, and 128 bits long. A projection cannot test randomness: a constant or
+all-zero salt is accepted. The proposer, the enforcing gate, the approver and the auditor all see the
+salt and the full tuple. This rests on SHA-256 preimage resistance and is not a formal hiding proof.
+
+### NC-S7.9 — The pinned hashes are normative expected values, not attestations
+
+As NC-S6.1 and NC-S6.2 state for the deployment bind: the repository proves that its implementation,
+corpus and pinned literals agree and that each pin is load-bearing. It does not prove that any
+deployed producer computes them.
+
+### NC-S7.10 — The identity covers one function, and the gate's load-time check catches drift, not substitution
+
+The implementation digest is taken over the emitted text of `projectLedgerTransfer` only. Code it
+reaches through its helpers — the member validators, the canonicalizer, the parser — can change
+behaviour without moving the identity. The reference Gate refuses to load if the identity it measures
+differs from the published pins; because the pins and the code ship together, that detects accidental
+drift, not a deliberate substitution of both.
+
+### NC-S7.11 — The reference Gate does not enforce this action in this revision
+
+The reference Gate defines an adapter for `noa.ledger.transfer` but does not register it, so a hold for
+it is refused like any unregistered action. Its fixed `HIGH` risk floor is that Gate's policy, not part
+of the wire language.
+
+### NC-S7.12 — One implementation is not an independence claim
+
+The corpus is replayed by this repository's implementation only. No independent implementation of
+`/1` exists yet, and none is claimed (ADR-R-007).
+
+## S8. Pinned trust for the reference gate (`noa.gate-roster/1`)
+
+These statements apply to the reference gate in `packages/gate` running with a pinned roster
+(`docs/gate-pinned-trust.md`). They qualify what that mode establishes; the alpha mode establishes
+less.
+
+### NC-S8.1 — Pinned trust does not make a grant single-use at the effect
+
+The gate re-checks audience, epoch and roster expiry at `reserve()`, but the signed grant is already
+visible to the owning agent through the hold view and `wait`. A caller that acts without reserving is
+not stopped here. Single-use enforcement belongs at the component that owns the effect.
+
+### NC-S8.2 — A persistent gate key keeps old envelopes verifiable for the key's lifetime
+
+A restart no longer changes the gate's identity. The reference command line keeps holds in memory, so
+a restart forgets them; a durable hold store needs its own rule for holds created before a restart.
+
+### NC-S8.3 — The roster is not signed, not remotely revocable and not renewable
+
+In `/1` the roster is authenticated by file ownership and mode bits, a printed digest and an
+optional second-channel pin. Nothing checks a signature over it, an access-control list that grants
+write outside the mode bits is not inspected, a revocation reaches the gate only through a new
+roster and a restart, and an expired roster stops the gate until one is provided.
+
+### NC-S8.4 — Rollback detection is limited
+
+The high-water state file refuses a lower roster version, or the same version with different bytes,
+and its read-compare-write runs under a lock file. Root, a compromised gate process, a whole-volume
+restore or a cloned host can defeat it. The lock names a process id: a reused id can hold a stale
+lock (`STATE_LOCKED`) until an administrator removes it.
+
+### NC-S8.5 — A clock rollback is not detected
+
+The gate's clock decides roster validity, roster expiry, the approval window and grant life.
+
+### NC-S8.6 — A compromised gate process holds its keys
+
+The owner rule stops a roster edited by the gate's uid from surviving a restart. It does not protect
+the running process, which holds the gate key and, with an in-process grant key, full authority.
+
+### NC-S8.7 — Approver key provenance and roster correctness are outside the gate
+
+The gate trusts the keys the roster names. How an approver key was enrolled is the pairing ceremony's
+concern, and whether the roster names the right keys is the administrator's.
+
+### NC-S8.8 — Two-person rules are not implemented
+
+A pinned gate accepts a quorum of exactly 1 and refuses any larger value. A tenant that needs two
+approvals must not rely on a pinned gate for that.
+
+### NC-S8.9 — A pinned roster proves nothing about the human or the device
+
+Nothing here proves that a human understood a display, or that a device rendered it faithfully (§3).
+
+### NC-S8.10 — The epoch is stamped, not verified, by the gate
+
+The gate copies the key-manifest version and hash from the roster into what it signs and never parses
+that manifest. An offline evidence verifier compares the stamped epoch with the tenant's key manifest,
+so evidence from a pinned gate verifies only if that manifest lists the gate's key.
+
+### NC-S8.11 — Approver-device behaviour is outside this repository
+
+Whether an approver device pins the gate key, which epoch floor it enforces and how a withheld relay
+message is handled are properties of the device and the relay. A mismatch there is a denial of
+service, not an approval.
+
+### NC-S8.12 — The grant sidecar keeps its own trust file
+
+The out-of-process grant signer reads a separate trust file. Drift between it and the roster fails
+closed (the sidecar refuses an approver it does not know); nothing keeps the two files in step.
+
+### NC-S8.13 — The audience and display-recipient checks compare kids, not keys
+
+A hold envelope is accepted by a gate whose tenant and gate kid match, and a decision by an approver
+whose kid is among the sealed display's recipients. On a shared store, a kid reused for a new key
+would pass both checks. The rotation rule that forbids reuse is an operator rule, not enforced across
+rosters.
+
+### NC-S8.14 — Whoever controls the gate's environment controls its trust root
+
+The environment selects the roster, the key file, the digest pin and the development escape that
+accepts a roster owned by the gate's own uid or a gate running as root.
+
+### NC-S8.15 — No interoperability or conformance claim is made for `noa.gate-roster/1`
+
+It is reference-gate configuration, checked by unit tests only. No conformance corpus is published.
+
+### NC-S8.16 — A gate running as root is not a protected posture
+
+Root can rewrite any roster and any state file, so the owner rule certifies nothing for a gate that
+runs as root. Pinned mode refuses to start as root unless the development escape is set, and the
+banner then reports `ROOT-GATE (unsafe)`. The protected posture is a dedicated non-root uid.
+
+### NC-S8.17 — A record signed after the roster expired is a record, not authority
+
+After its roster expires the gate still signs timeouts, cancellations, reported executions and
+uncertainties for holds and grants it authorized earlier, under the same gate key. A signature dated
+after the roster's `expiresAt` shows what was recorded; it does not show that the roster was current,
+and no grant, reservation or new hold is ever signed then.
+
+### NC-S8.18 — A rotation to a new epoch strands the old epoch's reserved grants
+
+Recording still requires the hold's envelope to carry this trust root's epoch. With a durable store, a
+roster rotation to a new key-manifest epoch therefore means grants reserved under the old epoch can
+no longer be recorded: a report or uncertainty for them is refused (`EPOCH_CHANGED`), and their
+executions stay unrecorded. Drain or report outstanding grants before rotating the epoch.
 
 ## 7. Changing this document
 

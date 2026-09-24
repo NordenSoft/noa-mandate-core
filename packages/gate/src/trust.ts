@@ -16,10 +16,24 @@
  * carries and the §13 verifier cross-checks — a bare, unverifiable "unknown" is never accepted.
  */
 
-import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
-import { generateKeyPair, signArtifact, refHash, type KeyEntry } from "noa-approval-artifacts";
-import { SIGNING_KEY_LIFECYCLE_SPEC, isHex64, type SigningKeyLifecycle } from "noa-receipt";
+import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { generateKeyPair, signArtifact, refHash, parseDocument, type KeyEntry } from "noa-approval-artifacts";
+import { SIGNING_KEY_LIFECYCLE_SPEC, isHex64, intrinsics, type SigningKeyLifecycle } from "noa-receipt";
+import { loadOrCreateKeyFile } from "noa-mcp-adapter-core";
+import { describeThrown, thrownCode } from "noa-mcp-adapter-core/safe-throw";
 import { encodeDocument } from "./bytes.js";
+import { readPinnedFile, takeOverStaleLock, tryCreateLock, writeFileAtomic } from "./pinned-file.js";
+import {
+  checkRosterClock,
+  isRosterId,
+  parseGateRoster,
+  type GateRoster,
+  type RosterApprover,
+  type RosterClockRefusalCode,
+  type RosterRefusalCode,
+} from "./roster.js";
+
+const { hasOwn, objectCreateNull, objectFreeze, objectKeys, isSafeInteger } = intrinsics;
 
 export interface GateKeyPair {
   kid: string;
@@ -164,10 +178,20 @@ export interface GateTrust {
   auditKid: string;
   auditHpkePublicKey: string;
 
+  /**
+   * The key-manifest EPOCH this gate stamps into every envelope and resolution. In alpha it is the
+   * manifest `createAlphaTrust` signs for itself; in pinned mode it is the (version, hash) the
+   * operator copied from the manifest the approver devices hold. The gate never parses or trusts that
+   * manifest — the pair is a consistency value `decide()` and `reserve()` compare against.
+   */
   keyManifestVersion: number;
   keyManifestHash: string;
-  keyManifest: Record<string, unknown>;
-  keyDelegation: Record<string, unknown>;
+  /** ALPHA ONLY: the self-signed manifest and delegation. A pinned gate holds neither — it never
+   *  signs a manifest, and nothing on the gate's decision path reads these two members. */
+  keyManifest?: Record<string, unknown>;
+  keyDelegation?: Record<string, unknown>;
+  /** Set iff this trust root came from a pinned roster (`createPinnedTrust`). Frozen, null-prototype. */
+  pinned?: PinnedTrustState;
 
   /** kid → KeyEntry for `verifyArtifact` (structural + role checks on the phone Decision Artifact). */
   keyring: Record<string, KeyEntry>;
@@ -180,6 +204,33 @@ export interface GateTrust {
 }
 
 /**
+ * GRANT-NONCE source with the format guard, shared by both trust constructors so there is one copy.
+ *
+ * 32 CSPRNG bytes, hex — injectable for deterministic tests exactly the way `ids` is. EVERY draw is
+ * format-validated at the trust boundary, so an injected bad nonce source fails HERE, loudly, instead
+ * of minting schema-invalid (or worse, schema-valid but degenerate) grants that fail silently
+ * downstream. Per-call rather than a one-off probe draw at construction: a probe draw would silently
+ * shift injected deterministic sequences. Entropy is unenforceable at this boundary; format is what
+ * CAN be checked, and is.
+ */
+function guardedNonceSource(injected: (() => string) | undefined, label: string): () => string {
+  const nonceSource = injected ?? (() => randomBytes(32).toString("hex"));
+  return () => {
+    const nonce = nonceSource();
+    // Validated with the kernel's captured-charCode `isHex64`, never a live `RegExp.prototype.test`
+    // (which per spec does a dynamic Get(re,"exec") and is poisonable at the prototype); the guard
+    // that refuses a bad nonce must not itself dispatch through a slot an attacker can rewrite.
+    if (!isHex64(nonce)) {
+      throw new Error(
+        `${label}: newNonce() produced a value that is not 64 lowercase hex characters — ` +
+          "grant nonces are the D7 correlation seed and must satisfy the grant schema's ^[0-9a-f]{64}$",
+      );
+    }
+    return nonce;
+  };
+}
+
+/**
  * Build a self-contained alpha trust root: a root authority, a delegated (== tenant-authority)
  * manifest signer, a gate key, and a single approver key + audit key. Deterministic-friendly
  * (inject `now`/`ids`). This is the alpha F21 single-static-manifest — issued once, never rotated.
@@ -187,26 +238,7 @@ export interface GateTrust {
 export function createAlphaTrust(input: CreateTrustInput): GateTrust {
   const now = input.now ?? (() => Date.now());
   const newId = input.ids ?? (() => randomUUID());
-  // 32 CSPRNG bytes, hex — injectable for deterministic tests exactly the way `ids` is.
-  const nonceSource = input.nonces ?? (() => randomBytes(32).toString("hex"));
-  // EVERY draw is format-validated at the trust boundary, so an injected bad
-  // nonce source fails HERE, loudly, instead of minting schema-invalid (or worse, schema-valid
-  // but degenerate) grants that fail silently downstream. Per-call rather than a one-off probe
-  // draw at construction: a probe draw would silently shift injected deterministic sequences.
-  // Entropy is unenforceable at this boundary; format is what CAN be checked, and is.
-  const newNonce = () => {
-    const nonce = nonceSource();
-    // Validated with the kernel's captured-charCode `isHex64`, never a live `RegExp.prototype.test`
-    // (which per spec does a dynamic Get(re,"exec") and is poisonable at the prototype); the guard
-    // that refuses a bad nonce must not itself dispatch through a slot an attacker can rewrite.
-    if (!isHex64(nonce)) {
-      throw new Error(
-        "createAlphaTrust: newNonce() produced a value that is not 64 lowercase hex characters — " +
-          "grant nonces are the D7 correlation seed and must satisfy the grant schema's ^[0-9a-f]{64}$",
-      );
-    }
-    return nonce;
-  };
+  const newNonce = guardedNonceSource(input.nonces, "createAlphaTrust");
   const tenant = input.tenant;
   const approverRole = input.approverRole ?? "approve-critical";
 
@@ -319,7 +351,7 @@ export function createAlphaTrust(input: CreateTrustInput): GateTrust {
 
   // ── P0-5 (2026-07-31): THIS RESOLVER WAS THE THIRD ONE, AND IT DROPPED `validFrom` ───────────
   // The key manifest built 30 lines above declares `validFrom` on every key (:145, :154, …). This
-  // keyring — the one `engine.ts:711` hands to `verifyArtifact` for LIVE Decision verification —
+  // keyring — the one `engine.ts:988` hands to `verifyArtifact` for LIVE Decision verification —
   // was rebuilt from the same inputs WITHOUT it, so `verifyArtifact` saw `undefined` and skipped
   // the activation check entirely. A future-activated approver could sign before activation and
   // pass. Current alpha constructors choose a past `validFrom`, which bounds the exposure, but
@@ -394,4 +426,622 @@ export function createAlphaTrust(input: CreateTrustInput): GateTrust {
     bootId: newId(),
     uptimeResetAt: iso(t0),
   };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// PINNED TRUST — the gate's trust root read from an operator-provisioned roster (`noa.gate-roster/1`)
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// WHY. `createAlphaTrust` mints a fresh root, authority and gate key on every boot and signs its own
+// delegation and manifest, so the process that authorizes effects is also the source of the trust
+// material that says it may — a control producing its own evidence. And whoever writes the keyring
+// authorizes every effect: `/decision` is not scoped to the hold's owner, so the signature check
+// against this keyring is the only thing between a request and a grant.
+//
+// A PINNED trust root holds a persistent gate key loaded from a file (never minted at boot), takes its
+// approver, audit key, epoch and quorum ONLY from the roster on the gate host, and never falls back to
+// alpha: every failure refuses the boot with a stable code. docs/gate-pinned-trust.md is the operator
+// contract; NON-CLAIMS.md §S8 is what this does not establish.
+
+/** How the roster high-water state compared on this boot. */
+export type RosterStateStatus = "INITIALIZED" | "UNCHANGED" | "ADVANCED";
+
+/** The pinned facts the engine re-checks at `createHold`, `decide` and `reserve`. Frozen, null-prototype. */
+export interface PinnedTrustState {
+  readonly rosterVersion: number;
+  readonly rosterDigest: string;
+  /** risk class -> required approvals. A /1 gate accepts only 1; anything else is refused at load AND at decide. */
+  readonly quorum: Readonly<Record<string, number>>;
+  /** Roster `expiresAt`, whole milliseconds rounded down. At or after it the gate authorizes nothing. */
+  readonly expiresAtMs: number;
+  readonly stateStatus: RosterStateStatus;
+}
+
+export interface CreatePinnedTrustInput {
+  roster: GateRoster;
+  rosterDigest: string;
+  /** The roster's single active approver (`parseGateRoster` → `activeApproverKid`). */
+  activeApproverKid: string;
+  /** Roster `expiresAt` in whole milliseconds (`parseGateRoster` → `expiresAtMs`). */
+  expiresAtMs: number;
+  /**
+   * The persistent gate key. PRECONDITION, enforced by `loadPinnedTrust` stage 9 and nowhere else so
+   * that the control stays measurable: `{kid, publicKey}` equals `roster.gate` and the private key
+   * derives that public key.
+   */
+  gateKey: GateKeyPair;
+  stateStatus: RosterStateStatus;
+  now?: () => number;
+  ids?: () => string;
+  nonces?: () => string;
+}
+
+function nullProto<T extends object>(src: T): T {
+  const out = objectCreateNull<T>();
+  const keys = objectKeys(src);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i] as string;
+    (out as Record<string, unknown>)[k] = (src as Record<string, unknown>)[k];
+  }
+  return out;
+}
+
+/**
+ * Build a GateTrust from a validated roster and the persistent gate key. Nothing here generates a key:
+ * the approver's private half never exists in this process, so the co-residency rule `createAlphaTrust`
+ * enforces for an external signer holds here by construction.
+ */
+export function createPinnedTrust(input: CreatePinnedTrustInput): GateTrust {
+  const now = input.now ?? (() => Date.now());
+  const newId = input.ids ?? (() => randomUUID());
+  const newNonce = guardedNonceSource(input.nonces, "createPinnedTrust");
+  const { roster } = input;
+  const iso = (ms: number) => new Date(ms).toISOString();
+
+  const active = roster.approvers[input.activeApproverKid] as RosterApprover;
+  const exec = roster.executionSigner;
+  // The authority split, from the roster: when an external execution signer is pinned, the gate key
+  // keeps only `hold-signer` and a grant signed by it verifies nowhere.
+  const pinnedGateRoles: string[] = exec !== null ? ["hold-signer"] : ["hold-signer", "execution-signer"];
+
+  // The live keyring, built ONLY from the roster: no ROOT and no DELEGATED entry exists, because a
+  // pinned gate never verifies or signs a manifest. Every entry carries its declared activation and
+  // revocation; a revoked approver stays present so its decisions are refused as REVOKED rather than
+  // as unknown. [proof: RES-PAR-GATE-PINNED-KEYRING] test/pinned-decide.test.ts.
+  const keyring = objectCreateNull<Record<string, KeyEntry>>();
+  keyring[roster.gate.kid] = objectFreeze(nullProto({
+    publicKey: roster.gate.publicKey,
+    type: "GATE" as const,
+    roles: pinnedGateRoles,
+    validFrom: roster.validFrom,
+    revokedAt: null,
+  }));
+  if (exec !== null) {
+    keyring[exec.kid] = objectFreeze(nullProto({
+      publicKey: exec.publicKey,
+      type: "GATE" as const,
+      roles: ["execution-signer"],
+      validFrom: roster.validFrom,
+      revokedAt: null,
+    }));
+  }
+  const approverKids = objectKeys(roster.approvers);
+  const receiptKeys = objectCreateNull<Record<string, { publicKey: string; retiredAt: string | null }>>();
+  receiptKeys[roster.gate.kid] = objectFreeze(nullProto({ publicKey: roster.gate.publicKey, retiredAt: null }));
+  for (let i = 0; i < approverKids.length; i++) {
+    const kid = approverKids[i] as string;
+    const a = roster.approvers[kid] as RosterApprover;
+    keyring[kid] = objectFreeze(nullProto({
+      publicKey: a.publicKey,
+      type: "APPROVER" as const,
+      roles: [a.role],
+      validFrom: a.validFrom,
+      revokedAt: a.revokedAt,
+    }));
+    // A non-null retirement makes the kid unusable for current verification (src/verification-keyring.ts).
+    receiptKeys[kid] = objectFreeze(nullProto({ publicKey: a.publicKey, retiredAt: a.revokedAt }));
+  }
+  const receiptKeyring: SigningKeyLifecycle = objectFreeze(nullProto({
+    spec: SIGNING_KEY_LIFECYCLE_SPEC,
+    keys: objectFreeze(receiptKeys),
+  }));
+
+  const pinned: PinnedTrustState = objectFreeze(nullProto({
+    rosterVersion: roster.rosterVersion,
+    rosterDigest: input.rosterDigest,
+    quorum: roster.quorum,
+    expiresAtMs: input.expiresAtMs,
+    stateStatus: input.stateStatus,
+  }));
+
+  return {
+    tenant: roster.tenant,
+    now,
+    newId,
+    newNonce,
+    gate: { kid: input.gateKey.kid, publicKey: input.gateKey.publicKey, privateKey: input.gateKey.privateKey },
+    ...(exec !== null ? { executionSigner: { kid: exec.kid, publicKey: exec.publicKey } } : {}),
+    approver: { kid: input.activeApproverKid, publicKey: active.publicKey },
+    approverHpkePublicKey: active.hpkePublicKey,
+    auditKid: roster.audit.kid,
+    auditHpkePublicKey: roster.audit.hpkePublicKey,
+    keyManifestVersion: roster.epoch.keyManifestVersion,
+    keyManifestHash: roster.epoch.keyManifestHash,
+    keyring: objectFreeze(keyring),
+    receiptKeyring,
+    pinned,
+    bootId: newId(),
+    uptimeResetAt: iso(now()),
+  };
+}
+
+// ── boot: stages 0-11 ────────────────────────────────────────────────────────────────────────────
+
+export type PinnedBootCode =
+  | "PINNED_PLATFORM_UNSUPPORTED"
+  | "CONFIG_PINNED_INCOMPLETE"
+  | "CONFIG_SOURCE_CONFLICT"
+  | "ROSTER_FILE_MISSING"
+  | "ROSTER_FILE_UNSAFE"
+  | RosterRefusalCode
+  | RosterClockRefusalCode
+  | "GATE_KEY_FILE_MISSING"
+  | "GATE_KEY_FILE_UNSAFE"
+  | "GATE_KEY_INCONSISTENT"
+  | "GATE_KEY_NOT_PINNED"
+  | "ROSTER_EXEC_SIGNER_MISMATCH"
+  | "PINNED_ROOT_GATE"
+  | "STATE_LOCKED"
+  | "STATE_DIR_NOT_WRITABLE"
+  | "STATE_FILE_UNSAFE"
+  | "STATE_FILE_CORRUPT"
+  | "ROSTER_ROLLBACK"
+  | "ROSTER_EQUIVOCATION"
+  | "STATE_FILE_WRITE_FAILED";
+
+export interface PinnedRefusal {
+  readonly ok: false;
+  readonly code: PinnedBootCode;
+  readonly detail: string;
+}
+const bootRefusal = (code: PinnedBootCode, detail: string): PinnedRefusal => ({ ok: false, code, detail });
+
+/** The environment names that select pinned mode. ANY of them being present means pinned was asked for. */
+const PINNED_ENV = ["NOA_GATE_ROSTER_FILE", "NOA_GATE_KEY_FILE", "NOA_GATE_ROSTER_SHA256", "NOA_GATE_UNSAFE_ROSTER_SAME_UID"] as const;
+
+export type TrustModeRequest =
+  | { readonly mode: "alpha" }
+  | {
+      readonly mode: "pinned";
+      readonly rosterFile: string;
+      readonly keyFile: string;
+      readonly rosterSha256: string | undefined;
+      readonly unsafeSameUid: boolean;
+    }
+  | PinnedRefusal;
+
+/**
+ * Stages 0-1: which trust root the environment asks for.
+ *
+ * Pinned mode is requested the moment ANY pinned variable is present — including an empty one, and
+ * including the digest pin or the same-uid escape on their own. Treating a present-but-empty or
+ * half-supplied pinned configuration as "not pinned" would boot the self-minting alpha root for an
+ * operator who asked for the opposite; that is the downgrade this refuses.
+ */
+export function resolveTrustMode(env: Readonly<Record<string, string | undefined>>, platformHasEuid: boolean): TrustModeRequest {
+  let requested = false;
+  for (let i = 0; i < PINNED_ENV.length; i++) if (env[PINNED_ENV[i] as string] !== undefined) requested = true;
+  if (!requested) return { mode: "alpha" };
+
+  // stage 0 — the owner rule needs POSIX uids; without them it cannot be evaluated, only skipped.
+  if (!platformHasEuid) {
+    return bootRefusal("PINNED_PLATFORM_UNSUPPORTED", "pinned trust needs POSIX user ids to enforce the roster owner rule; this platform has none");
+  }
+  // stage 1 — both files, and no second source of identities.
+  const rosterFile = env["NOA_GATE_ROSTER_FILE"];
+  const keyFile = env["NOA_GATE_KEY_FILE"];
+  if (rosterFile === undefined || rosterFile === "" || keyFile === undefined || keyFile === "") {
+    return bootRefusal(
+      "CONFIG_PINNED_INCOMPLETE",
+      "pinned mode needs BOTH NOA_GATE_ROSTER_FILE and NOA_GATE_KEY_FILE (non-empty); a pinned variable was set without them",
+    );
+  }
+  const conflict = pinnedEnvironmentConflict(env);
+  if (conflict !== null) return conflict;
+  return {
+    mode: "pinned",
+    rosterFile,
+    keyFile,
+    rosterSha256: env["NOA_GATE_ROSTER_SHA256"],
+    unsafeSameUid: env["NOA_GATE_UNSAFE_ROSTER_SAME_UID"] === "1",
+  };
+}
+
+/**
+ * The second-identity-source rule, shared by `serve` (through `resolveTrustMode`) and `roster-check`:
+ * any `NOA_GATE_APPROVER_*`, `NOA_GATE_GRANT_SIGNER_KID` or `NOA_GATE_GRANT_SIGNER_PUBLIC_KEY` present
+ * is CONFIG_SOURCE_CONFLICT. Identities come only from the roster; a second source is refused, not ignored.
+ */
+export function pinnedEnvironmentConflict(env: Readonly<Record<string, string | undefined>>): PinnedRefusal | null {
+  const conflicting: string[] = [];
+  for (const name of objectKeys(env as Record<string, unknown>)) {
+    if (env[name] === undefined) continue;
+    if (name.startsWith("NOA_GATE_APPROVER_") || name === "NOA_GATE_GRANT_SIGNER_KID" || name === "NOA_GATE_GRANT_SIGNER_PUBLIC_KEY") {
+      conflicting[conflicting.length] = name;
+    }
+  }
+  if (conflicting.length === 0) return null;
+  return bootRefusal(
+    "CONFIG_SOURCE_CONFLICT",
+    `${conflicting.sort().join(", ")} set in pinned mode; identities come only from the roster, and a second source is refused rather than ignored`,
+  );
+}
+
+/** Largest accepted roster. It names a few keys; the bound exists so a hostile file cannot be large. */
+export const ROSTER_MAX_BYTES = 64 * 1024;
+const STATE_MAX_BYTES = 4 * 1024;
+export const ROSTER_STATE_SPEC = "noa.gate-roster-state/1" as const;
+
+/** The effective uid the key-file loader trusts (captured the same way `key-file.mjs` captures it). */
+const PROCESS_EUID: number | null = typeof process.geteuid === "function" ? process.geteuid() : null;
+
+export interface LoadPinnedTrustInput extends LoadPinnedRosterInput {
+  keyFile: string;
+  /** Whether NOA_GATE_GRANT_SIGNER_SOCKET is set: must agree with the roster's executionSigner. */
+  grantSignerSocketSet: boolean;
+  /** Take the high-water lock (default true). `roster-check` reads the state without it and never writes. */
+  lockState?: boolean;
+  /** TEST SEAM: the uid the state file's owner rule accepts besides root. Defaults to this process's euid. */
+  stateOwnerEuid?: number;
+  /** TEST SEAM: whether a lock holder's pid is alive. Defaults to a signal-0 probe. */
+  isProcessAlive?: (pid: number) => boolean;
+  now?: () => number;
+  ids?: () => string;
+  nonces?: () => string;
+}
+
+export interface PinnedBoot {
+  readonly ok: true;
+  readonly trust: GateTrust;
+  readonly roster: GateRoster;
+  readonly rosterDigest: string;
+  readonly activeApproverKid: string;
+  readonly stateStatus: RosterStateStatus;
+  readonly rosterCustody: RosterCustody;
+  /**
+   * Stage 11's write: record this roster as the high-water mark. Call it only after every other check
+   * has passed and before listening. The state is RE-READ and RE-COMPARED under the lock taken at load,
+   * so a state file changed meanwhile (by anything that ignores the lock) is still caught. Releases the
+   * lock. Returns null on success (or when nothing changed).
+   */
+  commitState(): PinnedRefusal | null;
+  /** Release the state lock without writing (a boot that stops after loading must call it). Idempotent. */
+  release(): void;
+}
+
+type StateRead =
+  | { ok: true; state: { rosterVersion: number; rosterDigest: string } | null }
+  | PinnedRefusal;
+
+function readRosterState(statePath: string, ownerEuid: number | null): StateRead {
+  const r = readPinnedFile(statePath, {
+    maxBytes: STATE_MAX_BYTES,
+    forbiddenModeBits: 0o077,
+    requireSingleLink: true,
+    // The key-file owner rule: the gate's own uid or root. The state is the gate's own custody.
+    ownerAllowed: (uid) => uid === 0 || uid === ownerEuid,
+    checkAncestors: false,
+  });
+  if (!r.ok) {
+    if (r.token === "missing") return { ok: true, state: null };
+    return bootRefusal("STATE_FILE_UNSAFE", r.detail);
+  }
+  const parsed = parseDocument(r.bytes, "roster state");
+  if (!parsed.ok) return bootRefusal("STATE_FILE_CORRUPT", parsed.reason);
+  const doc = parsed.value;
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return bootRefusal("STATE_FILE_CORRUPT", "the state file is not a JSON object");
+  const o = doc as Record<string, unknown>;
+  const keys = objectKeys(o);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i] as string;
+    if (k !== "spec" && k !== "rosterVersion" && k !== "rosterDigest") return bootRefusal("STATE_FILE_CORRUPT", `unrecognized member ${JSON.stringify(k)}`);
+  }
+  const spec = hasOwn(o, "spec") ? o["spec"] : undefined;
+  const version = hasOwn(o, "rosterVersion") ? o["rosterVersion"] : undefined;
+  const digest = hasOwn(o, "rosterDigest") ? o["rosterDigest"] : undefined;
+  if (spec !== ROSTER_STATE_SPEC) return bootRefusal("STATE_FILE_CORRUPT", `spec must be ${JSON.stringify(ROSTER_STATE_SPEC)}`);
+  if (typeof version !== "number" || !isSafeInteger(version) || version < 1) return bootRefusal("STATE_FILE_CORRUPT", "rosterVersion must be a safe integer >= 1");
+  if (typeof digest !== "string" || digest.length !== 71 || !digest.startsWith("sha256:") || !isLowerHex(digest.slice(7))) {
+    return bootRefusal("STATE_FILE_CORRUPT", "rosterDigest must be sha256: followed by 64 lowercase hex characters");
+  }
+  return { ok: true, state: { rosterVersion: version, rosterDigest: digest } };
+}
+
+function isLowerHex(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (!((c >= 0x30 && c <= 0x39) || (c >= 0x61 && c <= 0x66))) return false;
+  }
+  return true;
+}
+
+/**
+ * Stage 9's post-load checks on the persistent gate key: a kid under the id rule, an Ed25519 private
+ * key whose derived public key IS the stored public key, and a pair equal to the roster's `gate`.
+ */
+export function checkGateKey(key: GateKeyPair, pinned: { kid: string; publicKey: string }): PinnedRefusal | null {
+  if (!isRosterId(key.kid)) return bootRefusal("GATE_KEY_INCONSISTENT", "the key file's kid does not satisfy the id rule (1-64 of [a-z0-9-], first [a-z], last [a-z0-9])");
+  let derived: string;
+  try {
+    const priv = createPrivateKey({ key: Buffer.from(key.privateKey, "base64"), format: "der", type: "pkcs8" });
+    if (priv.asymmetricKeyType !== "ed25519") return bootRefusal("GATE_KEY_INCONSISTENT", "the key file's private key is not Ed25519");
+    derived = (createPublicKey(priv).export({ type: "spki", format: "der" }) as Buffer).toString("base64");
+  } catch (err) {
+    return bootRefusal("GATE_KEY_INCONSISTENT", `the key file's private key cannot be read (${describeThrown(err)})`);
+  }
+  if (derived !== key.publicKey) {
+    return bootRefusal("GATE_KEY_INCONSISTENT", "the key file's publicKey is not the public half of its privateKey; the gate would sign envelopes nobody can verify");
+  }
+  if (key.kid !== pinned.kid || key.publicKey !== pinned.publicKey) {
+    return bootRefusal("GATE_KEY_NOT_PINNED", `the key file's identity ${JSON.stringify(key.kid)} is not the roster's gate member ${JSON.stringify(pinned.kid)}`);
+  }
+  return null;
+}
+
+/**
+ * What the boot banner says about who can rewrite the roster. Only ADMIN-OWNED is the protected posture:
+ * the other two are development escapes that must be typed out (NOA_GATE_UNSAFE_ROSTER_SAME_UID=1).
+ */
+export type RosterCustody = "ADMIN-OWNED" | "SAME-UID (unsafe)" | "ROOT-GATE (unsafe)";
+
+export interface LoadPinnedRosterInput {
+  rosterFile: string;
+  /** NOA_GATE_ROSTER_SHA256: compared exactly with the computed `sha256:<hex>` digest. */
+  rosterSha256: string | undefined;
+  /** NOA_GATE_UNSAFE_ROSTER_SAME_UID=1: accept a roster owned by the gate's own uid (development only). */
+  unsafeSameUid: boolean;
+  /** NOA_GATE_TENANT, when set: must equal the roster's tenant. */
+  tenantEnv: string | undefined;
+  /** The gate's effective uid. A PARAMETER so a test can stand in for another principal; the CLI passes process.geteuid(). */
+  gateEuid: number;
+  /** The gate's clock at load (whole milliseconds). */
+  nowMs: number;
+}
+
+export interface PinnedRoster {
+  readonly ok: true;
+  readonly roster: GateRoster;
+  readonly rosterDigest: string;
+  readonly activeApproverKid: string;
+  readonly expiresAtMs: number;
+  readonly rosterCustody: RosterCustody;
+}
+
+/**
+ * Stages 2-8 — the roster alone, first failure wins:
+ *
+ *    2 file     PINNED_ROOT_GATE (the gate's euid is 0) · ROSTER_FILE_MISSING · ROSTER_FILE_UNSAFE (detail
+ *               token: path-form, symlink-ancestor, symlink, not-regular, nlink, size, mode, owner, ancestor,
+ *               short-read, unreadable)
+ *  3-6 roster   `parseGateRoster` (the digest pin, stage 4, runs before any semantic rule)
+ *    7 tenant   CONFIG_SOURCE_CONFLICT when NOA_GATE_TENANT is set and differs from the roster
+ *    8 clock    `checkRosterClock`
+ */
+export function loadPinnedRoster(input: LoadPinnedRosterInput): PinnedRoster | PinnedRefusal {
+  // ── stage 2: the roster file ──────────────────────────────────────────────────────────────────
+  const gateEuid = input.gateEuid;
+  // A gate running as root can rewrite ANY roster — root-owned or an administrator's — and its rewrite
+  // survives a restart, so the owner rule below would certify nothing while the banner said ADMIN-OWNED.
+  if (gateEuid === 0 && !input.unsafeSameUid) {
+    return bootRefusal(
+      "PINNED_ROOT_GATE",
+      "the gate runs as root, which can rewrite any roster; run it as a dedicated non-root uid (or set NOA_GATE_UNSAFE_ROSTER_SAME_UID=1 for development)",
+    );
+  }
+  const file = readPinnedFile(input.rosterFile, {
+    maxBytes: ROSTER_MAX_BYTES,
+    forbiddenModeBits: 0o022,
+    requireSingleLink: true,
+    // Root, or an administrator uid OTHER than the gate's: a roster the gate's own uid can rewrite is a
+    // roster a compromised gate (or an agent sharing its uid) can rewrite and have survive a restart.
+    ownerAllowed: input.unsafeSameUid ? () => true : (uid) => uid === 0 || uid !== gateEuid,
+    checkAncestors: true,
+  });
+  if (!file.ok) {
+    if (file.token === "missing") return bootRefusal("ROSTER_FILE_MISSING", file.detail);
+    return bootRefusal("ROSTER_FILE_UNSAFE", file.detail);
+  }
+
+  // ── stages 3-6 ─────────────────────────────────────────────────────────────────────────────────
+  const parsed = parseGateRoster(file.bytes, input.rosterSha256 !== undefined ? { expectedDigest: input.rosterSha256 } : {});
+  if (!parsed.ok) return bootRefusal(parsed.code, parsed.reason);
+  const { roster } = parsed;
+
+  // ── stage 7: one tenant ────────────────────────────────────────────────────────────────────────
+  if (input.tenantEnv !== undefined && input.tenantEnv !== roster.tenant) {
+    return bootRefusal("CONFIG_SOURCE_CONFLICT", `NOA_GATE_TENANT ${JSON.stringify(input.tenantEnv)} differs from the roster's tenant ${JSON.stringify(roster.tenant)}`);
+  }
+
+  // ── stage 8: the gate's clock ──────────────────────────────────────────────────────────────────
+  const clock = checkRosterClock(roster, parsed.activeApproverKid, input.nowMs);
+  if (!clock.ok) return bootRefusal(clock.code, clock.reason);
+
+  return {
+    ok: true,
+    roster,
+    rosterDigest: parsed.digest,
+    activeApproverKid: parsed.activeApproverKid,
+    expiresAtMs: parsed.expiresAtMs,
+    rosterCustody: gateEuid === 0 ? "ROOT-GATE (unsafe)" : input.unsafeSameUid ? "SAME-UID (unsafe)" : "ADMIN-OWNED",
+  };
+}
+
+/**
+ * Load a pinned trust root, stages 2-11, first failure wins. Stages 0-1 are `resolveTrustMode`,
+ * stages 2-8 are `loadPinnedRoster`, then:
+ *
+ *    9 key file GATE_KEY_FILE_MISSING · GATE_KEY_FILE_UNSAFE · GATE_KEY_INCONSISTENT · GATE_KEY_NOT_PINNED
+ *   10 signer   ROSTER_EXEC_SIGNER_MISMATCH
+ *   11 state    STATE_LOCKED · STATE_FILE_UNSAFE · STATE_FILE_CORRUPT · ROSTER_ROLLBACK · ROSTER_EQUIVOCATION
+ *               (and, from `commitState`, the same comparison again plus STATE_FILE_WRITE_FAILED)
+ *
+ * There is no retry and no fallback: a caller that receives a refusal must not start a gate.
+ */
+export function loadPinnedTrust(input: LoadPinnedTrustInput): PinnedBoot | PinnedRefusal {
+  const loaded = loadPinnedRoster(input);
+  if (!loaded.ok) return loaded;
+  const { roster } = loaded;
+
+  // ── stage 9: the persistent gate key — LOAD ONLY ───────────────────────────────────────────────
+  // The shared loader runs `mintKeyPair` before it creates anything, so a mint that throws gives
+  // load-only behaviour and no file ever appears. `noa-gate keygen` is the only minting path.
+  let mintAttempted = false;
+  let gateKey: GateKeyPair;
+  try {
+    gateKey = loadOrCreateKeyFile({
+      keyFile: input.keyFile,
+      mintKeyPair: () => {
+        mintAttempted = true;
+        throw new Error("GATE_KEY_FILE_MISSING");
+      },
+      callerLabel: "noa-gate",
+    });
+  } catch (err) {
+    if (mintAttempted) {
+      return bootRefusal("GATE_KEY_FILE_MISSING", `${JSON.stringify(input.keyFile)} does not exist; create it with \`noa-gate keygen --key-file <path> --kid <kid>\``);
+    }
+    return bootRefusal("GATE_KEY_FILE_UNSAFE", describeThrown(err));
+  }
+  const keyProblem = checkGateKey(gateKey, roster.gate);
+  if (keyProblem !== null) return keyProblem;
+
+  // ── stage 10: signer posture ───────────────────────────────────────────────────────────────────
+  if ((roster.executionSigner === null) === input.grantSignerSocketSet) {
+    return bootRefusal(
+      "ROSTER_EXEC_SIGNER_MISMATCH",
+      roster.executionSigner === null
+        ? "NOA_GATE_GRANT_SIGNER_SOCKET is set but the roster pins no executionSigner"
+        : "the roster pins an executionSigner but NOA_GATE_GRANT_SIGNER_SOCKET is not set",
+    );
+  }
+
+  // ── stage 11: anti-rollback high-water, read-compare-write under ONE lock ───────────────────────
+  // Two overlapping boots that each read version N and then write their own higher version in the
+  // opposite order would LOWER the floor; an atomic rename prevents torn writes, not that. The lock is
+  // held from this read to the rename in `commitState` (or until `release`).
+  const statePath = `${input.keyFile}.roster-state`;
+  const stateOwner = input.stateOwnerEuid ?? PROCESS_EUID;
+  let releaseLock: () => void = () => {};
+  if (input.lockState !== false) {
+    const lock = acquireStateLock(`${statePath}.lock`, input.isProcessAlive ?? processAlive);
+    if (!lock.ok) return lock;
+    releaseLock = lock.release;
+  }
+  const compared = compareHighWater(readRosterState(statePath, stateOwner), roster.rosterVersion, loaded.rosterDigest);
+  if (!compared.ok) {
+    releaseLock();
+    return compared;
+  }
+  const stateStatus = compared.status;
+
+  const trust = createPinnedTrust({
+    roster,
+    rosterDigest: loaded.rosterDigest,
+    activeApproverKid: loaded.activeApproverKid,
+    expiresAtMs: loaded.expiresAtMs,
+    gateKey,
+    stateStatus,
+    ...(input.now ? { now: input.now } : {}),
+    ...(input.ids ? { ids: input.ids } : {}),
+    ...(input.nonces ? { nonces: input.nonces } : {}),
+  });
+  const stateBytes = encodeDocument({ rosterDigest: loaded.rosterDigest, rosterVersion: roster.rosterVersion, spec: ROSTER_STATE_SPEC });
+  return {
+    ok: true,
+    trust,
+    roster,
+    rosterDigest: loaded.rosterDigest,
+    activeApproverKid: loaded.activeApproverKid,
+    stateStatus,
+    rosterCustody: loaded.rosterCustody,
+    commitState(): PinnedRefusal | null {
+      try {
+        // Re-read and re-compare under the lock: a state written meanwhile by anything that ignores the
+        // lock (an administrator's restore, a stale holder) must not be overwritten with a lower floor.
+        const again = compareHighWater(readRosterState(statePath, stateOwner), roster.rosterVersion, loaded.rosterDigest);
+        if (!again.ok) return again;
+        if (again.status === "UNCHANGED") return null;
+        const w = writeFileAtomic(statePath, stateBytes);
+        return w.ok ? null : bootRefusal("STATE_FILE_WRITE_FAILED", w.detail);
+      } finally {
+        releaseLock();
+      }
+    },
+    release(): void {
+      releaseLock();
+    },
+  };
+}
+
+/** Compare a roster against the recorded high-water mark. */
+function compareHighWater(
+  state: StateRead,
+  rosterVersion: number,
+  rosterDigest: string,
+): { ok: true; status: RosterStateStatus } | PinnedRefusal {
+  if (!state.ok) return state;
+  if (state.state === null) return { ok: true, status: "INITIALIZED" };
+  if (rosterVersion < state.state.rosterVersion) {
+    return bootRefusal(
+      "ROSTER_ROLLBACK",
+      `roster version ${rosterVersion} is below the high-water mark ${state.state.rosterVersion}; an older roster may re-admit a revoked approver`,
+    );
+  }
+  if (rosterVersion === state.state.rosterVersion) {
+    if (rosterDigest !== state.state.rosterDigest) {
+      return bootRefusal(
+        "ROSTER_EQUIVOCATION",
+        `roster version ${rosterVersion} was already loaded with digest ${state.state.rosterDigest}; a changed roster needs a new version`,
+      );
+    }
+    return { ok: true, status: "UNCHANGED" };
+  }
+  return { ok: true, status: "ADVANCED" };
+}
+
+/** Signal 0 probes existence without delivering anything; EPERM means alive but not ours. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return thrownCode(err) === "EPERM";
+  }
+}
+
+/**
+ * The high-water lock: exclusive create. A lock whose holder is alive is STATE_LOCKED. A lock whose
+ * holder is dead is taken over ONCE by identity (`takeOverStaleLock`) and the create retried; if the
+ * lock changed hands meanwhile, STATE_LOCKED. A directory the gate cannot create files in is
+ * STATE_DIR_NOT_WRITABLE: the lock and the state file live beside the key file, so its directory must be
+ * writable by the gate.
+ */
+function acquireStateLock(lockPath: string, isAlive: (pid: number) => boolean): { ok: true; release: () => void } | PinnedRefusal {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const a = tryCreateLock(lockPath);
+    if (a.ok) return { ok: true, release: () => a.release() };
+    if (a.kind === "unwritable") {
+      return bootRefusal("STATE_DIR_NOT_WRITABLE", `${a.detail}; the key file's directory must be writable by the gate (the high-water state and its lock live there)`);
+    }
+    if (a.holderPid === null || a.holderId === null) {
+      return bootRefusal("STATE_LOCKED", `${a.detail} and names no readable holder; an administrator must inspect and remove it`);
+    }
+    if (isAlive(a.holderPid)) {
+      return bootRefusal("STATE_LOCKED", `the roster high-water state is locked by live process ${a.holderPid}; another gate is starting on this key file`);
+    }
+    if (attempt === 0 && takeOverStaleLock(lockPath, a.holderId) === "changed") {
+      return bootRefusal("STATE_LOCKED", `${JSON.stringify(lockPath)} changed hands while its dead holder's lock was being taken over; another gate is starting on this key file`);
+    }
+  }
+  return bootRefusal("STATE_LOCKED", `${JSON.stringify(lockPath)}: a stale lock could not be replaced`);
 }

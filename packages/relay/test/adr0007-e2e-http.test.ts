@@ -31,7 +31,8 @@ import { httpJson } from "./http-client.js";
 
 const SECRET = "operator-secret-value";
 const KID = "approver-e2e-1";
-const PK = "c".repeat(64);
+// A generated Ed25519 test public key (registration applies strict public-key validation).
+const PK = "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1";
 const TENANT = "tenant-a";
 
 test("ADR-0007 end to end: a phone enrols against a relay with an operator secret configured", async () => {

@@ -50,7 +50,8 @@
  * string alone is insufficient; the canonical param set is executable real-path + argv + cwd +
  * allowed-env-hash + stdin-hash + tenant + target-env). The gate CANONICALIZES the real params
  * itself and computes `paramsHash`; a caller-supplied `paramsHash` that disagrees is REJECTED
- * (ENFORCED never trusts the caller's hash).
+ * (ENFORCED never trusts the caller's hash). This module also defines `noa.ledger.transfer/1` as a
+ * sealed adapter that is deliberately NOT registered (see `ledgerTransferProjection` below).
  */
 
 import { canonicalize, sha256Prefixed, parseDocument } from "noa-approval-artifacts";
@@ -58,8 +59,18 @@ import { canonicalize, sha256Prefixed, parseDocument } from "noa-approval-artifa
 // rather than a new top-level export. Adding one tripped L1 and the C2 registry test —
 // correctly: a new name on a published surface is a permanent compatibility commitment,
 // and this needs no new name at all.
-import { intrinsics } from "noa-receipt";
-const { hasOwn, strIncludes } = intrinsics;
+import {
+  intrinsics,
+  // `noa.ledger.transfer/1` is PUBLIC wire language (docs/ledger-transfer-spec.md): the kernel owns
+  // the whole derivation, and this module only wraps it. The kernel's JCS is imported under its own
+  // name so the transfer path runs on ONE canonicalizer from the caller's value to the hash.
+  canonicalize as kernelCanonicalize,
+  projectLedgerTransfer,
+  LEDGER_TRANSFER_CANONICAL,
+  LEDGER_TRANSFER_SCHEMA_ID,
+  LEDGER_TRANSFER_DISPLAY_ID,
+} from "noa-receipt";
+const { hasOwn, strIncludes, isArray } = intrinsics;
 
 /**
  * The captured source-text reader for the implementation-artifact digest (ADR-0006-A part A).
@@ -407,6 +418,71 @@ const commandExec: DisplayProjection = (() => {
     displayProjection: projectionId("noa.command.exec.display", 1, "displayProjection", run),
     run,
   };
+})();
+
+/**
+ * `noa.ledger.transfer/1` — a SEALED reference adapter that is deliberately UNREGISTERED.
+ *
+ * WHY UNREGISTERED. A registered canonical becomes ENFORCED (`engine.ts`: `getProjection(canonical)
+ * ? "ENFORCED" : "RAW"`), and an approved ENFORCED hold yields an execution grant the agent can read.
+ * For a ledger transfer that would put a gate-signed transfer authority in the agent's hands before
+ * any effect owner exists to consume it at commit time. Registration is left to a later revision of
+ * the reference Gate that ships it together with that effect-owner path. Until then the adapter is
+ * exported for tests only, is NOT re-exported from the package index, REGISTRY below does not name
+ * it, and a hold for this canonical is refused with UNREGISTERED_CRITICAL_ACTION — all pinned by
+ * `test/ledger-transfer-projection.test.ts`.
+ *
+ * THIN BY DESIGN. Validation, canonicalization, hashing and display derivation all belong to the
+ * public kernel function `projectLedgerTransfer`, which takes BYTES. `run()` (1) refuses a
+ * non-object, (2) serializes the caller's value ONCE with the kernel's JCS — a getter or a Proxy is
+ * read in a single pass and afterwards there is exactly one immutable string, so the hash and the
+ * display cannot be split — and (3) passes the kernel's refusal through unchanged.
+ *
+ * THE IDENTITY IS MEASURED FROM THE KERNEL FUNCTION, NOT FROM `run()`. `projectLedgerTransfer` ships
+ * in the published kernel, so its emitted-source digest is recomputable by anyone. This module
+ * measures it live and THROWS AT IMPORT if the result differs from the published pins: a rebuilt
+ * kernel or a toolchain change fails loudly before any hold exists. That catches accidental drift,
+ * not substitution — the pins and the code ship together. `run()` itself is outside the identity.
+ *
+ * THE RISK FLOOR IS THIS GATE'S POLICY, not wire language: HIGH for every transfer, independent of
+ * the amount, so splitting a transfer cannot lower its tier. A caller hint can only raise it.
+ */
+const LEDGER_TRANSFER_RISK_FLOOR: RiskClass = "HIGH";
+
+export const ledgerTransferProjection: DisplayProjection = (() => {
+  const actionSchema = projectionId("noa.ledger.transfer.schema", 1, "actionSchema", projectLedgerTransfer);
+  const displayProjection = projectionId("noa.ledger.transfer.display", 1, "displayProjection", projectLedgerTransfer);
+  if (actionSchema.hash !== LEDGER_TRANSFER_SCHEMA_ID.hash || displayProjection.hash !== LEDGER_TRANSFER_DISPLAY_ID.hash) {
+    throw new Error(
+      "noa.ledger.transfer: the identity measured from the kernel's projectLedgerTransfer differs from the " +
+        "published pins, so this build and the kernel disagree about which artifact is the reviewed one. " +
+        "Refusing to load rather than advertise an identity that names a different renderer.",
+    );
+  }
+  function run(params: unknown): ProjectionResult | ProjectionError {
+    const notObject: ProjectionError = { ok: false, error: "TRANSFER_NOT_OBJECT: params must be a JSON object" };
+    if (typeof params !== "object" || params === null) return notObject;
+    let text: string;
+    try {
+      // Inside the guard on purpose: IsArray itself THROWS on a revoked Proxy, and a raw throw out
+      // of `run()` is exactly what this adapter must never produce.
+      if (isArray(params)) return notObject;
+      text = kernelCanonicalize(params);
+    } catch {
+      return { ok: false, error: "TRANSFER_PARSE: params are not JCS-canonicalizable" };
+    }
+    const r = projectLedgerTransfer(text);
+    if (!r.ok) return { ok: false, error: r.reason };
+    return {
+      ok: true,
+      paramsHash: r.paramsHash,
+      display: r.display,
+      actionSchema,
+      displayProjection,
+      derivedRisk: LEDGER_TRANSFER_RISK_FLOOR,
+    };
+  }
+  return sealProjection({ canonical: LEDGER_TRANSFER_CANONICAL, actionSchema, displayProjection, run });
 })();
 
 /**

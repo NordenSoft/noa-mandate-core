@@ -4,7 +4,8 @@ A from-scratch NOA receipt-chain verifier written in C# (.NET), peer to
 [`impl-py/noa_verify.py`](../impl-py/noa_verify.py) (Python) and the TypeScript reference in
 [`src/`](../src). It shares **no** code with either: its own JCS (RFC 8785) canonicalizer, its own
 strict Ed25519 boundary (BouncyCastle performs the RFC 8032 group equation; every strictness rule —
-canonical base64, `S < L`, non-canonical `y >= q`, small-order public-key rejection — is
+canonical base64, `S < L`, strict public-key validation at key load (non-canonical and small-order key
+encodings refused: RFC 8032 §5.1.3 decoding + small-order rejection) — is
 re-implemented here, not delegated to a library's runtime behavior).
 
 If three distinct stacks (TS / Python / C#) return the **same verdict** on the same signed

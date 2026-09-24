@@ -29,6 +29,35 @@ import {
 } from "noa-signer";
 
 /**
+ * STRICT PUBLIC-KEY VALIDATION for a raw Ed25519 public key in hex — the same rule as
+ * `noa-receipt/src/keys.ts` `isStrictEd25519PublicKeyBytes`: strict RFC 8032 §5.1.3 decoding
+ * (y < p, a curve point, no x = 0 with the sign bit set), not one of the 8 small-order points, and
+ * in the prime-order subgroup. Registration refuses every other key. Never throws.
+ */
+export function isStrictEd25519PublicKeyHex(publicKeyRawHex: string): boolean {
+  try {
+    const point = ed25519.Point.fromHex(publicKeyRawHex, false);
+    return !point.isSmallOrder() && point.isTorsionFree();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The signature's R: strictly decoded, not small-order, and in the prime-order subgroup. With a
+ * prime-order key this makes noble's cofactored equation give the same verdict as the cofactorless
+ * equation the five receipt verifiers use.
+ */
+function isStrictSignatureR(r: Uint8Array): boolean {
+  try {
+    const point = ed25519.Point.fromBytes(r, false);
+    return !point.isSmallOrder() && point.isTorsionFree();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Transport-level signature check (NOT trust — the authoritative verification is at the consumer,
  * against its LOCAL keyring; spec §9 "Trust note"). Returns true iff `receipt.sig.value` is a
  * valid Ed25519 signature, by `publicKeyRawHex`, over the frozen receipt preimage.
@@ -42,13 +71,14 @@ export function verifyReceiptSignature(receipt: Receipt, publicKeyRawHex: string
     if (typeof receipt.sig.value !== "string" || receipt.sig.value.length === 0) return false;
 
     const pubKey = hexToBytes(publicKeyRawHex);
-    if (pubKey.length !== 32) return false;
+    if (pubKey.length !== 32 || !isStrictEd25519PublicKeyHex(publicKeyRawHex)) return false;
 
     const signature = base64ToBytes(receipt.sig.value);
-    if (signature.length !== 64) return false;
+    if (signature.length !== 64 || !isStrictSignatureR(signature.subarray(0, 32))) return false;
 
     const message = signingMessageBytes(RECEIPT_SIG_DOMAIN, receiptHashInput(receipt));
-    return ed25519.verify(signature, message, pubKey);
+    // zip215:false — RFC 8032 strict decoding, not the permissive ZIP-215 default.
+    return ed25519.verify(signature, message, pubKey, { zip215: false });
   } catch {
     return false;
   }

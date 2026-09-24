@@ -63,6 +63,15 @@ emit/consume the COSE_Sign1 envelope, re-sign under `-19`.
 
 ## 3. Old-receipt verification policy
 
+Two different promises are easy to conflate, so they are named separately. **Verification
+compatibility** is the outcome an already-issued receipt gets: accepted (`VALID`) or refused. That is
+what this section freezes, and what the conformance vectors pin. **Label compatibility** is the
+*name* of a refusal and the CLI exit code that carries it; that is part of the library/CLI contract
+in §1 and follows package semver, and a change to it is announced in [CHANGELOG.md](CHANGELOG.md).
+There are exactly two exceptions to "verifies exactly as it does today", neither of them silent:
+§3.1 changes an outcome (`VALID` → `MALFORMED`), and §3.2 keeps every outcome and changes only
+refusal labels.
+
 A **JSON** receipt stamped `noa.receipt/0.1` must keep verifying exactly as it does today via
 `verifyChain`/`verifyChainText`/the `noa verify` CLI, for as long as `0.1` is a supported `spec`
 string — regardless of which package version does the verifying. This guarantee covers the
@@ -80,7 +89,7 @@ are building a third-party verifier for the JSON format, treat the vectors under
 document's prose. (`conformance/vectors` covers the JSON path only; the COSE `-8`-alg rejection
 is pinned by the separate unit-test suite in `test/cose/cose.test.ts`, not a golden vector.)
 
-### 3.1 The one carve-out, and it is narrow (added 0.8.0, 2026-08-14)
+### 3.1 Exception 1 — self-contradicting receipts stop verifying (added 0.8.0, 2026-08-14)
 
 **The paragraph above is not absolute, and pretending otherwise would be the more dishonest
 option.** `0.8.0` makes five kinds of receipt that previously verified `VALID` verify `MALFORMED`,
@@ -112,6 +121,37 @@ nobody has to discover it from a failing pipeline:
   `0.8.0` over your archive. Anything that was `VALID` and is now `MALFORMED` is a receipt whose own
   contents disagree with each other, and the error message names the two fields that do.
 
+### 3.2 Exception 2 — refusal labels under the optional lifecycle keyring (added after 0.8.0)
+
+This one changes label compatibility only. Under the optional `noa.signing-key-lifecycle/0.1`
+keyring, `verifyChain` now authenticates a retired key's signature against its retained public
+material *before* refusing it, and refuses an authentic one last, as `KEY_RETIRED`.
+
+**The general rule:** when the input also fails some other check — anywhere in the walk, including
+a LATER receipt or ANY phase of the checkpoint — that later failing check now answers, where the
+retired key used to answer first. So the table below is a classification of that rule, not a
+closed list; every row was measured on the parent commit and is pinned by a test (and, where the CLI
+can express it, by a `currentUse` vector in `conformance/survivable-retirement/cases.json`):
+
+| Input (lifecycle keyring supplied) | Before | Now |
+| --- | --- | --- |
+| Authentic retired receipt or checkpoint signature, nothing else wrong | `TAMPERED` (exit 2) | `KEY_RETIRED` (exit 9) |
+| Retired seq-0 receipt whose kid the identity manifest does not authorize | `TAMPERED` (2) | `UNTRUSTED` (5) |
+| Retired receipt followed by a LATER receipt the identity manifest does not authorize | `TAMPERED` (2) | `UNTRUSTED` (5) |
+| Retired receipts with a checkpoint whose kid is not authorized for the chain opener (checkpoint key retired or current) | `TAMPERED` (2) | `UNTRUSTED` (5) |
+| Retired receipt followed by a LATER `MALFORMED` receipt (e.g. `requireNFC: true` and a non-NFC string) | `TAMPERED` (2) | `MALFORMED` (3) |
+| Retired receipt, checkpoint document that is not a JSON object (e.g. `[]`, `null`) | `TAMPERED` (2) | `MALFORMED` (3) |
+| Retired kid carrying another key's signature | `TAMPERED`, reason "retired" | `TAMPERED`, reason "invalid signature" |
+| Retired receipt, LATER receipt with altered bytes, a forged signature or broken linkage | `TAMPERED` at the retired seq | `TAMPERED` at the later seq |
+| Retired receipts with a forged checkpoint (checkpoint key retired or current) | `TAMPERED`, reason "retired" | `TAMPERED`, "checkpoint not authenticated" |
+| Retired receipts, or a retired checkpoint, with an authentic checkpoint over a truncated head | `TAMPERED`, reason "retired" | `TAMPERED`, "tail truncated" |
+
+No receipt moved into or out of `VALID`, the static-keyring algorithm and every conformance vector
+under `conformance/vectors` are unchanged, and the change is stated in
+[CHANGELOG.md](CHANGELOG.md), so it is neither a wire-format change nor silent. A consumer that
+accepts only `VALID` (exit `0`) is unaffected; one that matched `TAMPERED` (exit `2`) to detect a
+retired key must match `KEY_RETIRED` (exit `9`).
+
 ## 4. Practical rule for consumers
 
 - Pin the **npm package** with a normal semver range for API/CLI stability.
@@ -121,9 +161,10 @@ nobody has to discover it from a failing pipeline:
 - A `npm install noa-receipt@latest` upgrade will never **silently** change how an
   already-issued `noa.receipt/0.1` receipt verifies; a change that would is a `spec`-string
   bump, documented in [CHANGELOG.md](CHANGELOG.md) and the [receipt-spec.md](docs/receipt-spec.md)
-  roadmap (§7), not a silent redefinition under the same string. **The single exception, and it is
-  not silent:** a receipt whose own signed body contradicts itself (§3.1) stopped verifying in
-  `0.8.0` without a `spec` bump — read §3.1 before upgrading if you archive receipts you did not
-  produce yourself.
+  roadmap (§7), not a silent redefinition under the same string. **The two exceptions, neither
+  silent:** a receipt whose own signed body contradicts itself (§3.1) stopped verifying in `0.8.0`
+  without a `spec` bump — read §3.1 before upgrading if you archive receipts you did not produce
+  yourself; and under the optional lifecycle keyring some refusals changed label and CLI exit code
+  (§3.2) while every accept/refuse outcome stayed the same.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.

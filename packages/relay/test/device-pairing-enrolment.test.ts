@@ -23,7 +23,8 @@ import { InMemoryStore } from "../src/store.js";
 import { makeHarness, makeAgent, bodyOf } from "./helpers.js";
 
 const KID = "approver-paired-1";
-const PK = "b".repeat(64);
+// A generated Ed25519 test public key (registration applies strict public-key validation).
+const PK = "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394";
 const TENANT = "tenant-a";
 
 function issue(h: ReturnType<typeof makeHarness>, opts: { tenant?: string; kid?: string } = {}) {

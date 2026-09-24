@@ -110,7 +110,7 @@ test("R-1 over HTTP: a configured secret gates the real /v1/devices route end to
   });
   const { port } = await relay.listen();
   try {
-    const device = { kid: "approver-r1", publicKeyHex: "a".repeat(64) };
+    const device = { kid: "approver-r1", publicKeyHex: "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c" };
 
     const anon = await httpJson(port, "POST", "/v1/devices", { body: device });
     assert.equal(anon.status, 401, "an anonymous approver-key registration must be refused");
@@ -259,7 +259,7 @@ test("R-1 shape (A): an embedder listening on httpServer directly is treated as 
       "the premise of this test: config still SAYS loopback while the real socket is 0.0.0.0");
 
     const anon = await httpJson(port, "POST", "/v1/devices", {
-      body: { kid: "shape-a", publicKeyHex: "b".repeat(64) },
+      body: { kid: "shape-a", publicKeyHex: "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394" },
     });
     assert.equal(anon.status, 503,
       "an approver key was registered anonymously through a socket this process did not open — " +
@@ -294,7 +294,7 @@ test("R-1 shape (A): an embedder listening on httpServer directly is treated as 
  * ordering where the flag was still null. Both orderings are pinned below.
  */
 async function mintAnonymously(port: number, kid: string): Promise<number> {
-  const r = await httpJson(port, "POST", "/v1/devices", { body: { kid, publicKeyHex: "c".repeat(64) } });
+  const r = await httpJson(port, "POST", "/v1/devices", { body: { kid, publicKeyHex: "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1" } });
   return r.status;
 }
 

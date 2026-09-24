@@ -20,7 +20,7 @@
  */
 import { ARTIFACTS } from "./domains.js";
 import { evalSchema } from "./schema-eval.js";
-import { signingMessage, verifyEd25519 } from "./crypto.js";
+import { isStrictEd25519PublicKey, signingMessage, verifyEd25519 } from "./crypto.js";
 import { canonicalize } from "./jcs.js";
 import { refHash, receiptRefHash, virtualHash } from "./refhash.js";
 import { parseDocument } from "./inert-core/bytes.js";
@@ -294,8 +294,12 @@ function signerIdentityPath(spec: string, doc: Record<string, unknown>): string 
  * `createAlphaTrust()` defaulted to `approve-critical` and documented it as covering all tiers.
  * Three components implemented three different lattices; this is the one they now share, because
  * it is the only one that is operationally coherent.
+ *
+ * EXPORTED so a consumer that must decide in ADVANCE whether an approver can clear a risk class (the
+ * reference gate's pinned roster refuses a quorum class its active approver's role cannot satisfy)
+ * calls this rule instead of restating it. Returns a fresh array on every call.
  */
-function requiredApproverRole(riskClass: string | undefined): string[] {
+export function requiredApproverRole(riskClass: string | undefined): string[] {
   if (riskClass === "CRITICAL" || riskClass === "IRREVERSIBLE") return ["approve-critical"];
   if (riskClass === "HIGH") return ["approve-high", "approve-critical"];
   // LOW/MEDIUM are not in the F15 matrix; accept any approver tier (documented).
@@ -440,6 +444,12 @@ export function verifyArtifact(artifactBytes: Uint8Array | string, ctxBytes: Uin
     else if (meta.signerRole) requiredRoles = [meta.signerRole];
     if (requiredRoles && !arraySome(requiredRoles, (r) => arrayIncludes(entry.roles, r))) {
       return { ok: false, reason: `signer roles [${entry.roles.join(",")}] lack required ${requiredRoles.join("|")}` };
+    }
+
+    // Strict public-key validation at key load, before signature verification: a trust-root key
+    // that is a non-canonical, off-curve, small-order or mixed-order encoding authenticates nothing.
+    if (!isStrictEd25519PublicKey(entry.publicKey)) {
+      return { ok: false, reason: `invalid signature (kid ${sig.kid}): signing key refused by strict public-key validation` };
     }
 
     // Ed25519 over the §6 preimage: domain ++ SHA256(JCS(doc without sig)).

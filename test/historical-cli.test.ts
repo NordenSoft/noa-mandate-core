@@ -148,3 +148,72 @@ test("historical CLI ignores inherited checkpoint and identity option values", (
     rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test("current-purpose CLI gives a retired-key signature its own exit and steer; tampering keeps exit 2 without one", () => {
+  const current = (receipts: string) => {
+    const completed = spawnSync(process.execPath, [
+      CLI,
+      "verify",
+      join(CONF, receipts),
+      "--keyring",
+      join(CONF, "receipt-keyring-retired.json"),
+    ], { encoding: "utf8" });
+    return { status: completed.status ?? -1, stdout: completed.stdout, stderr: completed.stderr };
+  };
+
+  // Intact bytes, authentic signatures, key retired by the lifecycle root: exit 9, not the legacy 2.
+  const retired = current("chain.json");
+  assert.equal(retired.status, 9, retired.stderr);
+  const retiredJson = JSON.parse(retired.stdout);
+  assert.equal(retiredJson.status, "KEY_RETIRED");
+  assert.equal(retiredJson.signaturesVerified, false);
+  assert.equal(retiredJson.badSeq, 0);
+  assert.match(retiredJson.reason, /--purpose historical/);
+  const retiredWarnings = retiredJson.warnings.filter((w: string) => w.startsWith("key-retired:"));
+  assert.equal(retiredWarnings.length, 1, JSON.stringify(retiredJson.warnings));
+  assert.match(retiredWarnings[0], /^key-retired: seq 0 kid "g2-receipt-retired" \(receipt\)/);
+  assert.match(retired.stderr, /--purpose historical/);
+
+  // Same key, same lifecycle root, altered bytes at seq 1: TAMPERED, exit 2, and no historical steer.
+  const damaged = current("chain-damaged.json");
+  assert.equal(damaged.status, 2, damaged.stderr);
+  const damagedJson = JSON.parse(damaged.stdout);
+  assert.equal(damagedJson.status, "TAMPERED");
+  assert.match(damagedJson.reason, /hash mismatch/);
+  assert.equal(damagedJson.badSeq, 1);
+  assert.doesNotMatch(damaged.stdout + damaged.stderr, /--purpose historical|key-retired/);
+});
+
+test("witnessed current-purpose CLI: a retired-key signature exits 9 with the note; later tampering exits 2 without it", () => {
+  // The opt-in federation path (--anchors/--trust-set) stops at the chain verdict when the chain did
+  // not verify. An empty snapshot is enough: the chain verdict is what decides the exit here.
+  const temp = mkdtempSync(join(tmpdir(), "noa-witnessed-retired-"));
+  try {
+    const anchors = join(temp, "anchors.json");
+    const trustSet = join(temp, "trust-set.json");
+    writeFileSync(anchors, "[]");
+    writeFileSync(trustSet, JSON.stringify({ witnesses: [], quorum: 0 }));
+    const witnessed = (receipts: string) => {
+      const completed = spawnSync(process.execPath, [
+        CLI, "verify", join(CONF, receipts),
+        "--keyring", join(CONF, "receipt-keyring-retired.json"),
+        "--anchors", anchors, "--trust-set", trustSet,
+      ], { encoding: "utf8" });
+      return { status: completed.status ?? -1, stdout: completed.stdout, stderr: completed.stderr };
+    };
+
+    const retired = witnessed("chain.json");
+    assert.equal(retired.status, 9, retired.stderr);
+    assert.equal(JSON.parse(retired.stdout).chain.status, "KEY_RETIRED");
+    assert.match(retired.stderr, /chain did not verify \(KEY_RETIRED\)/);
+    assert.match(retired.stderr, /^note: .*--purpose historical/m);
+
+    const damaged = witnessed("chain-damaged.json");
+    assert.equal(damaged.status, 2, damaged.stderr);
+    assert.equal(JSON.parse(damaged.stdout).chain.status, "TAMPERED");
+    assert.match(damaged.stderr, /chain did not verify \(TAMPERED\)/);
+    assert.doesNotMatch(damaged.stdout + damaged.stderr, /--purpose historical|key-retired|^note:/m);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});

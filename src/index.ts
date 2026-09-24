@@ -183,6 +183,26 @@ export {
   type DeployReleaseResult,
 } from "./deploy-release.js";
 
+// `noa.ledger.transfer/1` — the public wire form of a reference ledger transfer
+// (docs/ledger-transfer-spec.md, indexed as ADR-R-010 in 03_DECISIONS_ADR.md — that spec is the
+// normative authority; this comment is a pointer). ADDITIVE and DISJOINT from the receipt: the
+// frozen `noa.receipt/0.1` wire format gains no field. It lets an offline verifier recompute a
+// transfer's `paramsHash` and display from the disclosed six-member tuple (or from an
+// audit-decrypted display) and recompute both pinned projection identities. It commits nothing and
+// authorizes nothing; `NON-CLAIMS.md` §S7 states what a match does not establish.
+export {
+  LEDGER_TRANSFER_SPEC,
+  LEDGER_TRANSFER_CANONICAL,
+  LEDGER_TRANSFER_IMPLEMENTATION_DIGEST,
+  LEDGER_TRANSFER_SCHEMA_ID,
+  LEDGER_TRANSFER_DISPLAY_ID,
+  projectLedgerTransfer,
+  type LedgerTransferUnit,
+  type LedgerTransferParams,
+  type LedgerTransferRefusalCode,
+  type LedgerTransferResult,
+} from "./ledger-transfer.js";
+
 // Universal envelope — the NOA receipt as a COSE_Sign1 (RFC 9052) / SCITT Signed Statement, so it
 // verifies in ANY conforming COSE implementation without NOA's code. Zero runtime deps.
 export { coseSign1, coseSign1Verify, type CoseSigner, type CoseVerifyResult } from "./cose/cose-sign1.js";

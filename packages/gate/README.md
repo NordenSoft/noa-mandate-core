@@ -42,7 +42,9 @@ authority.
 | `POST /v1/grants/:id/report` | Submit bounded attempt-report bytes; unknown outcomes remain explicit |
 
 `POST /v1/holds` requires `Idempotency-Key`. Request bodies are size-bounded and delivered to the
-engine as bytes rather than caller-owned objects.
+engine as bytes rather than caller-owned objects. A created hold is returned with its signed hold
+envelope and the sealed display (`encryptedDisplay`) the envelope binds by `displayCiphertextHash`;
+the display is ciphertext for the approver and audit recipients only.
 
 Route names and payloads are an implementation surface, not proof that a particular client,
 identity provider, notification service, storage backend, or deployment is available.
@@ -62,11 +64,30 @@ Options after `--` belong to the wrapped command.
 
 ## Starting the reference server
 
-`noa-gate serve` binds to `127.0.0.1:8899` by default. `NOA_GATE_TENANT`, `NOA_GATE_BIND`, and
-`NOA_GATE_PORT` select the development tenant and listener. The command refuses to keep the execution
-grant key silently in process memory: choose exactly one explicit posture.
+`noa-gate serve` binds to `127.0.0.1:8899` by default. `NOA_GATE_BIND` and `NOA_GATE_PORT` select the
+listener. The command refuses to keep the execution grant key silently in process memory: choose
+exactly one explicit posture.
 
-For an out-of-process grant signer, provide:
+The server has two trust modes:
+
+- **Pinned** (`NOA_GATE_ROSTER_FILE` and `NOA_GATE_KEY_FILE`, absolute paths). The gate uses a
+  persistent gate key, and approver, audit key, key-manifest epoch and quorum come only from an
+  operator-provisioned roster. The HPKE display sealer is wired. Run the gate as a dedicated non-root
+  uid; the roster belongs to root or an administrator. Every broken input refuses the boot with a
+  stable code, and there is no fallback. `noa-gate keygen` creates the key file and
+  `noa-gate roster-check` validates a roster. See
+  [docs/gate-pinned-trust.md](../../docs/gate-pinned-trust.md) and
+  [NON-CLAIMS.md](../../NON-CLAIMS.md) §S8.
+- **Alpha** (no pinned variable set). A fresh trust root is minted on every boot, `NOA_GATE_TENANT`
+  names the tenant, and no display sealer is wired, so every hold is refused with
+  `DISPLAY_SEALER_UNCONFIGURED`.
+
+Any other subcommand than `serve`, `hold-and-run`, `keygen` and `roster-check` exits 2 and starts
+nothing, and every subcommand refuses an argument it does not know (`UNKNOWN_ARGUMENT`, exit 2).
+
+For an out-of-process grant signer in alpha mode, provide the variables below. In pinned mode, set
+only `NOA_GATE_GRANT_SIGNER_SOCKET`: the signer's identity comes from the roster, and the other
+variables are refused.
 
 ```text
 NOA_GATE_GRANT_SIGNER_SOCKET
@@ -80,8 +101,8 @@ NOA_GATE_APPROVER_HPKE_PUBLIC_KEY
 For local development only, set `NOA_GATE_UNSAFE_IN_PROCESS_GRANT_KEY=1`. This is an acknowledged
 weaker custody posture, not a protected deployment mode.
 
-The command-line server does not provision a display sealer. Registered encrypted-display inputs
-can be supplied by an embedder; a raw plaintext display fails closed.
+Only the pinned command-line server provisions a display sealer. An embedder calling `createGate`
+injects its own; without one, a hold fails closed and no plaintext display is ever shipped.
 
 ## Out-of-process signer custody
 

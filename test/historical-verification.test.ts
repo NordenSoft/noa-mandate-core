@@ -87,7 +87,10 @@ test("historical side API preserves intact retired-key history without reviving 
   const currentUse = verifyChain(receipts, { keyring: f.retiredRoot });
   const historical = verifyHistoricalChain(receipts, { keyring: f.retiredRoot });
 
-  assert.equal(currentUse.status, "TAMPERED");
+  // Current use refuses the retired key under its own status — intact history is not "tampered" —
+  // and never grants a positive sub-claim.
+  assert.equal(currentUse.status, "KEY_RETIRED");
+  assert.equal(currentUse.signaturesVerified, false);
   assert.match(currentUse.reason ?? "", /retired/);
   assert.equal(historical.classification, "UNVERIFIED");
   assert.equal(historical.code, "NO_WITNESS");
