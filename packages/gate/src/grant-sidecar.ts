@@ -68,7 +68,7 @@
 
 import { createServer, connect } from "node:net";
 import {
-  chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync,
+  chmodSync, closeSync, constants as fsConstants, existsSync, fsyncSync,
   openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync,
 } from "node:fs";
 import { dirname } from "node:path";
@@ -89,6 +89,7 @@ import { describeThrown, thrownCode } from "noa-mcp-adapter-core/safe-throw";
 import { encodeDocument } from "./bytes.js";
 import { EXECUTION_GRANT_SPEC, executionDomainFor } from "./exec-signer.js";
 import { loadSchemas } from "./schemas.js";
+import { readPinnedFile } from "./pinned-file.js";
 
 /** PRISTINE TIME, same capture discipline as `engine.ts`: the approval-freshness comparison is an
  *  authorization decision and must not dispatch through a globally-replaceable `Date.parse`. */
@@ -134,6 +135,10 @@ function getPath(obj: unknown, dotted: string): unknown {
   return cur;
 }
 
+/** Largest accepted `--trust-file`. The file names a handful of keys; a megabyte is generous and a
+ *  bound at all is the point — the shared reader refuses anything larger before reading it. */
+const TRUST_FILE_MAX_BYTES = 1024 * 1024;
+
 /**
  * Read `--trust-file` through ONE hardened descriptor.
  *
@@ -146,30 +151,37 @@ function getPath(obj: unknown, dotted: string): unknown {
  * second stat on the path, regular-file only, and no group/other WRITE — a trust root anyone else
  * can rewrite is not a trust root. Group READ stays legal: the different-UID deployment this whole
  * process exists for needs it.
+ *
+ * The mechanics now live in `pinned-file.ts`, shared with the gate's pinned roster, and this file
+ * gained exactly two things from the move: `O_NONBLOCK` (a FIFO planted at the path returns at once
+ * and is refused as not-regular, instead of stalling the start) and a size cap. Its owner policy is
+ * unchanged: no owner rule, group read allowed.
  */
-function readTrustFile(trustFile: string): string {
-  let fd: number;
-  try {
-    fd = openSync(trustFile, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
-  } catch (err) {
-    if (thrownCode(err) === "ELOOP") {
-      throw new Error(`grant sidecar: --trust-file "${trustFile}" is a symlink — refusing to follow it (CWE-367 symlink-attack guard). Point it directly at the intended regular file.`);
-    }
-    throw new Error(`grant sidecar: --trust-file "${trustFile}" could not be opened (${describeThrown(err)})`);
+function readTrustFile(trustFile: string): Uint8Array {
+  const r = readPinnedFile(trustFile, {
+    maxBytes: TRUST_FILE_MAX_BYTES,
+    forbiddenModeBits: 0o022,
+    requireSingleLink: false,
+    ownerAllowed: null,
+    checkAncestors: false,
+  });
+  if (r.ok) return r.bytes;
+  if (r.token === "symlink") {
+    throw new Error(`grant sidecar: --trust-file "${trustFile}" is a symlink — refusing to follow it (CWE-367 symlink-attack guard). Point it directly at the intended regular file.`);
   }
-  try {
-    const st = fstatSync(fd);
-    if (!st.isFile()) throw new Error(`grant sidecar: --trust-file "${trustFile}" is not a regular file — refusing to load trust material from a special file`);
-    if ((st.mode & 0o022) !== 0) {
-      throw new Error(
-        `grant sidecar: --trust-file "${trustFile}" is writable by group or others (mode 0${(st.mode & 0o777).toString(8)}) — ` +
-          `this file decides which keys may approve, so anyone who can rewrite it can authorize anything. chmod it to 0400 or 0600.`,
-      );
-    }
-    return readFileSync(fd, "utf8");
-  } finally {
-    closeSync(fd);
+  if (r.token === "not-regular") {
+    throw new Error(`grant sidecar: --trust-file "${trustFile}" is not a regular file — refusing to load trust material from a special file`);
   }
+  if (r.token === "mode") {
+    throw new Error(
+      `grant sidecar: --trust-file "${trustFile}" is writable by group or others (${r.detail}) — ` +
+        `this file decides which keys may approve, so anyone who can rewrite it can authorize anything. chmod it to 0400 or 0600.`,
+    );
+  }
+  if (r.token === "missing" || r.token === "unreadable") {
+    throw new Error(`grant sidecar: --trust-file "${trustFile}" could not be opened (${r.detail})`);
+  }
+  throw new Error(`grant sidecar: --trust-file "${trustFile}" refused (${r.detail})`);
 }
 
 /**

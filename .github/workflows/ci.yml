@@ -146,10 +146,12 @@ jobs:
         run: cd packages/rail-x402 && npm ci
       - name: evidence tests
         run: cd packages/evidence && npm ci && npm test
+      - name: Build signer-core for the gate's and relay's local package dependency
+        # MOVED above the gate step: the pinned gate wires `noa-signer`'s HPKE display sealer, so the gate
+        # build resolves `packages/signer-core/dist` and would die on a missing module below this line.
+        run: cd packages/signer-core && npm ci && npm run build
       - name: gate tests
         run: cd packages/gate && npm ci && npm test
-      - name: Build signer-core for relay's local package dependency
-        run: cd packages/signer-core && npm ci && npm run build
       - name: relay tests
         run: cd packages/relay && npm ci && npm test
       - name: signer-core tests

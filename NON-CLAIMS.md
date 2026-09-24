@@ -389,6 +389,89 @@ An enforcing implementation derives a risk tier from `environment` with its own 
 table. That table is authorization-side policy, is not published here, and must not be inferred from
 this specification.
 
+## S8. Pinned trust for the reference gate (`noa.gate-roster/1`)
+
+These statements apply to the reference gate in `packages/gate` running with a pinned roster
+(`docs/gate-pinned-trust.md`). They qualify what that mode establishes; the alpha mode establishes
+less.
+
+### NC-S8.1 — Pinned trust does not make a grant single-use at the effect
+
+The gate re-checks audience, epoch and roster expiry at `reserve()`, but the signed grant is already
+visible to the owning agent through the hold view and `wait`. A caller that acts without reserving is
+not stopped here. Single-use enforcement belongs at the component that owns the effect.
+
+### NC-S8.2 — A persistent gate key keeps old envelopes verifiable for the key's lifetime
+
+A restart no longer changes the gate's identity. The reference command line keeps holds in memory, so
+a restart forgets them; a durable hold store needs its own rule for holds created before a restart.
+
+### NC-S8.3 — The roster is not signed, not remotely revocable and not renewable
+
+In `/1` the roster is authenticated by file ownership and mode bits, a printed digest and an
+optional second-channel pin. Nothing checks a signature over it, an access-control list that grants
+write outside the mode bits is not inspected, a revocation reaches the gate only through a new
+roster and a restart, and an expired roster stops the gate until one is provided.
+
+### NC-S8.4 — Rollback detection is limited
+
+The high-water state file refuses a lower roster version, or the same version with different bytes.
+Root, a compromised gate process, a whole-volume restore or a cloned host can defeat it.
+
+### NC-S8.5 — A clock rollback is not detected
+
+The gate's clock decides roster validity, roster expiry, the approval window and grant life.
+
+### NC-S8.6 — A compromised gate process holds its keys
+
+The owner rule stops a roster edited by the gate's uid from surviving a restart. It does not protect
+the running process, which holds the gate key and, with an in-process grant key, full authority.
+
+### NC-S8.7 — Approver key provenance and roster correctness are outside the gate
+
+The gate trusts the keys the roster names. How an approver key was enrolled is the pairing ceremony's
+concern, and whether the roster names the right keys is the administrator's.
+
+### NC-S8.8 — Two-person rules are not implemented
+
+A pinned gate accepts a quorum of exactly 1 and refuses any larger value. A tenant that needs two
+approvals must not rely on a pinned gate for that.
+
+### NC-S8.9 — A pinned roster proves nothing about the human or the device
+
+Nothing here proves that a human understood a display, or that a device rendered it faithfully (§3).
+
+### NC-S8.10 — The epoch is stamped, not verified, by the gate
+
+The gate copies the key-manifest version and hash from the roster into what it signs and never parses
+that manifest. An offline evidence verifier compares the stamped epoch with the tenant's key manifest,
+so evidence from a pinned gate verifies only if that manifest lists the gate's key.
+
+### NC-S8.11 — Approver-device behaviour is outside this repository
+
+Whether an approver device pins the gate key, which epoch floor it enforces and how a withheld relay
+message is handled are properties of the device and the relay. A mismatch there is a denial of
+service, not an approval.
+
+### NC-S8.12 — The grant sidecar keeps its own trust file
+
+The out-of-process grant signer reads a separate trust file. Drift between it and the roster fails
+closed (the sidecar refuses an approver it does not know); nothing keeps the two files in step.
+
+### NC-S8.13 — The audience check compares kids, not keys
+
+A hold envelope is accepted by a gate whose tenant and gate kid match. A kid reused for a new key
+would pass it; the rotation rule that forbids reuse is an operator rule, not enforced across rosters.
+
+### NC-S8.14 — Whoever controls the gate's environment controls its trust root
+
+The environment selects the roster, the key file, the digest pin and the development escape that
+accepts a roster owned by the gate's own uid.
+
+### NC-S8.15 — No interoperability or conformance claim is made for `noa.gate-roster/1`
+
+It is reference-gate configuration, checked by unit tests only. No conformance corpus is published.
+
 ## 7. Changing this document
 
 Removing or weakening a non-claim creates a stronger claim. Such a change requires an exact normative

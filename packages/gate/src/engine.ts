@@ -190,6 +190,14 @@ function verifySealedDisplayEgress(
     if (typeof kid !== "string") return `sealed display recipient[${i}] has no kid`;
     gotKids[gotKids.length] = kid;
   }
+  // EXACT SET, not "requested kids present". A sealer that APPENDS a recipient passed the presence
+  // loop below, and the gate then signed an envelope whose display a party it never named can open —
+  // the extra kid rides into `displayCiphertextHash` under the gate's signature. The requested kids
+  // are distinct (the approver and the audit key; a pinned roster refuses a duplicate kid), so equal
+  // length plus every requested kid present IS set equality: no slot is left for an extra or a repeat.
+  if (gotKids.length !== requestedKids.length) {
+    return `sealed display names ${gotKids.length} recipients; the gate asked for exactly ${requestedKids.length}`;
+  }
   for (let i = 0; i < requestedKids.length; i++) {
     const want = requestedKids[i]!;
     let found = false;
@@ -276,6 +284,73 @@ export class GateEngine {
   }
   private iso(ms: number): string {
     return new Date(ms).toISOString();
+  }
+
+  // ── pinned trust (docs/gate-pinned-trust.md): trust-root binding checks ────────────────────────
+
+  /**
+   * Checks 1-3 of `decide()` (and of `reserve()`), in order:
+   *   1. PINNED ONLY — 503 ROSTER_EXPIRED at or after the roster's `expiresAt` by the gate's clock.
+   *   2. BOTH MODES  — 409 GATE_AUDIENCE_MISMATCH when the hold envelope names another tenant or
+   *                    another gate key: this trust root did not sign it.
+   *   3. BOTH MODES  — 409 EPOCH_CHANGED when the envelope's key-manifest epoch is not this trust
+   *                    root's: the approver devices were asked under a different manifest.
+   * These are load-bearing only where a store outlives or is shared across trust roots (a durable
+   * store, or a restart onto one); with the in-memory store a restart already loses every hold.
+   */
+  private envelopeBindingRefusal(hold: HoldRecord, atMs: number): EngineResult | null {
+    const pinned = this.trust.pinned;
+    if (pinned !== undefined && atMs >= pinned.expiresAtMs) {
+      return err(503, "ROSTER_EXPIRED", { detail: "the pinned roster has expired; this gate authorizes nothing until a new roster is loaded" });
+    }
+    const env = hold.holdEnvelope;
+    if (env.tenant !== this.trust.tenant || env.gateKid !== this.trust.gate.kid) {
+      return err(409, "GATE_AUDIENCE_MISMATCH", { detail: "the hold envelope was not signed by this gate for this tenant" });
+    }
+    if (env.keyManifestVersion !== this.trust.keyManifestVersion || env.keyManifestHash !== this.trust.keyManifestHash) {
+      return err(409, "EPOCH_CHANGED", { detail: "the hold envelope carries a different key-manifest epoch than this gate's trust root" });
+    }
+    return null;
+  }
+
+  /**
+   * Check 4 — PINNED ONLY: the class must be one the roster names (422 RISK_CLASS_NOT_IN_ROSTER) with a
+   * quorum this gate can honour (500 QUORUM_UNSUPPORTED). The loader already refuses a quorum other
+   * than 1; this re-check exists because `createGate` accepts an injected GateTrust.
+   */
+  private pinnedClassRefusal(riskClass: string): EngineResult | null {
+    const pinned = this.trust.pinned;
+    if (pinned === undefined) return null;
+    if (!hasOwn(pinned.quorum, riskClass)) {
+      return err(422, "RISK_CLASS_NOT_IN_ROSTER", { detail: `the pinned roster names no quorum for ${riskClass}` });
+    }
+    if (pinned.quorum[riskClass] !== 1) {
+      return err(500, "QUORUM_UNSUPPORTED", { detail: `the pinned roster asks for ${String(pinned.quorum[riskClass])} approvals for ${riskClass}; this gate implements exactly 1` });
+    }
+    return null;
+  }
+
+  /** `createHold`'s pinned gate: roster expiry, then the class check. Null in alpha. */
+  private pinnedRefusal(atMs: number, riskClass: string): EngineResult | null {
+    const pinned = this.trust.pinned;
+    if (pinned === undefined) return null;
+    if (atMs >= pinned.expiresAtMs) {
+      return err(503, "ROSTER_EXPIRED", { detail: "the pinned roster has expired; this gate authorizes nothing until a new roster is loaded" });
+    }
+    return this.pinnedClassRefusal(riskClass);
+  }
+
+  /** Own-property read of the stored sealed display's recipient kids. */
+  private isDisplayRecipient(hold: HoldRecord, kid: string | undefined): boolean {
+    if (kid === undefined) return false;
+    const ed = hold.encryptedDisplay as unknown as Record<string, unknown>;
+    const rcpts = hasOwn(ed, "recipients") ? ed["recipients"] : undefined;
+    if (!Array.isArray(rcpts)) return false;
+    for (let i = 0; i < rcpts.length; i++) {
+      const r: unknown = rcpts[i];
+      if (isRecord(r) && hasOwn(r, "kid") && r["kid"] === kid) return true;
+    }
+    return false;
   }
 
   // ── auth ─────────────────────────────────────────────────────────────────
@@ -516,6 +591,12 @@ export class GateEngine {
       display = rawDisplay;
     }
 
+    // ─── PINNED ROSTER: expiry and the roster's classes, BEFORE anything is frozen or sealed ─────────
+    // No human is ever asked to approve a class this gate could not accept, and an expired roster
+    // authorizes nothing — the hold is refused here rather than created and left to die at decide().
+    const rosterRefusal = this.pinnedRefusal(this.now(), effectiveRisk);
+    if (rosterRefusal !== null) return rosterRefusal;
+
     const action: HoldAction = { canonical, riskClass: effectiveRisk as RiskClass, paramsHash, reversible };
 
     // requestHash (idempotency-conflict detection): mode + action + chain (the durable identity of the request).
@@ -529,7 +610,7 @@ export class GateEngine {
     const existing = this.store.getHoldByIdem(agent.id, idempotencyKey);
     if (existing) {
       if (existing.requestHash === requestHash) {
-        return { status: 200, body: { holdId: existing.id, status: existing.status, expiresAt: this.iso(existing.expiresAt), holdEnvelope: existing.holdEnvelope, idempotent: true } };
+        return { status: 200, body: { holdId: existing.id, status: existing.status, expiresAt: this.iso(existing.expiresAt), holdEnvelope: existing.holdEnvelope, encryptedDisplay: existing.encryptedDisplay, idempotent: true } };
       }
       return err(409, "IDEMPOTENCY_CONFLICT", { detail: "same Idempotency-Key with a different body" });
     }
@@ -707,7 +788,11 @@ export class GateEngine {
     this.store.putHold(hold);
     this.log("hold.created", { holdId, agentId: agent.id, canonical, mode });
 
-    return { status: 201, body: { holdId, status: "PENDING", expiresAt, holdEnvelope } };
+    // The SEALED display travels with the envelope that binds it (`displayCiphertextHash`, F2): the
+    // relay refuses a hold whose display does not hash to that value, so a gate that never handed the
+    // sealed object out could seal nothing anyone would ever see. It is ciphertext to the approver and
+    // audit recipients only; the plaintext never leaves the gate.
+    return { status: 201, body: { holdId, status: "PENDING", expiresAt, holdEnvelope, encryptedDisplay } };
   }
 
   /** Lazily flip an overdue PENDING hold to EXPIRED, minting the D19 timeout receipt + Hold
@@ -822,6 +907,12 @@ export class GateEngine {
       this.log("hold.decision_rejected", { holdId, currentStatus: hold.status });
       return err(409, "HOLD_ALREADY_RESOLVED", { status: hold.status });
     }
+    // ─── IS THIS HOLD STILL ANSWERABLE BY THIS GATE'S TRUST ROOT? ─────────────────────────────────
+    // Before the body is even parsed. A refusal here leaves the hold PENDING: it expires normally.
+    const bindingProblem = this.envelopeBindingRefusal(hold, receivedAtMs);
+    if (bindingProblem !== null) return bindingProblem;
+    const classProblem = this.pinnedClassRefusal(hold.action.riskClass);
+    if (classProblem !== null) return classProblem;
     const parsedBody = this.parseBody(body);
     if (!parsedBody.ok) return parsedBody.res;
 
@@ -874,6 +965,16 @@ export class GateEngine {
     // accessor, Proxy trap, inherited property or mutable alias of the caller's object reaches it.
     const decisionVal = daDoc["decision"];
     const approverKid = asString(daDoc["approverKid"]);
+    // ─── THE APPROVER MUST BE ONE OF THE PARTIES THE DISPLAY WAS SEALED TO ──────────────────────────
+    // A valid signature proves an enrolled KEY decided; it does not prove that key's holder could open
+    // what it decided on. A second gate sharing this store with a different active approver (same
+    // epoch, same gate key) would otherwise grant on a decision from a device that never received the
+    // display — the epoch check alone cannot see that case, because nothing about the epoch changed.
+    if (!this.isDisplayRecipient(hold, approverKid)) {
+      return err(422, "APPROVER_NOT_DISPLAY_RECIPIENT", {
+        detail: "the deciding approver is not a recipient of this hold's sealed display",
+      });
+    }
     if (decisionVal !== "APPROVE" && decisionVal !== "DENY") return err(422, "BAD_DECISION");
 
     // 2. Verify the ALLOWED/BLOCKED verdict receipt: it must chain onto the DEFERRED and authenticate
@@ -1139,6 +1240,11 @@ export class GateEngine {
     // F29-authz — ownership BEFORE the CAS, so a foreign call can never burn the single use.
     if (!this.ownsHold(hold, agent, "reserve")) return err(404, "UNKNOWN_GRANT");
     if (hold && hold.status !== "APPROVED") return err(409, "HOLD_NOT_APPROVED", { status: hold.status });
+    // The same audience, epoch and (pinned) roster-expiry checks as decide(). HONEST LIMIT:
+    // `holdView` and `wait` already hand the signed grant to the owning agent, so this stops only a
+    // wrapper that asks before it acts; a single-use commit at the effect owner is C3's job.
+    const reserveBinding = this.envelopeBindingRefusal(hold, this.now());
+    if (reserveBinding !== null) return reserveBinding;
     if (this.now() >= gateDateParse(rec.grant.expiresAt)) return err(410, "GRANT_EXPIRED");
     // F8a — the single-use BURN is now a real compare-and-swap IN THE STORE, not a
     // read-compare-write here (S2, 2026-08-13). What stood here was:

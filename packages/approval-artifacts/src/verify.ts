@@ -294,8 +294,12 @@ function signerIdentityPath(spec: string, doc: Record<string, unknown>): string 
  * `createAlphaTrust()` defaulted to `approve-critical` and documented it as covering all tiers.
  * Three components implemented three different lattices; this is the one they now share, because
  * it is the only one that is operationally coherent.
+ *
+ * EXPORTED so a consumer that must decide in ADVANCE whether an approver can clear a risk class (the
+ * reference gate's pinned roster refuses a quorum class its active approver's role cannot satisfy)
+ * calls this rule instead of restating it. Returns a fresh array on every call.
  */
-function requiredApproverRole(riskClass: string | undefined): string[] {
+export function requiredApproverRole(riskClass: string | undefined): string[] {
   if (riskClass === "CRITICAL" || riskClass === "IRREVERSIBLE") return ["approve-critical"];
   if (riskClass === "HIGH") return ["approve-high", "approve-critical"];
   // LOW/MEDIUM are not in the F15 matrix; accept any approver tier (documented).
