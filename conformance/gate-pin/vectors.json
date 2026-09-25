@@ -1,6 +1,6 @@
 {
   "spec": "noa.gate-pin/1",
-  "generatedFrom": "a one-off generator; every ACCEPT value is recomputed independently (node:crypto SHA-256 over a hand-built JCS) by packages/gate/test/gate-pin.test.ts",
+  "generatedFrom": "scripts/gen-gate-pin-vectors.mjs; every ACCEPT value is also recomputed independently (node:crypto SHA-256 over a hand-built JCS) by packages/gate/test/gate-pin.test.ts",
   "refusalCodes": [
     "GATE_PIN_INPUT_INVALID",
     "GATE_PIN_TENANT_INVALID",
@@ -8,7 +8,7 @@
     "GATE_PIN_KEY_INVALID",
     "GATE_PIN_RAW_KEY_INVALID"
   ],
-  "note": "Synthetic identifiers only (tenant-example-N, gate-example-N); the Ed25519 keys are freshly generated public keys with no use outside this corpus, and the refused keys come from conformance/vectors/strict-ed25519. A fingerprint vector's input is the object passed to the fingerprint function (an absent member is omitted); a raw-key vector's input carries publicKeyRaw instead of publicKey and is checked in the same order, its key step being the raw conversion (docs/gate-pin-spec.md §3.1, §5). ACCEPT vectors pin canonical (the JCS text), digest and fingerprint; REJECT vectors pin reasonCode; `beats` names the second rule a precedence vector's input violates, which reasonCode must win over; `equivalentTo` names the vector whose fingerprint a raw-key vector must equal. The fingerprint is a display string, never an authority input (docs/gate-pin-spec.md).",
+  "note": "Synthetic identifiers only (tenant-example-N, gate-example-N, and an all-zero example UUID in the console-style tenant); the Ed25519 keys are freshly generated public keys with no use outside this corpus, and the refused keys come from conformance/vectors/strict-ed25519. A fingerprint vector's input is the object passed to the fingerprint function (an absent member is omitted); a raw-key vector's input carries publicKeyRaw instead of publicKey and is checked in the same order, its key step being the raw conversion (docs/gate-pin-spec.md §3.1, §5). ACCEPT vectors pin canonical (the JCS text), digest and fingerprint; REJECT vectors pin reasonCode; `beats` names the second rule a precedence vector's input violates, which reasonCode must win over; `equivalentTo` names the vector whose fingerprint a raw-key vector must equal. The fingerprint is a display string, never an authority input (docs/gate-pin-spec.md).",
   "vectors": [
     {
       "id": "accept-basic",
@@ -70,13 +70,13 @@
       "kind": "fingerprint",
       "expect": "ACCEPT",
       "input": {
-        "tenant": "org_00000000-0000-4000-8000-000000000001",
+        "tenant": "org_00000000-0000-0000-0000-000000000000",
         "gateKid": "gate-example-1",
         "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
       },
-      "canonical": "{\"gateKid\":\"gate-example-1\",\"publicKey\":\"MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=\",\"spec\":\"noa.gate-pin/1\",\"tenant\":\"org_00000000-0000-4000-8000-000000000001\"}",
-      "digest": "sha256:f7331e2eeb15a42efeb89ed42049fc4a24d6f6f81ecbc7f30ff147ad95494681",
-      "fingerprint": "NOAGP1-f733-1e2e-eb15-a42e-feb8",
+      "canonical": "{\"gateKid\":\"gate-example-1\",\"publicKey\":\"MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=\",\"spec\":\"noa.gate-pin/1\",\"tenant\":\"org_00000000-0000-0000-0000-000000000000\"}",
+      "digest": "sha256:012e9907b7efa36a21782db344a20d17266dc1c5af290eb1bb581f1f0ea62c5d",
+      "fingerprint": "NOAGP1-012e-9907-b7ef-a36a-2178",
       "note": "a console-style tenant identifier"
     },
     {

@@ -172,14 +172,19 @@ the reference owner's checks, not a copy of them:
   `EFFECT_STORE_UNAVAILABLE` is an owner refusal that wrote nothing: `503`, retryable.
 - Under a supervisor-supplied `bootId`, which several processes may share, the engine accepts only an
   owner that records the consumption in its store (`EFFECT_OWNER_SUPERVISOR_BOOT_UNSAFE` otherwise).
-- `runEffectOwnerConformance(label, factory)` (`packages/gate/test/effect-owner-conformance.ts` in this
-  repository) registers the reference owner's owner-level tests — its construction rules, the tests
-  that call the owner directly and those that reach it through the engine's commit route — against the
-  owners `factory` builds. One owner-level test is exported rather than registered:
-  `effectOwnerKeyringProof(factory)`, the proof bound to the keyring consume site, whose marker must sit
-  on a test registered directly in a test file (`test/effect-owner.test.ts` registers it for the
-  in-memory owner; another owner's test file registers it the same way). Passing both shows the owner
-  meets those tests; it does not show the owner is correct (NON-CLAIMS.md §S9).
+- `runEffectOwnerConformance(label, factory, storeFactory)` (`packages/gate/test/effect-owner-conformance.ts`
+  in this repository) registers the reference owner's owner-level tests — its construction rules, the
+  tests that call the owner directly and those that reach it through the engine's commit route —
+  against the owners `factory` builds. The optional `storeFactory`, paired with `factory`, builds every
+  store the runner uses (a new in-memory store when it is omitted), and the runner builds each owner
+  over the store of the engine that runs it: an owner that records the grant's consumption then meets
+  the construction rules instead of `EFFECT_OWNER_STORE_MISMATCH`. `test/effect-owner.test.ts` runs it
+  over the in-memory owner and over the same owner recording the consumption in its paired store. One
+  owner-level test is exported rather than registered: `effectOwnerKeyringProof(factory, storeFactory)`,
+  the proof bound to the keyring consume site, whose marker must sit on a test registered directly in a
+  test file (`test/effect-owner.test.ts` registers it for the in-memory owner; another owner's test
+  file registers it the same way). Passing both shows the owner meets those tests; it does not show the
+  owner is correct (NON-CLAIMS.md §S9).
 - `runSettleHoldStoreContract(label, open)` (`packages/gate/test/store-settle-contract.ts`) registers the
   store-level contract of `settleHold` — a win writes the hold and its grant together, a loss writes
   nothing, of two connections that both read PENDING exactly one wins — over two connections `open`
@@ -206,7 +211,9 @@ the grant record, the signed bytes a view hands out, a hold — before any refus
 two or three checks together, because each alone refuses the same attack: the deferred binding with
 the receipt chain's linkage and the approval action, the envelope's tenant check with the decision's
 tenant binding, and the pre-write re-check with the whole-commit re-entry refusal. The detecting tests
-of the owner's arms are in the conformance runner. These checks have no arm, each for the reason given:
+of the owner's arms are in the conformance runner, whose store pairing is armed too: without it the
+construction test over the owner that records the consumption fails. These checks have no arm, each
+for the reason given:
 
 - engine steps 5 and 6: a hold that is not APPROVED, or lacks its artifacts, has no approval the owner
   can verify (its decision and APPROVE legs refuse it);

@@ -13,7 +13,10 @@
  * consequence (rows, balances, seal calls) before any code.
  *
  * A factory receives the trust root, the clock, the ledger, the opening balances and the store the
- * fixture's engine uses; it returns a new owner each call.
+ * fixture's engine uses; it returns a new owner each call. A store factory, paired with it, supplies
+ * every store the runner builds (default: a new `InMemoryStore`), and the runner builds each owner over
+ * the store of the engine that runs it: an owner that records the grant's consumption is refused over
+ * any other store (EFFECT_OWNER_STORE_MISMATCH).
  */
 import { test as nodeTest } from "node:test";
 import assert from "node:assert/strict";
@@ -22,7 +25,7 @@ import { buildReceipt, projectLedgerTransfer, verifyChain } from "noa-receipt";
 import { GateEngine } from "../src/engine.js";
 import { resolveGateConfig } from "../src/config.js";
 import { loadSchemas } from "../src/schemas.js";
-import { InMemoryStore } from "../src/store.js";
+import { InMemoryStore, type Store } from "../src/store.js";
 import { encodeDocument } from "../src/bytes.js";
 import { buildEffectAttestation, type EffectAttestation, type EffectCommitInput, type EffectOutcome, type EffectOwner, type VerifiedAuthority } from "../src/effect-owner.js";
 import { buildDeferredReceipt } from "../src/receipts.js";
@@ -67,6 +70,11 @@ import {
 
 export type { EffectOwnerFactory } from "./helpers/effect.js";
 
+/** Builds a fresh, empty store of the kind the owners of the paired owner factory run over. */
+export type StoreFactory = () => Store;
+
+const inMemoryStores: StoreFactory = () => new InMemoryStore();
+
 const codeOf = (o: EffectOutcome): string => (o.kind === "NOT_COMMITTED" ? o.code : o.kind === "REFUSED" ? `REFUSED:${o.row.refusalCode}` : o.kind);
 const detailOf = (o: EffectOutcome): string | null => (o.kind === "NOT_COMMITTED" ? o.detail : null);
 const errorOf = (r: { body: unknown }): unknown => (r.body as { error?: unknown }).error;
@@ -79,8 +87,9 @@ const bodyOf = (r: { body: unknown }): Record<string, unknown> => r.body as Reco
  * binding needs the marker on a test registered directly in a test file: test/effect-owner.test.ts
  * registers it for the in-memory owner, and another owner's test file registers it the same way.
  */
-export function effectOwnerKeyringProof(factory: EffectOwnerFactory): void {
-  const effectGate = (opts: Parameters<typeof baseEffectGate>[0] = {}): EffectGate => baseEffectGate({ ownerFactory: factory, ...opts });
+export function effectOwnerKeyringProof(factory: EffectOwnerFactory, storeFactory: StoreFactory = inMemoryStores): void {
+  const effectGate = (opts: Parameters<typeof baseEffectGate>[0] = {}): EffectGate =>
+    baseEffectGate({ ownerFactory: factory, ...opts, store: opts.store ?? storeFactory() });
   // (a) ACTIVATION IS EVALUATED AT THE GRANT'S SIGNED INSTANT, NEVER AT THE COMMIT CLOCK. The approver
   //     activates at t0+10min. A decision whose authorization instant (the grant's issuedAt) is t0 is
   //     refused even when the commit runs at t0+20min, after the activation, and even though the
@@ -159,16 +168,26 @@ export function effectOwnerKeyringProof(factory: EffectOwnerFactory): void {
   assert.equal(detailOf(r3), "decision");
 }
 
-/** Register every owner-level conformance test for the owners `factory` builds, named with `label`. */
-export function runEffectOwnerConformance(label: string, factory: EffectOwnerFactory): void {
+/**
+ * Register every owner-level conformance test for the owners `factory` builds, named with `label`. The
+ * stores come from `storeFactory`; a caller that passes none gets the in-memory store.
+ */
+export function runEffectOwnerConformance(label: string, factory: EffectOwnerFactory, storeFactory: StoreFactory = inMemoryStores): void {
   const test = (name: string, fn: () => void | Promise<void>): void => {
     nodeTest(`${name} [${label}]`, fn);
   };
-  /** The fixture gate, running an owner this factory builds. */
-  const effectGate = (opts: Parameters<typeof baseEffectGate>[0] = {}): EffectGate => baseEffectGate({ ownerFactory: factory, ...opts });
-  /** An owner this factory builds over a roster variant of `fx`'s, on `fx`'s boot. */
+  /** The fixture gate, running an owner this factory builds over the fixture engine's store. */
+  const effectGate = (opts: Parameters<typeof baseEffectGate>[0] = {}): EffectGate =>
+    baseEffectGate({ ownerFactory: factory, ...opts, store: opts.store ?? storeFactory() });
+  /** An owner this factory builds over a roster variant of `fx`'s, on `fx`'s boot, over a store of its own. */
   const ownerOn = (fx: EffectGate, rosterOver: Record<string, unknown>, prefix: string, ledger: string = LEDGER) =>
-    baseOwnerOn(fx, rosterOver, prefix, ledger, factory);
+    baseOwnerOn(fx, rosterOver, prefix, ledger, factory, storeFactory());
+  /**
+   * THE PAIRING: an owner a construction test builds, and every engine it builds for that owner, use the
+   * store of the fixture gate they belong to. An owner that records the grant's consumption is refused
+   * over any other store, and that refusal would stand in for the rule the test checks.
+   */
+  const storeOf = (g: EffectGate): Store => g.store;
   function balances(fx: EffectGate): Readonly<Record<string, number>> {
     return fx.owner!.inspect().balances;
   }
@@ -177,8 +196,27 @@ export function runEffectOwnerConformance(label: string, factory: EffectOwnerFac
 
   test("EFFECT-OWNER-CONSTRUCTION — invalid ledger, account or balance; an owner of another trust root; two owners for one canonical; a non-effect-owned canonical", () => {
     const fx = effectGate();
+    // The consequence first: an owner this factory builds is accepted by an engine over its own store.
+    const paired = effectGate({ owner: false, ids: idSource("paired-store") });
+    const pairedOwner = factory({ store: storeOf(paired), trust: paired.trust, now: () => paired.clock.t, ledger: LEDGER, accounts: DEFAULT_ACCOUNTS });
+    let pairedEngine: GateEngine | null = null;
+    let pairedRefusal: unknown = null;
+    try {
+      pairedEngine = new GateEngine({
+        store: storeOf(paired),
+        config: resolveGateConfig({ now: () => paired.clock.t }),
+        trust: paired.trust,
+        schemas: loadSchemas(),
+        executionSigner: paired.signer,
+        effectOwners: [pairedOwner],
+      });
+    } catch (e) {
+      pairedRefusal = e;
+    }
+    assert.notEqual(pairedEngine, null, `consequence: an owner under test is constructed over the store its engine uses (refused: ${String(pairedRefusal)})`);
+    assert.equal(pairedOwner.bound, true);
     const build = (ledger: string, accounts: Record<string, number>) => () =>
-      factory({ store: new InMemoryStore(),  trust: fx.trust, now: () => fx.clock.t, ledger, accounts });
+      factory({ store: storeOf(fx), trust: fx.trust, now: () => fx.clock.t, ledger, accounts });
     assert.throws(build("Ledger-1", {}), /EFFECT_OWNER_LEDGER_INVALID/);
     assert.throws(build(LEDGER, { "ACCT-1": 1 }), /EFFECT_OWNER_LEDGER_INVALID/);
     assert.throws(build(LEDGER, { [ACCT_1]: -1 }), /EFFECT_OWNER_LEDGER_INVALID/);
@@ -186,7 +224,7 @@ export function runEffectOwnerConformance(label: string, factory: EffectOwnerFac
     assert.throws(build(LEDGER, { [ACCT_1]: Number.MAX_SAFE_INTEGER, [ACCT_2]: 1 }), /EFFECT_OWNER_LEDGER_INVALID/);
     assert.doesNotThrow(build(LEDGER, { [ACCT_1]: Number.MAX_SAFE_INTEGER, [ACCT_2]: 0 }));
     const engineWith = (owners: EffectOwner[]) => () => new GateEngine({
-      store: new InMemoryStore(),
+      store: storeOf(fx),
       config: resolveGateConfig({ now: () => fx.clock.t }),
       trust: fx.trust,
       schemas: loadSchemas(),
@@ -198,11 +236,11 @@ export function runEffectOwnerConformance(label: string, factory: EffectOwnerFac
     assert.throws(engineWith([fx.owner!, fx.owner!]), /EFFECT_OWNER_DUPLICATE/);
     assert.throws(engineWith([{ ...fx.owner!, canonical: "noa.command.exec" }]), /EFFECT_OWNER_CANONICAL_INVALID/);
     // One effect-owning engine per boot — a copy of the trust root is the same boot — and one engine per owner.
-    const fresh = factory({ store: new InMemoryStore(),  trust: fx.trust, now: () => fx.clock.t, ledger: LEDGER, accounts: DEFAULT_ACCOUNTS });
+    const fresh = factory({ store: storeOf(fx), trust: fx.trust, now: () => fx.clock.t, ledger: LEDGER, accounts: DEFAULT_ACCOUNTS });
     assert.throws(engineWith([fresh]), /EFFECT_OWNER_TRUST_IN_USE/);
     assert.equal(fresh.bound, false, "a refused engine binds nothing");
     assert.throws(() => new GateEngine({
-      store: new InMemoryStore(),
+      store: storeOf(fx),
       config: resolveGateConfig({ now: () => fx.clock.t }),
       trust: { ...fx.trust },
       schemas: loadSchemas(),
@@ -212,10 +250,10 @@ export function runEffectOwnerConformance(label: string, factory: EffectOwnerFac
     assert.equal(fx.owner!.bound, true);
     // An owner whose bindEngine throws leaves its boot usable: the boot is reserved only after binding.
     const spare = effectGate({ owner: false, ids: idSource("bind-throws") });
-    const real = factory({ store: new InMemoryStore(),  trust: spare.trust, now: () => spare.clock.t, ledger: LEDGER, accounts: DEFAULT_ACCOUNTS });
+    const real = factory({ store: storeOf(spare), trust: spare.trust, now: () => spare.clock.t, ledger: LEDGER, accounts: DEFAULT_ACCOUNTS });
     const throwing: EffectOwner = { ...real, bound: false, bindEngine() { throw new Error("test: bind refused"); } };
     const buildEngine = (owner: EffectOwner) => () => new GateEngine({
-      store: new InMemoryStore(),
+      store: storeOf(spare),
       config: resolveGateConfig({ now: () => spare.clock.t }),
       trust: spare.trust,
       schemas: loadSchemas(),
@@ -228,7 +266,7 @@ export function runEffectOwnerConformance(label: string, factory: EffectOwnerFac
 
 
   test("EFFECT-OWNER-REQUIRES-PINNED — under alpha trust no owner exists, so a decision signed with the approver key on the gate's heap commits nothing", () => {
-    const fx = setupGate();
+    const fx = setupGate({ store: storeFactory() });
     let owner: EffectOwner | null = null;
     let refusal: unknown = null;
     try {
@@ -262,7 +300,7 @@ export function runEffectOwnerConformance(label: string, factory: EffectOwnerFac
     // The engine applies the same rule to an owner built elsewhere.
     const pinned = effectGate();
     assert.throws(() => new GateEngine({
-      store: new InMemoryStore(),
+      store: storeOf(pinned),
       config: resolveGateConfig({ now: () => fx.clock.t }),
       trust: fx.trust,
       schemas: loadSchemas(),
@@ -382,7 +420,7 @@ export function runEffectOwnerConformance(label: string, factory: EffectOwnerFac
   test("order: re-entry before the boot check, the boot check before O1", () => {
     const world = newWorld();
     const clock = makeClock();
-    const store = new InMemoryStore();
+    const store = storeFactory();
     const roster = rosterDoc(world, clock.t);
     const a = effectGate({ world, clock, store, roster, ids: idSource("order-a") });
     const b = effectGate({ world, clock, store, roster, ids: idSource("order-b") });
@@ -568,7 +606,7 @@ export function runEffectOwnerConformance(label: string, factory: EffectOwnerFac
   test("EFFECT-OWNER-DEAD-BOOT — a restarted gate's owner, called directly with a hold frozen before the restart, writes nothing", () => {
     const world = newWorld();
     const clock = makeClock();
-    const store = new InMemoryStore();
+    const store = storeFactory();
     const roster = rosterDoc(world, clock.t);
     const a = effectGate({ world, clock, store, roster, ids: idSource("odb-a") });
     const b = effectGate({ world, clock, store, roster, ids: idSource("odb-b") });
@@ -830,7 +868,7 @@ export function runEffectOwnerConformance(label: string, factory: EffectOwnerFac
   test("EFFECT-SIGNED-BOOT — a gate that booted after a hold was frozen does not commit it, even when told the hold is from its boot", () => {
     const world = newWorld();
     const clock = makeClock();
-    const store = new InMemoryStore();
+    const store = storeFactory();
     const roster = rosterDoc(world, clock.t);
     const a = effectGate({ world, clock, store, roster, ids: idSource("sb-a") });
     const holdId = approvedTransfer(a, "signed-boot");
@@ -853,7 +891,7 @@ export function runEffectOwnerConformance(label: string, factory: EffectOwnerFac
       ...fx.trust,
       receiptKeyring: { ...fx.trust.receiptKeyring, keys: { ...keys, [x.kid]: { publicKey: impostor.ed.publicKey, retiredAt: null } } },
     };
-    const owner = factory({ store: new InMemoryStore(), trust: injected, now: () => fx.clock.t, ledger: LEDGER, accounts: DEFAULT_ACCOUNTS });
+    const owner = factory({ store: storeFactory(), trust: injected, now: () => fx.clock.t, ledger: LEDGER, accounts: DEFAULT_ACCOUNTS });
     const approve = decisionFor(fx, holdId);
     const forgedReceipt = approvalReceiptBy(fx, holdId, { kid: x.kid, privateKey: impostor.ed.privateKey }, { by: x.kid, verdict: "ALLOWED" });
     plantApproved(fx, holdId, { decisionArtifact: approve.decisionArtifact, receipt: forgedReceipt, grant: signedGrant(fx, holdId, gateKey(fx.world), {}, forgedReceipt) });

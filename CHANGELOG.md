@@ -174,8 +174,9 @@ What changed for verifier users since 0.8.0, in short (the entries below give th
 - `NON-CLAIMS.md` §S9 gains NC-S9.12 to NC-S9.15 for the reference gate's effect-owner hooks
   (ADR-R-013): passing the owner conformance runner is not correctness (the re-entry guard, the
   owner's record and its store stay its own), a supervisor-supplied boot (identifier and start) is
-  taken as given, the one transition out of PENDING is atomic only in a store that makes it so, and the
-  Gate-pin fingerprint is a display.
+  taken as given, and the Gate-pin fingerprint is a display. The one transition out of PENDING is atomic
+  in the in-memory store (`settleHold`, `packages/gate/src/store.ts:165-172`), and another store has to
+  pass `runSettleHoldStoreContract` (`packages/gate/test/store-settle-contract.ts:56`).
 - `NON-CLAIMS.md` gains §S9, the claim boundary of the reference gate's new effect-owned commit for
   `noa.ledger.transfer` (`docs/gate-effect-owner.md`, ADR-R-012, PROPOSED): the effect and its record
   die together, a compromised gate process holds the keys and the ledger (and what the owner cannot

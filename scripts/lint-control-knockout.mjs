@@ -6239,6 +6239,14 @@ const KNOCKOUTS = [
     replace: "      if (false as boolean) {",
     kind: "tests",
     suite: ["packages/gate", "npm", ["run", "test:pinned"]],
+  },  {
+    id: "effect-owner-runner-store-pairing",
+    control: "Owner conformance runner — a construction test builds the owner under test, and each engine it builds for that owner, over the store of the fixture gate they belong to. Without the pairing an owner that records the grant's consumption is refused as EFFECT_OWNER_STORE_MISMATCH, and that refusal stands in for the construction rule the test checks. Consequence asserted: the owner under test is constructed over its engine's store. Detector: test/effect-owner-conformance.ts EFFECT-OWNER-CONSTRUCTION, registered for the recording owner in test/effect-owner.test.ts.",
+    file: "packages/gate/test/effect-owner-conformance.ts",
+    find: "  const storeOf = (g: EffectGate): Store => g.store;",
+    replace: "  const storeOf = (_g: EffectGate): Store => storeFactory();",
+    kind: "tests",
+    suite: ["packages/gate", "npm", ["run", "test:effect"]],
   },
 ];
 

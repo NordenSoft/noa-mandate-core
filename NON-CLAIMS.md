@@ -599,9 +599,11 @@ one ledger row per authority; the statements below qualify what that establishes
 
 The reference ledger lives in the gate process's memory with the holds and grants. A crash or restart
 loses the effect, the row and the authority state together. It is not a system of record, and the
-reference command line does not wire it. Commit-or-nothing behaviour and durability across processes, one authoritative
-ledger that a cloned volume cannot fork, and a single boot identifier shared by all of a gate's
-processes are left to a later revision.
+reference command line does not wire it. Within one gate process the commit is atomic
+(`packages/gate/src/effect-owner.ts:883-887`): the balance writes and the row that consumes the
+authority are one synchronous block, and nothing after its first write can throw. The same step across
+processes, durability across processes, one authoritative ledger that a cloned volume cannot fork, and
+a single boot identifier shared by all of a gate's processes are left to a later revision.
 
 ### NC-S9.2 — A compromised gate process holds the keys and the ledger
 
@@ -692,11 +694,16 @@ With a reused identifier, decide and the effect owner both still refuse a hold w
 time precedes the supplied boot start; a supervisor that also reuses the start instant defeats that
 too (NC-S9.2).
 
-### NC-S9.14 — One transition out of PENDING is atomic only in a store that makes it so
+### NC-S9.14 — `settleHold` is atomic in the in-memory store (`packages/gate/src/store.ts:165-172`); another store has to pass the settle contract
 
-`settleHold` is atomic in the in-memory store because its compare and writes are one synchronous
-block. A durable store must express it as one transaction whose compare is the stored status; the gate
-cannot tell a store that reads and then writes, and such a store restores the race it replaced.
+`settleHold` is atomic in the in-memory store because its compare of the stored status and its writes
+of the hold and the grant are one synchronous block (`packages/gate/src/store.ts:165-172`). For another
+store an atomic `settleHold` is a contract requirement: the store has to pass
+`runSettleHoldStoreContract` (`packages/gate/test/store-settle-contract.ts:56`), whose race test lets
+exactly one of two connections that both read PENDING win, and a durable store expresses the step as
+one transaction whose compare is the stored status. The gate cannot tell a store that reads and then
+writes, and such a store restores the race it replaced; the contract's tests exercise the races they
+run and are no proof about a schedule they do not run.
 
 ### NC-S9.15 — The Gate-pin fingerprint is a display
 

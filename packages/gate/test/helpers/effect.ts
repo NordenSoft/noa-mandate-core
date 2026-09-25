@@ -127,6 +127,43 @@ export const inMemoryOwnerFactory: EffectOwnerFactory = (o) =>
   createInMemoryLedgerEffectOwner({ trust: o.trust, now: o.now, ledger: o.ledger, accounts: o.accounts });
 
 /**
+ * The in-memory reference owner as an owner that records the grant's consumption itself, in the store
+ * it is built over (`recordsGrantConsumption`, `store`): after a new EXECUTED row it takes the grant's
+ * report lock and writes the consumption there, as the engine's mirror would, and the engine leaves
+ * the grant record to it. The engine refuses it over any other store (EFFECT_OWNER_STORE_MISMATCH), so
+ * it runs the owner conformance runner only with the runner's stores paired. A test double, not a
+ * durable owner: its row and the grant record are two writes.
+ */
+export const recordingOwnerFactory: EffectOwnerFactory = (o) => {
+  const inner = inMemoryOwnerFactory(o);
+  return {
+    canonical: inner.canonical,
+    ledger: inner.ledger,
+    bootId: inner.bootId,
+    get bound() {
+      return inner.bound;
+    },
+    bindEngine: (engine: object) => inner.bindEngine(engine),
+    admit: (canonicalParams: string) => inner.admit(canonicalParams),
+    find: (holdEnvelopeHash: string) => inner.find(holdEnvelopeHash),
+    commit(input, seal) {
+      const outcome = inner.commit(input, seal);
+      if (outcome.kind === "EXECUTED" && !outcome.idempotent) {
+        const locked = o.store.claimGrantReported(outcome.row.grantId, o.now());
+        if (locked !== null) {
+          locked.consumption = outcome.row.attestation !== null ? outcome.row.attestation.executionConsumption : null;
+          o.store.putGrant(locked);
+        }
+      }
+      return outcome;
+    },
+    inspect: () => inner.inspect(),
+    recordsGrantConsumption: true,
+    store: o.store,
+  };
+};
+
+/**
  * A pinned gate with (by default) an in-memory ledger owner. Pass the same `world`, `clock`, `store` and
  * `roster` document with a different `ids` prefix to model a RESTART: same roster, gate key and epoch,
  * a new bootId, and a new (empty-history) ledger owner.
@@ -357,11 +394,11 @@ export function extendEnvelope(fx: EffectGate, holdId: string, extraMs: number):
  * roster changed by `rosterOver`, on `fx`'s BOOT: only the roster facts differ, so only the check under
  * test can refuse `fx`'s artifacts.
  */
-export function ownerOn(fx: EffectGate, rosterOver: Record<string, unknown>, prefix: string, ledger: string = LEDGER, ownerFactory: EffectOwnerFactory = inMemoryOwnerFactory): { trust: GateTrust; owner: EffectOwner } {
+export function ownerOn(fx: EffectGate, rosterOver: Record<string, unknown>, prefix: string, ledger: string = LEDGER, ownerFactory: EffectOwnerFactory = inMemoryOwnerFactory, store: Store = new InMemoryStore()): { trust: GateTrust; owner: EffectOwner } {
   const base = pinnedTrustFrom(rosterDoc(fx.world, fx.clock.t, rosterOver), fx.world.gate, { now: () => fx.clock.t, ids: idSource(prefix) });
   const trust: GateTrust = { ...base, bootId: fx.trust.bootId };
   // Its own store: this owner is called directly and must not share records with `fx`'s owner.
-  const owner = ownerFactory({ trust, now: () => fx.clock.t, ledger, accounts: DEFAULT_ACCOUNTS, store: new InMemoryStore() });
+  const owner = ownerFactory({ trust, now: () => fx.clock.t, ledger, accounts: DEFAULT_ACCOUNTS, store });
   return { trust, owner };
 }
 

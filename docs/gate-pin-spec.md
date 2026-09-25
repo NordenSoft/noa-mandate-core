@@ -130,10 +130,13 @@ An implementation conforms when it follows §3–§5 and passes the corpus
    not its canonical spelling (unused bits set, extra padding, whitespace).
 
 In a vector, an absent member is omitted from `input`. The corpus is synthetic (`tenant-example-N`,
-`gate-example-N`); its Ed25519 keys are freshly generated public keys with no use outside it, and its
-refused keys come from `conformance/vectors/strict-ed25519`. `packages/gate/test/gate-pin.test.ts`
-recomputes every ACCEPT value without the implementation (SHA-256 from `node:crypto` over a
-hand-built JCS text) before comparing the implementation with it.
+`gate-example-N`, and the console-style tenant `org_00000000-0000-0000-0000-000000000000`, an all-zero
+example UUID); its Ed25519 keys are freshly generated public keys with no use outside it, and its
+refused keys come from `conformance/vectors/strict-ed25519`. `scripts/gen-gate-pin-vectors.mjs`
+generates it (`--check` compares the committed file with its output) and writes only when the
+implementation and its own `node:crypto` derivation agree on every vector;
+`packages/gate/test/gate-pin.test.ts` recomputes every ACCEPT value without the implementation
+(SHA-256 from `node:crypto` over a hand-built JCS text) before comparing the implementation with it.
 
 ## 10. Independent-implementation path
 
