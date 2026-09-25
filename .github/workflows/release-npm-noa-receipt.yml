@@ -374,7 +374,9 @@ jobs:
           mkdir -- "$cli"
           curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 -o "$cli/npm.tgz" "https://registry.npmjs.org/npm/-/npm-${NPM_VERSION}.tgz"
           test "sha512-$(openssl dgst -sha512 -binary "$cli/npm.tgz" | base64 -w0)" = "$NPM_INTEGRITY"
-          npm install --global --ignore-scripts --no-audit --no-fund "$cli/npm.tgz"
+          npm install --global --ignore-scripts --prefix "$cli/prefix" --no-audit --no-fund "$cli/npm.tgz"
+          echo "$cli/prefix/bin" >> "$GITHUB_PATH"
+          export PATH="$cli/prefix/bin:$PATH"
           hash -r
           test "$(npm -v)" = "$NPM_VERSION"
 
@@ -471,7 +473,9 @@ jobs:
           mkdir -- "$cli"
           curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 -o "$cli/npm.tgz" "https://registry.npmjs.org/npm/-/npm-${NPM_VERSION}.tgz"
           test "sha512-$(openssl dgst -sha512 -binary "$cli/npm.tgz" | base64 -w0)" = "$NPM_INTEGRITY"
-          npm install --global --ignore-scripts --no-audit --no-fund "$cli/npm.tgz"
+          npm install --global --ignore-scripts --prefix "$cli/prefix" --no-audit --no-fund "$cli/npm.tgz"
+          echo "$cli/prefix/bin" >> "$GITHUB_PATH"
+          export PATH="$cli/prefix/bin:$PATH"
           hash -r
           test "$(npm -v)" = "$NPM_VERSION"
 

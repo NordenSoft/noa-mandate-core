@@ -819,7 +819,7 @@ const CLOSED_WORKFLOW_SHA256 = Object.freeze({
   "publish-tsa.yml": "91745dac92651660718868884d203af96f7bcc42f5986ce9f319087c4b38716e",
   // The release controller is pinned whole as well; its controls are ALSO measured structurally
   // below, because a digest alone would make every knockout arm on the file vacuous.
-  "release-npm-noa-receipt.yml": "36a4d2bbb521d844e48cd912108caaffb6b7f153227580361ede4ae78765357c",
+  "release-npm-noa-receipt.yml": "3c623c2856bdaad4d9fa760f9ac1ff5bbb63ac72aa9d95af57c556eef1bfa02d",
 });
 
 // Only LF is a line separator in the canonical production representation. Reject every other
@@ -1322,7 +1322,9 @@ function releaseControllerProblems(source, prOnlyContexts) {
       (Number(version[1]) === 11 && (Number(version[2]) > 5 || (Number(version[2]) === 5 && Number(version[3]) >= 1))));
     if (!supported || !/^sha512-[A-Za-z0-9+/]{86}==$/u.test(install?.env.NPM_INTEGRITY ?? "") ||
         !hasLine(install?.run, 'test "sha512-$(openssl dgst -sha512 -binary "$cli/npm.tgz" | base64 -w0)" = "$NPM_INTEGRITY"') ||
-        !hasLine(install?.run, 'npm install --global --ignore-scripts --no-audit --no-fund "$cli/npm.tgz"') ||
+        !hasLine(install?.run, 'npm install --global --ignore-scripts --prefix "$cli/prefix" --no-audit --no-fund "$cli/npm.tgz"') ||
+        !hasLine(install?.run, 'echo "$cli/prefix/bin" >> "$GITHUB_PATH"') ||
+        !hasLine(install?.run, 'export PATH="$cli/prefix/bin:$PATH"') ||
         !hasLine(install?.run, 'test "$(npm -v)" = "$NPM_VERSION"') || installAt !== 1) {
       fail("publish", "PUB-NPM-PIN", `${jobName}: exact trusted-publishing npm, integrity-checked and asserted before use`);
     }
@@ -1669,6 +1671,7 @@ function releaseWorld(prefix, source = RELEASE_CONTROLLER_SOURCE()) {
         GITHUB_REPOSITORY: RELEASE_REPOSITORY, GITHUB_SHA: options.sha, GITHUB_REF: "refs/heads/main",
         GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_STEP_SUMMARY: path.join(runnerTemp, "summary.md"),
         GITHUB_OUTPUT: path.join(runnerTemp, "output.txt"),
+        GITHUB_PATH: path.join(runnerTemp, "path.txt"),
       };
       for (const [key, raw] of Object.entries(step.env)) {
         const expression = /^\$\{\{\s*(.+?)\s*\}\}$/u.exec(raw);
@@ -2276,8 +2279,8 @@ check(RELEASE_BEHAVIOUR_CHECKS.npmInstall, () => {
       const base = { sha: "a".repeat(40), env: { NPM_INTEGRITY: integrity } };
       const accepted = world.run(step, base);
       assert.equal(accepted.status, 0, `${step}: the integrity-checked CLI was refused:\n${accepted.output}`);
-      assert.deepEqual(world.read("npm.log").trim().split("\n").map((line) => line.replace(/ \S+\/npm\.tgz$/u, " <cli>")),
-        ["npm install --global --ignore-scripts --no-audit --no-fund <cli>", "npm -v"], `${step}: unexpected npm calls`);
+      assert.deepEqual(world.read("npm.log").trim().split("\n").map((line) => line.replace(/ \S+\/npm\.tgz$/u, " <cli>").replace(/ --prefix \S+\/prefix /u, " --prefix <prefix> ")),
+        ["npm install --global --ignore-scripts --prefix <prefix> --no-audit --no-fund <cli>", "npm -v"], `${step}: unexpected npm calls`);
       expectRefusals(world, step, base, [
         ["a tampered CLI tarball", {}, swapRoute(world, "curl", url, Buffer.concat([cli, Buffer.from([0])])), noInstall],
         ["an unreadable CLI tarball", {}, swapRoute(world, "curl", url, undefined), noInstall],
