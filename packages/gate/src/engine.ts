@@ -131,9 +131,6 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 function asString(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
 }
-function asBool(v: unknown, dflt: boolean): boolean {
-  return typeof v === "boolean" ? v : dflt;
-}
 function err(status: number, error: string, extra: Record<string, unknown> = {}): EngineResult {
   return { status, body: { error, ...extra } };
 }
@@ -594,8 +591,6 @@ export class GateEngine {
     if (!isRecord(rawAction)) return err(422, "MISSING_ACTION");
     const canonical = asString(rawAction["canonical"]);
     const riskClass = asString(rawAction["riskClass"]);
-    // The caller's flag is kept only for adapters that do not derive reversibility (see below).
-    let reversible = asBool(rawAction["reversible"], false);
     if (!canonical) return err(422, "INCOMPLETE_ACTION");
 
     // Registered ⇒ ENFORCED. Unregistered ⇒ RAW, and RAW is UNENFORCED: it may not carry a grant,
@@ -733,10 +728,13 @@ export class GateEngine {
     if (rosterRefusal !== null) return rosterRefusal;
 
     // ─── DERIVED REVERSIBILITY AND EFFECT OWNERSHIP (docs/gate-effect-owner.md), after the roster ───
-    // An adapter that derives `reversible` owns the value: a caller-supplied `action.reversible` member
-    // is refused whatever its value (the MODE / paramsHash rule: accepting the field is the defect),
-    // and the derived value is the one the gate signs. Adapters that do not derive it keep the caller's
-    // flag — `noa.command.exec` is unchanged here.
+    // The gate never signs a caller's reversibility claim. An adapter that derives `reversible` owns
+    // the value: a caller-supplied `action.reversible` member is refused whatever its value (the
+    // paramsHash rule: accepting the field is the defect), and the derived value is the one the gate
+    // signs. An adapter that derives none (`noa.command.exec`) is signed `false`: the gate cannot tell
+    // that a command can be undone. There a caller may still send `false`, the value the gate signs
+    // (compatibility, as for `mode`), and any other value is refused.
+    let reversible = false;
     if (derivedReversible !== undefined) {
       if (hasOwn(rawAction, "reversible")) {
         return err(422, "REVERSIBLE_NOT_CALLER_SUPPLIED", {
@@ -744,6 +742,11 @@ export class GateEngine {
         });
       }
       reversible = derivedReversible;
+    } else if (hasOwn(rawAction, "reversible") && rawAction["reversible"] !== false) {
+      return err(422, "REVERSIBLE_NOT_CALLER_SUPPLIED", {
+        detail: "the gate signs reversible:false for this action and does not vouch that it can be undone; " +
+          "remove action.reversible or send false",
+      });
     }
     const effectOwned = isEffectOwned(canonical);
     let heldParams: string | null = null;

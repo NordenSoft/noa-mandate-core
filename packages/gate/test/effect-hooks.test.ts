@@ -1,7 +1,8 @@
 /**
- * The hooks a durable effect owner builds on (docs/gate-effect-owner.md): the owner's authority check
- * and ledger derivation exported as ONE implementation, an owner that records the grant's consumption
- * itself over the engine's own store, and a store outage that is retryable and writes nothing.
+ * The hooks a durable effect owner builds on (docs/gate-effect-owner.md): the owner's authority check,
+ * ledger derivation and ledger-definition check exported as ONE implementation, an owner that records
+ * the grant's consumption itself over the engine's own store, and a store outage that is retryable
+ * and writes nothing.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -11,6 +12,8 @@ import { getProjection } from "../src/projections.js";
 import * as effectOwnerModule from "../src/effect-owner.js";
 import {
   buildEffectAttestation,
+  checkLedgerDefinition,
+  createInMemoryLedgerEffectOwner,
   deriveLedgerCommit,
   verifyEffectAuthority,
   type EffectAttestation,
@@ -22,6 +25,9 @@ import type { GateTrust } from "../src/trust.js";
 import { LEDGER_TRANSFER_CANONICAL } from "noa-receipt";
 import {
   ACCT_1,
+  ACCT_2,
+  DEFAULT_ACCOUNTS,
+  LEDGER,
   approvedTransfer,
   effectGate,
   grantOf,
@@ -100,6 +106,78 @@ test("EFFECT-AUTHORITY-EXPORT — the exported authority check and ledger deriva
 /** The exported attestation check (O8), looked up by name so this file compiles before it exists. */
 type AttestationCheck = (trust: GateTrust, raw: unknown, verified: VerifiedAuthority, nowIso: string, alreadyRecorded: (receiptId: string) => boolean) => { problem: string | null; attestation: EffectAttestation };
 const verifyEffectAttestation = (...a: Parameters<AttestationCheck>) => (effectOwnerModule as unknown as Record<string, AttestationCheck>)["verifyEffectAttestation"]!(...a);
+
+test("EFFECT-LEDGER-DEFINITION-EXPORT — the exported ledger-definition check is the owner's: both refuse the same definitions with the same detail and accept the same balances", () => {
+  const fx = effectGate({ owner: false, ids: idSource("ledger-definition") });
+  const build = (ledger: unknown, accounts: unknown) => () =>
+    createInMemoryLedgerEffectOwner({ trust: fx.trust, now: () => fx.clock.t, ledger: ledger as string, accounts: accounts as Record<string, number> });
+  const refused: Array<[string, unknown, unknown]> = [
+    ["ledger identifier", "Ledger-1", {}],
+    ["empty ledger", "", {}],
+    ["ledger of another type", 7, {}],
+    ["accounts not an object", LEDGER, null],
+    ["accounts an array", LEDGER, [1]],
+    ["account identifier", LEDGER, { "ACCT-1": 1 }],
+    ["negative balance", LEDGER, { [ACCT_1]: -1 }],
+    ["fractional balance", LEDGER, { [ACCT_1]: 1.5 }],
+    ["balance of another type", LEDGER, { [ACCT_1]: "10" }],
+    ["unsafe balance", LEDGER, { [ACCT_1]: Number.MAX_SAFE_INTEGER + 1 }],
+    ["sum past the bound", LEDGER, { [ACCT_1]: Number.MAX_SAFE_INTEGER, [ACCT_2]: 1 }],
+  ];
+  for (const [label, ledger, accounts] of refused) {
+    const r = checkLedgerDefinition(ledger, accounts);
+    assert.equal(r.ok, false, `${label}: the exported check refuses it`);
+    if (r.ok) continue;
+    assert.throws(build(ledger, accounts), (e: unknown) => e instanceof Error && e.message === `EFFECT_OWNER_LEDGER_INVALID: ${r.detail}`,
+      `${label}: the owner refuses it with the exported check's detail`);
+  }
+  for (const accounts of [DEFAULT_ACCOUNTS, { [ACCT_1]: Number.MAX_SAFE_INTEGER, [ACCT_2]: 0 }, {}]) {
+    const r = checkLedgerDefinition(LEDGER, accounts);
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.equal(Object.getPrototypeOf(r.balances), null, "the balances are a null-prototype copy");
+    assert.notEqual(r.balances, accounts);
+    assert.deepEqual({ ...r.balances }, { ...accounts });
+    assert.deepEqual({ ...build(LEDGER, accounts)().inspect().balances }, { ...r.balances }, "the owner holds exactly the balances the check accepted");
+  }
+});
+
+test("EFFECT-LEDGER-DEFINITION-CHANGES — definitions the owner used to build or throw on are refused with a stable detail", () => {
+  // Measured against the owner as it stood before the check was exported (it walked
+  // Object.keys(accounts) and named a bad ledger by its JSON text): an array, a number, a function, a
+  // bigint, a Map and a Set each built an EMPTY ledger; null and undefined threw a TypeError; a bigint
+  // ledger threw a TypeError; a number ledger was named "7". Each is now refused with
+  // EFFECT_OWNER_LEDGER_INVALID and one of two stable details.
+  const fx = effectGate({ owner: false, ids: idSource("ledger-definition-changes") });
+  const notPlain = "the accounts are not a plain object (prototype Object.prototype or null) of account identifiers and balances";
+  const ledgerOfType = (t: string) => `the ledger identifier of type ${t} fails the noa.ledger.transfer/1 identifier rules`;
+  const cases: Array<[string, unknown, unknown, string]> = [
+    ["an array", LEDGER, [], notPlain],
+    ["a number", LEDGER, 5, notPlain],
+    ["a function", LEDGER, function accounts() {}, notPlain],
+    ["null", LEDGER, null, notPlain],
+    ["undefined", LEDGER, undefined, notPlain],
+    ["a bigint", LEDGER, BigInt(10), notPlain],
+    ["a Map", LEDGER, new Map([[ACCT_1, 5]]), notPlain],
+    ["a Set", LEDGER, new Set([ACCT_1]), notPlain],
+    ["a number ledger", 7, {}, ledgerOfType("number")],
+    ["a bigint ledger", BigInt(10), {}, ledgerOfType("bigint")],
+    ["an undefined ledger", undefined, {}, ledgerOfType("undefined")],
+  ];
+  for (const [label, ledger, accounts, detail] of cases) {
+    assert.deepEqual(checkLedgerDefinition(ledger, accounts), { ok: false, detail }, `${label}: the exported check refuses it`);
+    assert.throws(
+      () => createInMemoryLedgerEffectOwner({ trust: fx.trust, now: () => fx.clock.t, ledger: ledger as string, accounts: accounts as Record<string, number> }),
+      (e: unknown) => e instanceof Error && !(e instanceof TypeError) && e.message === `EFFECT_OWNER_LEDGER_INVALID: ${detail}`,
+      `${label}: the owner refuses it with the same detail`,
+    );
+  }
+  // Still accepted: a plain object and a null-prototype object.
+  for (const accounts of [{ [ACCT_1]: 5 }, Object.assign(Object.create(null) as Record<string, number>, { [ACCT_1]: 5 })]) {
+    const r = checkLedgerDefinition(LEDGER, accounts);
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.equal(r.balances[ACCT_1], 5);
+  }
+});
 
 test("EFFECT-ATTESTATION-EXPORT — the exported attestation check is the owner's: evidence for another instant is refused with the owner's token; this commit's evidence passes once", () => {
   const fx = effectGate({ ids: idSource("att-export") });

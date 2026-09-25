@@ -483,6 +483,45 @@ test("digest anti-vacuity: the same params with NO caller hash are accepted", ()
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Reversibility — a caller's `action.reversible` is never signed as fact.
+//
+// Measured before the fix: `rm -rf /srv/app` was classified CRITICAL, and the gate signed the caller's
+// `reversible: true` into the deferred receipt and the Hold Resolution. The command adapter derives no
+// reversibility and the gate cannot tell that a command can be undone, so the gate signs `false`. A
+// caller may still send `false`, the value the gate signs (compatibility, as for `mode`); any other
+// value disagrees with what the gate would sign and is refused.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+test("reversible: a caller's reversible claim for a command is never signed as fact", () => {
+  const fx = setupGate({ approverRole: "approve-critical" });
+  for (const claimed of [true, "true", 1, null] as const) {
+    const created = fx.engine.createHold(fx.agent, `idem-rev-${String(claimed)}`, body({
+      action: { ...ACTION, reversible: claimed },
+      params: sampleCommandParams({ executable: "/bin/rm", argv: ["-rf", "/srv/app"] }),
+      chain: `chain-rev-${String(claimed)}`,
+    }));
+    const signedTrue = fx.store.listHolds({}).filter((h) => h.deferredReceipt.action.reversible !== false);
+    assert.equal(signedTrue.length, 0, "consequence: the gate signs no reversibility the caller chose");
+    assert.equal(fx.store.listHolds({}).length, 0, `consequence: a request claiming reversible:${JSON.stringify(claimed)} freezes no hold`);
+    assert.equal(created.status, 422, JSON.stringify(created.body));
+    assert.equal((created.body as { error?: unknown }).error, "REVERSIBLE_NOT_CALLER_SUPPLIED");
+  }
+});
+
+test("reversible anti-vacuity: a caller's false and an absent member both freeze a hold the gate signs reversible:false", () => {
+  const fx = setupGate({ approverRole: "approve-critical" });
+  const cases = [["false", ACTION], ["absent", { canonical: ACTION.canonical, riskClass: ACTION.riskClass }]] as const;
+  for (const [label, action] of cases) {
+    const created = fx.engine.createHold(fx.agent, `idem-rev-${label}`, body({
+      action, params: sampleCommandParams(), chain: `chain-rev-${label}`,
+    }));
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const receipt = (created.body as { deferredReceipt: { action: { reversible: unknown } } }).deferredReceipt;
+    assert.equal(receipt.action.reversible, false, `${label}: the signed deferred receipt says reversible:false`);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
 // Registry — the projection registry must not be mutable at runtime from the caller's realm.
 //
 // Measured pre-fix: `projections.ts:98-106` is a module-level mutable Map and `registerProjection`

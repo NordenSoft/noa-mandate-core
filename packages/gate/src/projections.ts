@@ -116,7 +116,8 @@ export interface ProjectionResult {
   /**
    * `action.reversible` DERIVED inside the boundary. When an adapter sets it, a caller-supplied
    * `action.reversible` member is refused (422 REVERSIBLE_NOT_CALLER_SUPPLIED) and this value is the
-   * one the gate signs. Adapters that leave it undefined keep the caller-supplied flag.
+   * one the gate signs. When an adapter leaves it undefined the gate signs `false`, and a caller may
+   * send only `false`: the gate never signs a caller's reversibility claim.
    */
   derivedReversible?: boolean;
 }

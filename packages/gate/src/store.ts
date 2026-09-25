@@ -161,13 +161,17 @@ export class InMemoryStore implements Store {
     return rec;
   }
 
-  // One synchronous block: the compare, then the hold and its grant, with nothing in between.
+  // One synchronous block: the compare, then the hold and its grant, with nothing in between. The
+  // lines between the two ATOMIC-BLOCK tags are what NON-CLAIMS.md and CHANGELOG.md cite as atomic;
+  // lint-doc-truth refuses the citation when they move.
   settleHold(next: HoldRecord, grant: GrantRecord | null): boolean {
+    // ATOMIC-BLOCK: settle-hold-in-memory
     const current = this.holds.get(next.id);
     if (current === undefined || current.status !== "PENDING") return false;
     if (grant !== null) this.grants.set(grant.grant.grantId, grant);
     this.holds.set(next.id, next);
     this.holdsByIdem.set(this.idemKey(next.agentId, next.idempotencyKey), next.id);
+    // ATOMIC-BLOCK-END: settle-hold-in-memory
     return true;
   }
 }

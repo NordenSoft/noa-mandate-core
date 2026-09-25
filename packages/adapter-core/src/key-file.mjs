@@ -93,9 +93,10 @@ export function loadOrCreateKeyFile({ keyFile, mintKeyPair, callerLabel = "loadO
   let fd = null;
   try {
     // The key path can point into a caller-owned mkdtemp directory in tests. The descriptor-level
-    // O_NOFOLLOW checks below, exclusive create, and 0600 permissions make that use safe; the
-    // generic query does not model those controls across callers.
-    // codeql[js/insecure-temporary-file]
+    // O_NOFOLLOW checks below, exclusive create, and 0600 permissions make that use safe; CodeQL's
+    // js/insecure-temporary-file query does not model those controls across callers, so its alert
+    // is dismissed on GitHub with a written reason (this repository's CodeQL setup applies no inline
+    // suppression comment).
     fd = openSync(keyFile, READONLY_NOFOLLOW);
   } catch (err) {
     if (thrownCode(err) === "ELOOP") {
