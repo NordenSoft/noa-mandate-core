@@ -91,9 +91,55 @@ All notable changes to `noa-receipt` are documented here. The format follows
   of the outer COSE signature. A manifest lookup is bound to the native `sig.kid`; an envelope signer
   cannot stand in for the agent, and an unprotected outer `kid` is not reported as an authenticated
   identity.
+- Refusal labels only: the standalone `verifyCheckpoint`, both COSE verifiers (`coseSign1Verify`, and
+  `receiptFromCose` for the envelope and for the enveloped receipt), the compliance carrier check and
+  `resolveVerificationKey` now authenticate a signature that names a lifecycle-retired kid against
+  that key's retained public material before they call it retired, as `verifyChain` already did. A
+  forged or altered signature naming a retired kid now gets the surface's integrity refusal
+  (`"bad checkpoint signature"`, `"bad signature"`, "the enveloped receipt's own signature does not
+  verify …", "carrier receipt signature not authenticated", `invalid signature (kid "…")`) instead
+  of a retirement label; an authentic one keeps its retired answer. Nothing refused before is
+  accepted now, and nothing accepted before is refused. `resolveVerificationKey(document, kid,
+  message?, signature?)` gains two optional arguments for this. The resolver reports key state by
+  design: without them it authenticates nothing, a retired kid's refusal names the key state only, and
+  a current kid resolves with no signature check. Every caller here that verifies an artifact passes
+  both and verifies the signature itself: `verifyActionDigest`, `verifyApprovalReceipt`
+  (`noa-mcp-adapter-core`) and `verifyOutcomeReceipt` (`noa-mcp-proxy`). The evidence verifier's
+  checkpoint step reports a forged checkpoint naming a retired kid as a signature failure.
+  One further relabel: `verifyOutcomeReceipt` now builds the signed bytes before it resolves the key,
+  so an outcome that cannot be canonicalized is refused as malformed (`verify threw: …`) whatever its
+  kid; it was "not in keyring" for an unknown kid.
+- The same rule in three more places. `noa-approval-artifacts`' `verifyArtifact` checks the strict
+  public key and the signature before it names the signing key's state, so a forged signature under a
+  key that is not yet active, revoked, of the wrong type or missing the role is
+  `invalid signature (kid …)`. `noa-relay`'s decision route checks the receipt signature before it
+  answers `403 DEVICE_REVOKED` or `403 DEVICE_MISMATCH`, so a receipt its named device never signed
+  is `422 UNVERIFIED_SIGNATURE`. The evidence verifier's step 18 judges a checkpoint signer's manifest
+  entry only when step 17 authenticated the checkpoint or the checkpoint verifies under that manifest
+  key. Authentic signatures keep every answer they had. One verdict moves: a forged checkpoint that
+  names a revoked or not-yet-active manifest key and is unknown to the external checkpoint keyring was
+  `INVALID` (`E_TEMPORAL_AUTH`) and is now the untrusted-anchor result every other unauthenticated
+  checkpoint already gets (`VALID_SEGMENT_ONLY` for a positive outcome, `INCONCLUSIVE` for a negative
+  one).
+- The evidence verifier's kid-keyed maps (`asRootKeyEntryMap`, `asStringKeyring`,
+  `buildResolvedKeyring`, `buildReceiptKeyring` and the settlement step's signing-key map) are built on
+  a null prototype, so a kid named after an `Object.prototype` member is an ordinary entry and an
+  absent one resolves to nothing.
 
 ### Changed
 
+- `NON-CLAIMS.md` gains §S9, the claim boundary of the reference gate's new effect-owned commit for
+  `noa.ledger.transfer` (`docs/gate-effect-owner.md`, ADR-R-012, PROPOSED): the effect and its record
+  die together, a compromised gate process holds the keys and the ledger (and what the owner cannot
+  check from its artifacts: the truth of the store-held boot identifier, which the signed freeze time
+  only bounds, roster expiry, the approval time window), the gate is the witness of its own effect,
+  the approval binds the transfer tuple and not the balance, the agent decides whether and when to
+  commit, account existence is revealed after approval, refusals are not signed, only this one action
+  is effect-owned, one effect-owning engine per boot is enforced in one process only, and the owner's
+  callers are not trusted while its code (including an embedder-supplied owner) is. NC-S7.11 now
+  points there instead of stating that the reference Gate does not register the adapter, and NC-S8.1
+  names the effect-owned exception. The gate itself (`noa-gate`) is not part of this package; the
+  entry records the change to a document this package ships.
 - `NON-CLAIMS.md` gains §S8, the claim boundary of the reference gate's new pinned trust mode
   (`noa.gate-roster/1`, `docs/gate-pinned-trust.md`): no single-use enforcement at the effect, no
   signed or remotely revocable roster, limited rollback detection, no clock-rollback detection, a
@@ -149,6 +195,40 @@ All notable changes to `noa-receipt` are documented here. The format follows
 - `receiptFromCose` now refuses a receipt whose native signing key is absent from or retired in the
   supplied keyring. A successful result means both the native receipt and outer envelope checks
   required by the selected path succeeded; it is not an independent-execution or deployment claim.
+
+### Security
+
+- A new release controller, `.github/workflows/release-npm-noa-receipt.yml`, is the only workflow that
+  can release `noa-receipt`; the legacy `publish*.yml` workflow IDs stay quarantined. It never
+  publishes directly: it stages the tarball on npm (`npm stage publish`), and the version becomes
+  public only when a package maintainer approves that npm stage. What a released version establishes
+  is limited to this: the public bytes were staged from one checked, merged, signed squash commit that
+  was the tip of `main` when the workflow re-read it right before staging, a human approved the run as
+  the `npm-release` environment reviewer, and a maintainer approved the npm stage. A merged pull
+  request is not evidence of code review (the branch ruleset requires no approving review; see
+  `NON-CLAIMS.md` §R1). The `stage` job, with read-only scopes, binds the dispatch to that commit and
+  its merged pull request, reads every page of every check run the live ruleset requires (push-lane
+  contexts on the release commit, pull-request contexts on the merged head, whose tree must equal the
+  release tree), refuses a live ruleset that no longer requires every (context, app) pair of a pinned
+  minimum set, requires the environment to exist with a reviewer, no admin bypass and `main` as its
+  only branch, restages the tarballs in the pinned container and requires the `noa-receipt` bytes to
+  equal the independently built main-push candidate. Only the `publish` job can mint an OIDC token: it
+  checks out nothing and runs no repository code, installs an integrity-pinned npm CLI, refuses ambient
+  registry credentials, re-reads live `main` with the job token and stages exactly the checked tarball
+  with provenance; the run summary records the npm stage id and integrity (STAGED). A `readback` job
+  without permissions also runs after a failed publish, reports whether the version is present, and
+  checks integrity plus repository, workflow, ref and commit inside the attestation bundle npm
+  verified; until the stage is approved it reports ABSENT, and it is re-run after the approval. The
+  knockout selftest executes every run body of the workflow against stubbed tools. Ruleset bypass
+  actors are not visible to the job token: a merge that bypassed the rules is refused only through
+  its missing checks, tree or signature, and the environment reviewer reads the bypass actors at
+  approval time. The environment and the npm trusted-publisher binding (stage publish only) are
+  provider settings; this repository does not create them, and no version has been released through
+  the controller yet.
+- Public artifacts now carry their exact source repository instead of omitting it, because npm
+  provenance requires `repository.url` to match the publishing repository. Staging writes the policy
+  value (`https://github.com/NordenSoft/noa-mandate-core.git`, plus `directory` for subpackages) when
+  a manifest lacks it and refuses a manifest that names any other source.
 
 ## [0.8.0] - 2026-08-14
 

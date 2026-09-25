@@ -17,6 +17,9 @@
  *     (POLICY signer), never ALLOWED, never a human denial.
  *   - F9/F10: every terminal hold emits a gate-signed Hold Resolution with the gate's trusted
  *     receivedAt (never the phone's decidedAt).
+ *   - EFFECT-OWNED actions (docs/gate-effect-owner.md): the grant never leaves the gate; `commit()`
+ *     hands the signed artifacts to the in-process effect owner, which re-verifies them and writes the
+ *     one row that consumes the authority. `reserve` and `report` refuse such actions.
  */
 
 import { parseDocument, verifyArtifact, refHash, receiptRefHash, canonicalize, sha256Prefixed } from "noa-approval-artifacts";
@@ -36,7 +39,8 @@ import { buildHoldEnvelope } from "./envelope.js";
 import { issueGrant, buildConsumption, buildUncertainty } from "./grants.js";
 import { localExecutionSigner, type ExecutionSigner } from "./exec-signer.js";
 import { buildHoldResolution } from "./resolution.js";
-import { getProjection } from "./projections.js";
+import { getProjection, isEffectOwned } from "./projections.js";
+import { assertEffectOwnerTrust, buildEffectAttestation, type EffectCommitInput, type EffectOutcome, type EffectOwner, type LedgerRow } from "./effect-owner.js";
 import { encodeDocument } from "./bytes.js";
 // PRISTINE TIME (review #6, C1): a grant-expiry comparison is an authorization decision, so it must
 // not dispatch through the globally-mutable `Date.parse`.
@@ -132,6 +136,13 @@ function asBool(v: unknown, dflt: boolean): boolean {
 }
 function err(status: number, error: string, extra: Record<string, unknown> = {}): EngineResult {
   return { status, body: { error, ...extra } };
+}
+/** A commit-route refusal: `{error, detail?, retryable}` — every commit error says whether a retry can help. */
+function commitErr(status: number, error: string, retryable: boolean, extra: Record<string, unknown> = {}): EngineResult {
+  return { status, body: { error, ...extra, retryable } };
+}
+function withRetryable(r: EngineResult, retryable: boolean): EngineResult {
+  return { status: r.status, body: { ...(r.body as Record<string, unknown>), retryable } };
 }
 
 /**
@@ -247,8 +258,22 @@ export interface GateEngineDeps {
    * is a decision that has to be written down in the source that makes it.
    */
   unsafeInProcessGrantKey?: true;
+  /**
+   * The in-process effect owners (docs/gate-effect-owner.md), at most one per effect-owned canonical.
+   * Refused at construction unless the trust root is pinned, the canonical is effect-owned, no two
+   * owners claim one canonical, and each owner verifies against THIS trust root (same `bootId`).
+   */
+  effectOwners?: readonly EffectOwner[];
   log?: (event: string, fields: Record<string, unknown>) => void;
 }
+
+/**
+ * The boots (trust-root `bootId`s) that already serve an effect-owning engine in this process. Two
+ * engines on one boot, each with its own owner, would each keep their own ledger for the same
+ * authority: with one failed grant mirror both could commit it. So the second such engine is refused —
+ * keyed on the boot, not on the trust object, so a copy of the trust root is refused too.
+ */
+const effectOwningBoots = new Set<string>();
 
 export class GateEngine {
   private readonly store: Store;
@@ -257,6 +282,8 @@ export class GateEngine {
   private readonly schemas: Record<string, unknown>;
   private readonly sealDisplay: DisplaySealer | undefined;
   private readonly execSigner: ExecutionSigner;
+  /** canonical → its effect owner. Frozen, null-prototype, probed with `hasOwn`. */
+  private readonly effectOwners: Readonly<Record<string, EffectOwner>>;
   private readonly log: (event: string, fields: Record<string, unknown>) => void;
   private readonly waiters = new Map<string, Set<Waiter>>();
 
@@ -288,6 +315,68 @@ export class GateEngine {
         `GateEngine: the execution signer's kid ${JSON.stringify(this.execSigner.kid)} is not the kid the key manifest authorizes for execution (${JSON.stringify(expectedKid)})`,
       );
     }
+    // ── EFFECT OWNERS: refused at construction, never discovered on the first commit ──────────────
+    const owners = Object.create(null) as Record<string, EffectOwner>;
+    const supplied = deps.effectOwners ?? [];
+    for (let i = 0; i < supplied.length; i++) {
+      const owner = supplied[i] as EffectOwner;
+      assertEffectOwnerTrust(this.trust);
+      if (!isEffectOwned(owner.canonical)) {
+        throw new Error(`EFFECT_OWNER_CANONICAL_INVALID: ${JSON.stringify(owner.canonical)} is not an effect-owned action`);
+      }
+      if (hasOwn(owners, owner.canonical)) {
+        throw new Error(`EFFECT_OWNER_DUPLICATE: two effect owners claim ${JSON.stringify(owner.canonical)}`);
+      }
+      if (owner.bootId !== this.trust.bootId) {
+        throw new Error("EFFECT_OWNER_TRUST_MISMATCH: the effect owner verifies against a different trust root than this engine");
+      }
+      owners[owner.canonical] = owner;
+    }
+    if (supplied.length > 0) {
+      if (effectOwningBoots.has(this.trust.bootId)) {
+        throw new Error("EFFECT_OWNER_TRUST_IN_USE: another engine in this process already commits effects for this boot of this trust root");
+      }
+      for (let i = 0; i < supplied.length; i++) {
+        if ((supplied[i] as EffectOwner).bound) {
+          throw new Error("EFFECT_OWNER_ALREADY_BOUND: an effect owner serves exactly one engine");
+        }
+      }
+      // Bind first, then reserve the boot: an owner whose bindEngine throws leaves the boot usable.
+      for (let i = 0; i < supplied.length; i++) (supplied[i] as EffectOwner).bindEngine(this);
+      effectOwningBoots.add(this.trust.bootId);
+    }
+    this.effectOwners = Object.freeze(owners);
+  }
+
+  /** The configured effect owner for a canonical, or undefined. */
+  private effectOwnerFor(canonical: string): EffectOwner | undefined {
+    return hasOwn(this.effectOwners, canonical) ? this.effectOwners[canonical] : undefined;
+  }
+
+  /** The ledger row recorded for this hold, if its owner has one. */
+  private effectRowFor(hold: HoldRecord): LedgerRow | undefined {
+    const owner = this.effectOwnerFor(hold.action.canonical);
+    if (owner === undefined) return undefined;
+    const row = owner.find(refHash(hold.holdEnvelope));
+    return row !== undefined && row.holdId === hold.id ? row : undefined;
+  }
+
+  /**
+   * createHold's effect-owner admission: an effect-owned hold is created only when an owner that
+   * commits the named ledger is configured, so no human is asked to approve a transfer nothing can
+   * execute. Account existence is deliberately NOT checked here: that would let the agent learn which
+   * accounts exist before any human approved anything.
+   */
+  private effectOwnerAdmission(canonical: string, canonicalParams: string): EngineResult | null {
+    const owner = this.effectOwnerFor(canonical);
+    if (owner === undefined) {
+      return err(503, "EFFECT_OWNER_UNCONFIGURED", { detail: "no effect owner is configured for this action; nothing could execute an approval" });
+    }
+    const admitted = owner.admit(canonicalParams);
+    if (!admitted.ok) {
+      return err(422, "LEDGER_NOT_OWNED", { detail: "the transfer names a ledger this gate's effect owner does not commit" });
+    }
+    return null;
   }
 
   private now(): number {
@@ -494,7 +583,8 @@ export class GateEngine {
     if (!isRecord(rawAction)) return err(422, "MISSING_ACTION");
     const canonical = asString(rawAction["canonical"]);
     const riskClass = asString(rawAction["riskClass"]);
-    const reversible = asBool(rawAction["reversible"], false);
+    // The caller's flag is kept only for adapters that do not derive reversibility (see below).
+    let reversible = asBool(rawAction["reversible"], false);
     if (!canonical) return err(422, "INCOMPLETE_ACTION");
 
     // Registered ⇒ ENFORCED. Unregistered ⇒ RAW, and RAW is UNENFORCED: it may not carry a grant,
@@ -572,6 +662,9 @@ export class GateEngine {
     let effectiveRisk: string = "IRREVERSIBLE";
     let actionSchema: ProjectionId | null = null;
     let displayProjection: ProjectionId | null = null;
+    // Set by adapters whose effect the gate commits itself / whose reversibility is derived.
+    let snapshotParams: string | undefined;
+    let derivedReversible: boolean | undefined;
 
     if (mode === "ENFORCED") {
       // D12/D22: the gate ignores caller display, canonicalizes REAL params, computes paramsHash
@@ -585,6 +678,8 @@ export class GateEngine {
       display = run.display;
       actionSchema = run.actionSchema;
       displayProjection = run.displayProjection;
+      snapshotParams = run.canonicalParams;
+      derivedReversible = run.derivedReversible;
 
       // ─── B-1: THE TRUSTED FLOOR WINS ────────────────────────────────────────────────────────────
       // `run.derivedRisk` was computed inside the boundary from the params the adapter itself
@@ -625,6 +720,30 @@ export class GateEngine {
     // authorizes nothing — the hold is refused here rather than created and left to die at decide().
     const rosterRefusal = this.pinnedRefusal(this.now(), effectiveRisk);
     if (rosterRefusal !== null) return rosterRefusal;
+
+    // ─── DERIVED REVERSIBILITY AND EFFECT OWNERSHIP (docs/gate-effect-owner.md), after the roster ───
+    // An adapter that derives `reversible` owns the value: a caller-supplied `action.reversible` member
+    // is refused whatever its value (the MODE / paramsHash rule: accepting the field is the defect),
+    // and the derived value is the one the gate signs. Adapters that do not derive it keep the caller's
+    // flag — `noa.command.exec` is unchanged here.
+    if (derivedReversible !== undefined) {
+      if (hasOwn(rawAction, "reversible")) {
+        return err(422, "REVERSIBLE_NOT_CALLER_SUPPLIED", {
+          detail: "reversibility is derived inside the trusted boundary for this action; remove action.reversible",
+        });
+      }
+      reversible = derivedReversible;
+    }
+    const effectOwned = isEffectOwned(canonical);
+    let heldParams: string | null = null;
+    if (effectOwned) {
+      if (typeof snapshotParams !== "string") {
+        return err(500, "EFFECT_SNAPSHOT_UNAVAILABLE", { detail: "the adapter returned no canonical params for an effect-owned action" });
+      }
+      const ownerRefusal = this.effectOwnerAdmission(canonical, snapshotParams);
+      if (ownerRefusal !== null) return ownerRefusal;
+      heldParams = snapshotParams;
+    }
 
     const action: HoldAction = { canonical, riskClass: effectiveRisk as RiskClass, paramsHash, reversible };
 
@@ -813,6 +932,8 @@ export class GateEngine {
       expiresAt: expiresAtMs,
       decidedAt: null,
       createdAt: now,
+      bootId: this.trust.bootId,
+      canonicalParams: heldParams,
     };
     this.store.putHold(hold);
     this.log("hold.created", { holdId, agentId: agent.id, canonical, mode });
@@ -949,6 +1070,14 @@ export class GateEngine {
     // hold PENDING, and it expires normally. ────────────────────────────────────────────────────────
     const classProblem = this.pinnedClassRefusal(hold.action.riskClass);
     if (classProblem !== null) return classProblem;
+    // ─── A HOLD FROZEN BY ANOTHER BOOT IS NOT DECIDED (docs/gate-effect-owner.md) ─────────────────────
+    // After the trust-root checks above and before the body is parsed, in both trust modes. A
+    // persistent gate key keeps a pre-restart envelope verifiable, so without this check a hold frozen
+    // before a restart could still be approved after it. Nothing is signed: the hold stays PENDING and
+    // expires with a signed EXPIRED like any unanswered hold.
+    if (hold.bootId !== this.trust.bootId) {
+      return err(410, "HOLD_FROM_DEAD_BOOT", { detail: "this hold was frozen by an earlier boot of the gate and can no longer be decided" });
+    }
     const parsedBody = this.parseBody(body);
     if (!parsedBody.ok) return parsedBody.res;
 
@@ -1268,6 +1397,157 @@ export class GateEngine {
     });
   }
 
+  // ── effect-owned commit (docs/gate-effect-owner.md) ─────────────────────────
+  /**
+   * `POST /v1/holds/:holdId/commit` — the gate commits an EFFECT-OWNED action itself. No body is read:
+   * the hold names everything. The agent's key decides only WHETHER and WHEN an already-approved
+   * commit happens; the authority is the approver's decision plus the gate-issued grant, and the
+   * effect owner re-verifies both before it writes.
+   *
+   * ORDER (first failure wins). Store-state checks run here; signed-bytes checks run in the owner.
+   *    1  the caller owns the hold (a foreign hold is the same 404 as an absent one), then lazy expiry
+   *       — the only state change before the checks: an overdue PENDING hold is expired and its
+   *       timeout signed, exactly as a read of the hold would do
+   *    2  the action is effect-owned                           409 ACTION_NOT_EFFECT_OWNED
+   *    3  an owner is configured for it                        503 EFFECT_OWNER_UNCONFIGURED
+   *    4  REPLAY FIRST: a recorded row answers with its own result (idempotent), at any later time;
+   *       a row for this envelope under another grant is 409 EFFECT_AUTHORITY_CONSUMED
+   *    5  the hold is APPROVED                                 409 HOLD_NOT_APPROVED (retryable while PENDING)
+   *    6  the grant, decision and snapshot are all present     409 HOLD_STATE_INVALID
+   *    7  the grant is UNUSED and unreported                   409 GRANT_NOT_UNUSED
+   *    8  the trust-root binding (roster expiry, audience, epoch)
+   *    9  the hold was frozen by THIS boot                     410 HOLD_FROM_DEAD_BOOT
+   *   10+ the owner: re-entry, the hold's boot again, the signed bytes (O1), uniqueness, expiry,
+   *       re-derivation, ledger, accounts, funds, then signing from its verified parses and verifying
+   *       what was signed. The audience and epoch parts of check 8, and check 9, are repeated
+   *       there, so a direct caller of the owner meets them too; roster expiry is not (see the doc).
+   *   17  after a new EXECUTED row, the grant record is marked REPORTED with the consumption. If that
+   *       fails the answer is still 200: the row is the record, and reserve/report refuse regardless.
+   */
+  commit(holdId: string, agent: AgentRecord): EngineResult {
+    const at = this.now();
+    const hold = this.store.getHold(holdId);
+    if (!this.ownsHold(hold, agent, "commit")) return commitErr(404, "UNKNOWN_HOLD", false);
+    this.lazyExpire(hold, at);
+    if (!isEffectOwned(hold.action.canonical)) {
+      return commitErr(409, "ACTION_NOT_EFFECT_OWNED", false, { detail: "this action is executed by its wrapper after reserve, not committed by the gate" });
+    }
+    const commitOwner = this.effectOwnerFor(hold.action.canonical);
+    if (commitOwner === undefined) {
+      return commitErr(503, "EFFECT_OWNER_UNCONFIGURED", false, { detail: "no effect owner is configured for this action" });
+    }
+    // REPLAY FIRST, before any state or time check: a committed effect is never reported as refused
+    // after an expiry, a restart of the roster clock or a lost response.
+    const prior = commitOwner.find(refHash(hold.holdEnvelope));
+    if (prior !== undefined) {
+      if (prior.holdId !== hold.id) return commitErr(500, "EFFECT_ROW_INCONSISTENT", false);
+      if (prior.grantId === hold.grantId) return this.effectResponse(prior, true);
+      return commitErr(409, "EFFECT_AUTHORITY_CONSUMED", false, { effectId: prior.effectId });
+    }
+    if (hold.status !== "APPROVED") {
+      return commitErr(409, "HOLD_NOT_APPROVED", hold.status === "PENDING", { status: hold.status });
+    }
+    const grantRec = hold.grantId !== null ? this.store.getGrant(hold.grantId) : undefined;
+    if (grantRec === undefined || hold.decisionArtifact === null || hold.decisionReceipt === null || hold.canonicalParams === null) {
+      return commitErr(409, "HOLD_STATE_INVALID", false);
+    }
+    if (grantRec.status !== "UNUSED" || grantRec.reportedAt !== null) return commitErr(409, "GRANT_NOT_UNUSED", false, { status: grantRec.status });
+    const commitBinding = this.envelopeBindingRefusal(hold, at);
+    if (commitBinding !== null) return withRetryable(commitBinding, false);
+    if (hold.bootId !== this.trust.bootId) return commitErr(410, "HOLD_FROM_DEAD_BOOT", false, { detail: "this hold was frozen by an earlier boot of the gate" });
+
+    const input: EffectCommitInput = {
+      holdId: hold.id,
+      holdBootId: hold.bootId,
+      canonicalParams: hold.canonicalParams,
+      holdEnvelope: hold.holdEnvelope,
+      deferredReceipt: hold.deferredReceipt,
+      encryptedDisplay: hold.encryptedDisplay,
+      decisionArtifact: hold.decisionArtifact,
+      approvalReceipt: hold.decisionReceipt,
+      grant: grantRec.grant,
+    };
+    // The sealer signs from the OWNER's verified parses only; the owner then verifies what it signed.
+    const outcome = commitOwner.commit(input, (atMs, verified) =>
+      buildEffectAttestation({ verified, atMs, receiptId: this.trust.newId(), gate: this.trust.gate, signer: this.execSigner }));
+    if (outcome.kind === "NOT_COMMITTED") return this.notCommittedResponse(outcome);
+    if (outcome.kind === "EXECUTED" && !outcome.idempotent) {
+      this.mirrorGrantConsumed(grantRec.grant.grantId, outcome.row, at);
+    }
+    this.log("effect.committed", { holdId: hold.id, effectId: outcome.row.effectId, outcome: outcome.kind, idempotent: outcome.idempotent });
+    return this.effectResponse(outcome.row, outcome.idempotent);
+  }
+
+  /** Mirror a new EXECUTED row onto the grant record. Never fails the commit: the row is the record. */
+  private mirrorGrantConsumed(grantId: string, row: LedgerRow, at: number): void {
+    try {
+      const locked = this.store.claimGrantReported(grantId, at);
+      if (locked === null) {
+        this.log("effect.grant_mirror_failed", { grantId, effectId: row.effectId, detail: "the grant report lock was already taken" });
+        return;
+      }
+      locked.consumption = row.attestation !== null ? row.attestation.executionConsumption : null;
+      this.store.putGrant(locked);
+    } catch {
+      this.log("effect.grant_mirror_failed", { grantId, effectId: row.effectId, detail: "the store refused the grant update" });
+    }
+  }
+
+  private notCommittedResponse(outcome: Extract<EffectOutcome, { kind: "NOT_COMMITTED" }>): EngineResult {
+    const extra: Record<string, unknown> = { detail: outcome.detail };
+    switch (outcome.code) {
+      case "COMMIT_AUTHORITY_INVALID":
+        return commitErr(500, outcome.code, false, extra);
+      case "EFFECT_AUTHORITY_CONSUMED":
+        return commitErr(409, outcome.code, false, { ...extra, effectId: outcome.effectId });
+      case "GRANT_EXPIRED":
+        return commitErr(410, outcome.code, false, extra);
+      case "PARAMS_SNAPSHOT_MISMATCH":
+        return commitErr(500, outcome.code, false, extra);
+      case "LEDGER_NOT_OWNED":
+        return commitErr(422, outcome.code, false, extra);
+      case "EFFECT_SIGNER_UNAVAILABLE":
+        return commitErr(503, outcome.code, true, extra);
+      case "HOLD_FROM_DEAD_BOOT":
+        return commitErr(410, outcome.code, false, extra);
+      case "EFFECT_COMMIT_REENTRANT":
+        return commitErr(409, outcome.code, true, extra);
+      case "LEDGER_SAME_ACCOUNT":
+        return commitErr(422, outcome.code, false, extra);
+      case "EFFECT_ATTESTATION_INVALID":
+        return commitErr(500, outcome.code, false, extra);
+    }
+  }
+
+  /** The recorded result of a row. Never returns the salt, the canonical params or any balance. */
+  private effectResponse(row: LedgerRow, idempotent: boolean): EngineResult {
+    if (row.outcome === "REFUSED") {
+      return { status: 409, body: { error: row.refusalCode, outcome: "REFUSED", idempotent, effectId: row.effectId, retryable: false } };
+    }
+    const grantRec = this.store.getGrant(row.grantId);
+    return {
+      status: 200,
+      body: {
+        outcome: "EXECUTED",
+        idempotent,
+        effectId: row.effectId,
+        sequence: row.sequence,
+        holdId: row.holdId,
+        grantId: row.grantId,
+        ledger: row.ledger,
+        fromAccount: row.fromAccount,
+        toAccount: row.toAccount,
+        amount: row.amount,
+        unit: row.unit,
+        paramsHash: row.paramsHash,
+        committedAt: row.committedAt,
+        executionGrant: grantRec !== undefined ? grantRec.grant : null,
+        executedReceipt: row.attestation !== null ? row.attestation.executedReceipt : null,
+        executionConsumption: row.attestation !== null ? row.attestation.executionConsumption : null,
+      },
+    };
+  }
+
   // ── grants (the atomic single-use record — F8) ─────────────────────────────
   reserve(grantId: string, agent: AgentRecord): EngineResult {
     const rec = this.store.getGrant(grantId);
@@ -1276,10 +1556,17 @@ export class GateEngine {
     const hold = this.store.getHold(rec.holdId);
     // F29-authz — ownership BEFORE the CAS, so a foreign call can never burn the single use.
     if (!this.ownsHold(hold, agent, "reserve")) return err(404, "UNKNOWN_GRANT");
+    // An EFFECT-OWNED action's authority is consumed only by its effect owner at commit time. Keyed on
+    // the static table, never on whether an owner is configured: an engine without an owner that
+    // shares this store must not be able to reopen reserve for it.
+    if (isEffectOwned(hold.action.canonical)) {
+      return err(409, "EFFECT_OWNED_ACTION_NOT_RESERVABLE", { detail: "this action is committed by the gate: POST /v1/holds/:holdId/commit" });
+    }
     if (hold && hold.status !== "APPROVED") return err(409, "HOLD_NOT_APPROVED", { status: hold.status });
     // The same audience, epoch and (pinned) roster-expiry checks as decide(). HONEST LIMIT:
-    // `holdView` and `wait` already hand the signed grant to the owning agent, so this stops only a
-    // wrapper that asks before it acts; a single-use commit at the effect owner is C3's job.
+    // `holdView` and `wait` already hand the signed grant to the owning agent, so for a
+    // non-effect-owned action this stops only a wrapper that asks before it acts. Effect-owned
+    // actions never reach this line (above); their single use is consumed at the effect owner.
     const reserveBinding = this.envelopeBindingRefusal(hold, this.now());
     if (reserveBinding !== null) return reserveBinding;
     if (this.now() >= gateDateParse(rec.grant.expiresAt)) return err(410, "GRANT_EXPIRED");
@@ -1321,6 +1608,13 @@ export class GateEngine {
     // roster expiry: an execution authorized before expiry is still recorded after it.
     const reportBinding = this.envelopeAudienceRefusal(reportHold);
     if (reportBinding !== null) return reportBinding;
+    // An EFFECT-OWNED action is never reported by the agent: its EXECUTED receipt and consumption are
+    // signed by the gate only when its effect owner writes the row. Without this, a RESERVED grant
+    // (an injected store, a mixed build) plus DISPATCHED makes the gate sign an EXECUTED receipt for
+    // a transfer no ledger ever recorded. Before the body parse, like the ownership checks above.
+    if (isEffectOwned(reportHold.action.canonical)) {
+      return err(409, "EFFECT_OWNED_ACTION_NOT_REPORTABLE", { detail: "the gate commits this action itself; there is nothing for an agent to report" });
+    }
     const parsedBody = this.parseBody(body);
     if (!parsedBody.ok) return parsedBody.res;
     const result = parsedBody.doc["result"];
@@ -1502,7 +1796,7 @@ export class GateEngine {
   // ── views + waiter plumbing ────────────────────────────────────────────────
   private holdView(hold: HoldRecord): Record<string, unknown> {
     const grantRec = hold.grantId ? this.store.getGrant(hold.grantId) : undefined;
-    return {
+    const view: Record<string, unknown> = {
       holdId: hold.id,
       status: hold.status,
       reasonCode: hold.reasonCode,
@@ -1519,6 +1813,16 @@ export class GateEngine {
       grantId: hold.grantId,
       executionGrant: grantRec ? grantRec.grant : null,
     };
+    // EFFECT-OWNED: the agent never holds a usable transfer authority before the effect exists. The
+    // grant is withheld from EVERY view (`decide` returns this view on the `/decision` route, which is
+    // not owner-scoped, as well as `wait` and `getHold`) until an EXECUTED row exists. A wrapper that
+    // receives "APPROVED, no grant" fails closed.
+    if (isEffectOwned(hold.action.canonical)) {
+      const row = this.effectRowFor(hold);
+      view["executionGrant"] = row !== undefined && row.outcome === "EXECUTED" && grantRec ? grantRec.grant : null;
+      view["effect"] = row === undefined ? null : { effectId: row.effectId, outcome: row.outcome };
+    }
+    return view;
   }
 
   private addWaiter(id: string, w: Waiter): void {

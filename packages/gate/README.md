@@ -38,6 +38,7 @@ authority.
 | `GET /v1/holds/:id/wait?timeout=...` | Long-poll an owned hold; timeout is clamped to 25 seconds |
 | `POST /v1/holds/:id/decision` | Submit signed approval material for gate verification |
 | `POST /v1/holds/:id/cancel` | Record local-state loss without inventing an execution outcome |
+| `POST /v1/holds/:id/commit` | Commit an approved effect-owned action through the gate's effect owner; no body is read |
 | `POST /v1/grants/:id/reserve` | Atomically reserve a single-use grant before dispatch |
 | `POST /v1/grants/:id/report` | Submit bounded attempt-report bytes; unknown outcomes remain explicit |
 
@@ -138,6 +139,15 @@ Grant reservation is an at-most-once bookkeeping control only for callers that u
 protocol. It is not exactly-once execution and does not prevent an actor holding separate downstream
 authority from bypassing the gate. Enforcement must live where the action credentials or capability
 are controlled.
+
+For an EFFECT-OWNED action (`noa.ledger.transfer`) the gate is that place in-process: the grant is
+withheld from every hold view, `reserve` and `report` refuse it, and `POST /v1/holds/:id/commit` hands
+the stored artifacts to an effect owner that re-verifies them and writes the one ledger row whose write
+consumes the authority. The owner exists only over a pinned trust root and must be supplied by the
+embedder (`effectOwners`, one engine per boot and per owner); any object implementing the owner
+interface is accepted and is trusted code, while the owner's callers are not: it re-verifies whatever
+input and sealer they hand it. The reference ledger is in memory. See
+[docs/gate-effect-owner.md](../../docs/gate-effect-owner.md) and `NON-CLAIMS.md` §S9.
 
 ## Security requirements
 

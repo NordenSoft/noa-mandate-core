@@ -10,6 +10,7 @@ import { buildReceipt, buildCheckpoint, type BuildInput } from "../src/builder.j
 import { sha256Prefixed } from "../src/hash.js";
 import { receiptHashInput } from "../src/canonicalize.js";
 import { signingMessage, RECEIPT_SIG_DOMAIN } from "../src/signing.js";
+import { resolveVerificationKey } from "../src/verification-keyring.js";
 import type { Keyring, Checkpoint, Receipt } from "../src/index.js";
 import { b } from "./helpers/bytes.js";
 
@@ -948,6 +949,62 @@ test("P0-14: every root chain/checkpoint surface refuses a lifecycle-retired key
   assert.equal(chainWithBackdatedRetiredCheckpoint.tailChecked, false);
   assert.equal(missingLifecycleData.status, "MALFORMED");
   assert.match(missingLifecycleData.reason ?? "", /publicKey \+ retiredAt/);
+});
+
+// ── A retired kid is named "retired" only after its signature authenticates ─────────────────────
+//
+// A lifecycle keyring keeps a retired key's public material, so a surface can check a signature that
+// names the key before it decides what to call the refusal. The standalone checkpoint verifier and
+// the key resolver used to answer "retired" first, so a forged or altered signature naming a retired
+// kid was reported as a retirement. Nothing was accepted, but the label sent incident response after
+// the wrong event. Each surface now reports an integrity failure for a signature that does not
+// verify, and keeps "retired" for an authentic one.
+test("retired kid: the standalone checkpoint verifier and the key resolver authenticate before they answer 'retired'", () => {
+  const retired = generateKeyPair("label-old");
+  const current = generateKeyPair("retired-label-current");
+  const attacker = generateKeyPair("retired-label-attacker");
+  const lifecycle = b({
+    spec: "noa.signing-key-lifecycle/0.1",
+    keys: {
+      [retired.kid]: { publicKey: retired.publicKey, retiredAt: "2026-02-01T00:00:00.000Z" },
+      [current.kid]: { publicKey: current.publicKey, retiredAt: null },
+    },
+  });
+  const head = buildReceipt({
+    id: "retired-label-0",
+    ts: "2026-03-01T00:00:00.000Z",
+    scope: { chain: "retired-label", tenant: "tenant-retired-label" },
+    agent: { id: "retired-label-agent", model: null, principal: "SERVICE" },
+    action: { id: "inventory.read", canonical: "inventory.read", riskClass: "LOW", paramsHash: sha256Prefixed("retired-label-0"), reversible: true, rollbackRef: null },
+    governance: { mode: "on", verdict: "EXECUTED", ruleId: null, approval: null, sandboxed: false },
+  }, null, { kid: current.kid, privateKey: current.privateKey });
+
+  const authentic = buildCheckpoint(head, "2026-03-01T00:00:00.000Z", { kid: retired.kid, privateKey: retired.privateKey });
+  const forged = buildCheckpoint(head, "2026-03-01T00:00:00.000Z", { kid: retired.kid, privateKey: attacker.privateKey });
+  const altered = { ...authentic, ts: "2026-01-01T00:00:00.000Z" };
+  assert.equal(verifyCheckpoint(b(authentic), lifecycle), "retired signing key");
+  assert.equal(verifyCheckpoint(b(forged), lifecycle), "bad checkpoint signature", "a forged checkpoint naming a retired kid was labelled a retirement");
+  assert.equal(verifyCheckpoint(b(altered), lifecycle), "bad checkpoint signature", "an altered checkpoint naming a retired kid was labelled a retirement");
+  // The chain surface already authenticated first; its verdicts are unchanged by the reorder.
+  assert.equal(verifyChain(b([head]), { keyring: lifecycle, checkpoint: b(forged) }).status, "TAMPERED");
+  assert.equal(verifyChain(b([head]), { keyring: lifecycle, checkpoint: b(altered) }).status, "TAMPERED");
+  assert.equal(verifyChain(b([head]), { keyring: lifecycle, checkpoint: b(authentic) }).status, "KEY_RETIRED");
+
+  const message = signingMessage(RECEIPT_SIG_DOMAIN, receiptHashInput(head));
+  const byRetired = signEd25519(retired.privateKey, message);
+  const byAttacker = signEd25519(attacker.privateKey, message);
+  const reasonOf = (r: ReturnType<typeof resolveVerificationKey>) => (r.ok ? "resolved" : r.reason);
+  // Without a signature to check, the resolver still refuses the retired kid (the answer names the key
+  // state only, as before).
+  assert.match(reasonOf(resolveVerificationKey(lifecycle, retired.kid)), /retired/);
+  assert.match(reasonOf(resolveVerificationKey(lifecycle, retired.kid, message, byRetired)), /retired/);
+  const forgedResolution = resolveVerificationKey(lifecycle, retired.kid, message, byAttacker);
+  assert.equal(forgedResolution.ok, false);
+  assert.match(reasonOf(forgedResolution), /invalid signature/, "a forged signature naming a retired kid must be an integrity failure");
+  assert.doesNotMatch(reasonOf(forgedResolution), /retired/i, "a forgery must not be labelled a retirement");
+  // A current kid still resolves; the caller verifies its signature as before.
+  const currentResolution = resolveVerificationKey(lifecycle, current.kid, message, byAttacker);
+  assert.equal(currentResolution.ok && currentResolution.publicKey, current.publicKey);
 });
 
 // ── G2-R1 — a retired key's authentic signature has its own current-use outcome ─────────────────

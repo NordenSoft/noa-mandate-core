@@ -209,13 +209,15 @@ export function receiptFromCose(
     }
   }
   const r = coseSign1VerifyParsed(coseBytes, keyring);
+  if (!r.ok || !r.payload) return refuse(r.reason ?? "COSE signature did not verify", { kid: r.kid, envelopeClaim: "FAILED" });
+  // Retirement is judged after the envelope signature authenticated against the retained public
+  // material: a forged envelope naming a retired kid was refused just above for what it is.
   if (r.kid !== null && verification.retiredKids[r.kid] === true) {
     return refuse(
       `signing key ${jsonStringify(r.kid)} is retired; signer-chosen artifact time is not an independent witness`,
       { kid: r.kid, envelopeClaim: "FAILED" },
     );
   }
-  if (!r.ok || !r.payload) return refuse(r.reason ?? "COSE signature did not verify", { kid: r.kid, envelopeClaim: "FAILED" });
   let parsed: unknown;
   try {
     parsed = safeParse(bufToString(r.payload, "utf8"));
@@ -286,12 +288,6 @@ export function receiptFromCose(
   if ("sha256:" + sha256Hex(hashInput) !== receipt.chain.hash) {
     return refuse("the enveloped receipt's chain.hash is not a hash of its own contents — not authentic", { kid: r.kid, nativeKid, envelopeKid, envelopeClaim, agentClaim: "FAILED" });
   }
-  if (verification.retiredKids[nativeKid] === true) {
-    return refuse(
-      `the receipt's own signing key ${jsonStringify(nativeKid)} is retired; signer-chosen receipt time is not an independent witness`,
-      { kid: r.kid, nativeKid, envelopeKid, envelopeClaim, agentClaim: "FAILED" },
-    );
-  }
   const nativePub = keyring[nativeKid];
   if (!nativePub) {
     return refuse(
@@ -302,6 +298,14 @@ export function receiptFromCose(
   if (!verifyEd25519(nativePub, signingMessage(RECEIPT_SIG_DOMAIN, hashInput), receipt.sig.value)) {
     return refuse(
       `the enveloped receipt's own signature does not verify under its kid ${jsonStringify(nativeKid)} — a valid envelope around an unsigned receipt`,
+      { kid: r.kid, nativeKid, envelopeKid, envelopeClaim, agentClaim: "FAILED" },
+    );
+  }
+  // The receipt's own key is judged for retirement only now that its signature authenticated
+  // against the retained public material: a forged receipt naming a retired kid was refused above.
+  if (verification.retiredKids[nativeKid] === true) {
+    return refuse(
+      `the receipt's own signing key ${jsonStringify(nativeKid)} is retired; signer-chosen receipt time is not an independent witness`,
       { kid: r.kid, nativeKid, envelopeKid, envelopeClaim, agentClaim: "FAILED" },
     );
   }

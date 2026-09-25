@@ -281,12 +281,15 @@ test("C2 (bytes-in): a DOCUMENT entry point refuses a caller-owned object outrig
   // The deleted boundary made a live object safe enough to READ. The new one does not read it at
   // all: an object where bytes belong is not a document, and coercing it (`String(obj)`,
   // `JSON.stringify(obj)`) would be precisely the silent object ingest bytes-in exists to forbid.
-  assert.deepEqual(evidence.asRootKeyEntryMap({ "kid-1": "pub" } as never), {}, "an OBJECT trust root resolves to NO keys");
-  assert.deepEqual(evidence.asStringKeyring({ "kid-1": "pub" } as never), {}, "an OBJECT checkpoint keyring resolves to NO keys");
+  // Every keyring is a null-prototype map (a kid is a document-chosen key), so the expected values
+  // carry that prototype too; strict deep equality compares it.
+  const keyMap = (entries: Record<string, unknown>) => Object.assign(Object.create(null) as Record<string, unknown>, entries);
+  assert.deepEqual(evidence.asRootKeyEntryMap({ "kid-1": "pub" } as never), keyMap({}), "an OBJECT trust root resolves to NO keys");
+  assert.deepEqual(evidence.asStringKeyring({ "kid-1": "pub" } as never), keyMap({}), "an OBJECT checkpoint keyring resolves to NO keys");
   // …and the SAME content as BYTES resolves normally, so the refusal above is about the FORM and
   // this test is not vacuously passing against a broken function.
-  assert.deepEqual(evidence.asStringKeyring(b({ "kid-1": "pub" })), { "kid-1": "pub" });
-  assert.deepEqual(evidence.asRootKeyEntryMap(b({ "kid-1": "pub" })), { "kid-1": { publicKey: "pub", type: "ROOT", roles: [] } });
+  assert.deepEqual(evidence.asStringKeyring(b({ "kid-1": "pub" })), keyMap({ "kid-1": "pub" }));
+  assert.deepEqual(evidence.asRootKeyEntryMap(b({ "kid-1": "pub" })), keyMap({ "kid-1": { publicKey: "pub", type: "ROOT", roles: [] } }));
 
   const r = verifyEvidence({ spec: "noa.approval-evidence/0.1" } as never, { tenantRoot: b({}), checkpointKeyring: b({}), schemas });
   assert.equal(r.verdict, "INVALID");

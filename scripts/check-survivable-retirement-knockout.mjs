@@ -193,13 +193,17 @@ try {
     {
       name: "KEY_RETIRED above checkpoint signature authentication",
       caseIds: ["current-retired-checkpoint-forged"],
-      edits: [["cpVerify = verifyCheckpointParsed(cp, retainedPublicMaterial(verification));", 'cpVerify = "ok";']],
+      // The checkpoint verifier itself authenticates before it answers "retired signing key"; the
+      // mutant restores the old early answer, so a forged checkpoint naming a retired kid is carried
+      // forward as authentic.
+      edits: [["const pub = verification?.keyring[sig.kid];",
+        'if (verification?.retiredKids[sig.kid] === true) return "retired signing key"; const pub = verification?.keyring[sig.kid];']],
     },
     {
       name: "KEY_RETIRED above the checkpoint head and opener checks",
       caseIds: ["current-retired-checkpoint-truncated-head", "current-retired-checkpoint-unauthorized-identity"],
-      edits: [['checkpointKeyRetired = cpVerify === "ok";',
-        `checkpointKeyRetired = cpVerify === "ok"; if (checkpointKeyRetired) ${early('"checkpoint"', "cp.sig.kid", "head.chain.seq")}`]],
+      edits: [['const checkpointKeyRetired = cpVerify === "retired signing key";',
+        `const checkpointKeyRetired = cpVerify === "retired signing key"; if (checkpointKeyRetired) ${early('"checkpoint"', "cp.sig.kid", "head.chain.seq")}`]],
     },
     {
       name: "B2: a retired receipt skips the checkpoint from AUTHENTICATION onward",

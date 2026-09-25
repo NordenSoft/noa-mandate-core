@@ -121,6 +121,51 @@ test("P0-14 (enveloped): a CURRENT emitter cannot re-present a receipt signed by
   assert.equal(ok.agentClaim, "UNBOUND");
 });
 
+test("retired kid: both COSE surfaces authenticate a signature before they answer 'retired'", () => {
+  // The refusal of a retired key stays; what changes is its LABEL. A forged envelope, or a forged
+  // enveloped receipt, that merely NAMES a retired kid is an integrity failure. Calling it a
+  // retirement would send incident response after a key rotation instead of a forgery.
+  const retired = generateKeyPair("cose-label-old");
+  const current = generateKeyPair("cose-label-current");
+  const relay = generateKeyPair("cose-label-relay");
+  const attacker = generateKeyPair("cose-label-attacker");
+  const lifecycle = b({
+    spec: "noa.signing-key-lifecycle/0.1",
+    keys: {
+      [retired.kid]: { publicKey: retired.publicKey, retiredAt: "2026-08-01T08:36:12.643Z" },
+      [current.kid]: { publicKey: current.publicKey, retiredAt: null },
+      [relay.kid]: { publicKey: relay.publicKey, retiredAt: null },
+    },
+  });
+
+  // Envelope layer: signed by the attacker, labelled with the retired kid.
+  const forgedEnvelope = receiptToCose(mkReceipt({ kid: current.kid, privateKey: current.privateKey }), { kid: retired.kid, privateKey: attacker.privateKey });
+  const raw = coseSign1Verify(forgedEnvelope, lifecycle);
+  assert.equal(raw.ok, false);
+  assert.equal(raw.reason, "bad signature", `raw COSE: a forged envelope naming a retired kid was labelled ${JSON.stringify(raw.reason)}`);
+  const enveloped = receiptFromCose(forgedEnvelope, lifecycle);
+  assert.equal(enveloped.ok, false);
+  assert.equal(enveloped.reason, "bad signature", `receipt COSE: a forged envelope naming a retired kid was labelled ${JSON.stringify(enveloped.reason)}`);
+
+  // Native layer: a genuine live envelope around a receipt whose own signature names the retired
+  // kid but was made by the attacker.
+  const forgedNative = mkReceipt({ kid: retired.kid, privateKey: attacker.privateKey });
+  const relayed = receiptFromCose(receiptToCose(forgedNative, { kid: relay.kid, privateKey: relay.privateKey }), lifecycle);
+  assert.equal(relayed.ok, false);
+  assert.equal(relayed.agentClaim, "FAILED");
+  assert.equal(relayed.envelopeClaim, "VERIFIED");
+  assert.match(relayed.reason ?? "", /own signature does not verify/, `native: a forged receipt naming a retired kid was labelled ${JSON.stringify(relayed.reason)}`);
+  assert.doesNotMatch(relayed.reason ?? "", /retired/i);
+
+  // Controls: the same shapes signed by the retired key itself are still refused as retired.
+  const authenticEnvelope = receiptToCose(mkReceipt({ kid: current.kid, privateKey: current.privateKey }), { kid: retired.kid, privateKey: retired.privateKey });
+  assert.match(coseSign1Verify(authenticEnvelope, lifecycle).reason ?? "", /retired/);
+  assert.match(receiptFromCose(authenticEnvelope, lifecycle).reason ?? "", /retired/);
+  const authenticNative = receiptFromCose(receiptToCose(mkReceipt({ kid: retired.kid, privateKey: retired.privateKey }), { kid: relay.kid, privateKey: relay.privateKey }), lifecycle);
+  assert.equal(authenticNative.ok, false);
+  assert.match(authenticNative.reason ?? "", /own signing key .* is retired/);
+});
+
 test("COSE_Sign1: tampered payload fails verification", () => {
   const kp = generateKeyPair("k");
   const keyring = { k: kp.publicKey };

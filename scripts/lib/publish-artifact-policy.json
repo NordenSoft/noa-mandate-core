@@ -8,7 +8,8 @@
     "enginesNode": ">=20",
     "homepage": "https://noatrust.com",
     "license": "Apache-2.0",
-    "provenanceRequired": true
+    "provenanceRequired": true,
+    "repositoryUrl": "https://github.com/NordenSoft/noa-mandate-core.git"
   },
   "packages": [
     {

@@ -8,8 +8,15 @@
  * shape-reading + keyring assembly the step consumes. Nothing here trusts a signature by itself.
  */
 import type { KeyEntry } from "noa-approval-artifacts";
-import { SIGNING_KEY_LIFECYCLE_SPEC, type Keyring, type SigningKeyLifecycle } from "noa-receipt";
+import { SIGNING_KEY_LIFECYCLE_SPEC, intrinsics, type Keyring, type SigningKeyLifecycle } from "noa-receipt";
 import { parseDocument } from "./bytes.js";
+
+// Every kid-keyed map this module returns is built on a NULL prototype. A kid is a document-chosen
+// string: on a plain `{}` a kid of `__proto__` would replace the map's prototype instead of adding an
+// entry, and a lookup of an absent kid such as `constructor` would answer with an inherited
+// function. The byte parser refuses those names as document keys, but the builders below are
+// published and a kid inside a manifest's `keys[]` is a value, so the map itself carries the rule.
+const { objectAssign, objectCreateNull, objectKeys } = intrinsics;
 
 /** A resolved manifest key entry (a read-only reflection of the frozen `noa.key-manifest/0.1`
  *  shape — validated by its own schema at verify-time, never redefined here). */
@@ -60,10 +67,10 @@ export function asRootKeyEntryMap(input: Uint8Array | string): Record<string, Ke
   // getter the snapshot defended against is not expressible in a byte document. An unparseable
   // document (including a caller-owned object handed in where bytes belong) is the fail-closed
   // empty root: no key resolves, so every signature check fails.
+  const out = objectCreateNull<Record<string, KeyEntry>>();
   const parsed = parseDocument(input, "tenant root");
-  if (!parsed.ok) return {};
+  if (!parsed.ok) return out;
   const raw: unknown = parsed.value;
-  const out: Record<string, KeyEntry> = {};
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return out;
   for (const [kid, v] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof v === "string") {
@@ -99,10 +106,10 @@ export function asRootKeyEntryMap(input: Uint8Array | string): Record<string, Ke
 export function asStringKeyring(input: Uint8Array | string): Keyring {
   // BYTES-IN — same reasoning as `asRootKeyEntryMap` above. An unparseable document is the
   // fail-closed empty keyring, which `verifyEvidence` turns into UNVERIFIED (F7a), never VALID.
+  const out = objectCreateNull<Keyring>();
   const parsed = parseDocument(input, "checkpoint keyring");
-  if (!parsed.ok) return {};
+  if (!parsed.ok) return out;
   const raw: unknown = parsed.value;
-  const out: Keyring = {};
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return out;
   for (const [kid, v] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof v === "string") out[kid] = v;
@@ -117,6 +124,23 @@ export function asStringKeyring(input: Uint8Array | string): Keyring {
     } else {
       throw new Error(`checkpoint keyring entry ${JSON.stringify(kid)} is not a static public key`);
     }
+  }
+  return out;
+}
+
+/**
+ * The bare `kid -> base64 SPKI` map, signing entries only, projected from a resolved KeyEntry keyring:
+ * the shape the settlement reconciler's grant-signer and cap checks accept. Own entries only, one
+ * read of each; an entry without a string `publicKey` (an AUDIT key) is left out.
+ */
+export function signingKeyMap(resolved: Record<string, KeyEntry> | undefined): Keyring {
+  const out = objectCreateNull<Keyring>();
+  if (resolved === undefined || resolved === null || typeof resolved !== "object") return out;
+  const kids = objectKeys(resolved);
+  for (let i = 0; i < kids.length; i++) {
+    const kid = kids[i] as string;
+    const publicKey = (resolved[kid] as { publicKey?: unknown } | undefined)?.publicKey;
+    if (typeof publicKey === "string") out[kid] = publicKey;
   }
   return out;
 }
@@ -150,13 +174,17 @@ export function buildResolvedKeyring(
   //   reach the keyring downstream verification is performed against.
   //
   // What this does NOT close, stated rather than implied: the caller still chooses what to pass,
-  // and a `kid` is used as an object key (see `buildReceiptKeyring`'s note). This is a snapshot of
-  // VALUES, not an authorization check.
-  const out: Record<string, KeyEntry> = { ...rootKeyring };
+  // and a `kid` is used as an object key — on a null-prototype map (module note above), so no kid
+  // can write the prototype or resolve to an inherited member, but a repeated kid is still
+  // last-write-wins. This is a snapshot of VALUES, not an authorization check.
+  //
+  // `objectAssign` onto a null-prototype target copies exactly what the spread it replaces copied
+  // (own enumerable members, each read once); the target is what changed.
+  const out = objectAssign(objectCreateNull<Record<string, KeyEntry>>(), rootKeyring);
   // The shape checks the deleted snapshot used to make redundant: a delegation or manifest that is
   // not a plain object with the expected members yields the fail-closed empty/partial keyring
   // instead of a TypeError escaping this function.
-  if (delegation === null || typeof delegation !== "object") return {};
+  if (delegation === null || typeof delegation !== "object") return objectCreateNull<Record<string, KeyEntry>>();
   // the root-delegated manifest-signing key (verifies the Key Manifest; role per F15).
   const delegatedKid = delegation.delegatedKid;
   const delegatedPublicKey = delegation.delegatedPublicKey;
@@ -215,7 +243,7 @@ export function buildReceiptKeyring(manifest: ManifestDoc): SigningKeyLifecycle 
   // definition — and the returned keyring is a fresh graph of primitives that shares nothing with
   // the caller's object. An empty keyring stays the fail-closed outcome for anything this loop
   // cannot read.
-  const out: Record<string, { publicKey: string; validFrom?: string | null; retiredAt: string | null }> = {};
+  const out = objectCreateNull<Record<string, { publicKey: string; validFrom?: string | null; retiredAt: string | null }>>();
   const keys = manifest === null || typeof manifest !== "object" ? undefined : manifest.keys;
   if (!Array.isArray(keys)) {
     return { spec: SIGNING_KEY_LIFECYCLE_SPEC, keys: out };

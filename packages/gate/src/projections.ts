@@ -46,12 +46,15 @@
  * The registry is sealed at module load (B-3, below), so within one process there is exactly one
  * adapter per canonical and the identity it advertises is the identity of the code that will run.
  *
- * Alpha ships ONE ENFORCED adapter, `noa.command.exec/1` — a shell-command bind (D14: the command
- * string alone is insufficient; the canonical param set is executable real-path + argv + cwd +
- * allowed-env-hash + stdin-hash + tenant + target-env). The gate CANONICALIZES the real params
- * itself and computes `paramsHash`; a caller-supplied `paramsHash` that disagrees is REJECTED
- * (ENFORCED never trusts the caller's hash). This module also defines `noa.ledger.transfer/1` as a
- * sealed adapter that is deliberately NOT registered (see `ledgerTransferProjection` below).
+ * The registry carries TWO ENFORCED adapters:
+ *   - `noa.command.exec/1` — a shell-command bind (D14: the command string alone is insufficient; the
+ *     canonical param set is executable real-path + argv + cwd + allowed-env-hash + stdin-hash +
+ *     tenant + target-env). The gate CANONICALIZES the real params itself and computes `paramsHash`;
+ *     a caller-supplied `paramsHash` that disagrees is REJECTED (ENFORCED never trusts the caller's
+ *     hash). The approved grant goes to the agent, whose wrapper executes the command.
+ *   - `noa.ledger.transfer/1` — EFFECT-OWNED (see `EFFECT_OWNED` below): the gate never hands the
+ *     approved grant to the agent. The effect is committed at `POST /v1/holds/:holdId/commit` by an
+ *     in-process effect owner (`effect-owner.ts`), and writing the ledger row consumes the authority.
  */
 
 import { canonicalize, sha256Prefixed, parseDocument } from "noa-approval-artifacts";
@@ -104,6 +107,18 @@ export interface ProjectionResult {
    * `rm -rf /srv` was refused at CRITICAL and granted at LOW by an approve-high device.
    */
   derivedRisk: RiskClass;
+  /**
+   * The exact canonical bytes (as text) the adapter hashed into `paramsHash`. Set only by an adapter
+   * whose effect the gate commits itself: the hold keeps this snapshot so the effect owner can
+   * re-derive the hash from it at commit time. Never part of any view an agent reads.
+   */
+  canonicalParams?: string;
+  /**
+   * `action.reversible` DERIVED inside the boundary. When an adapter sets it, a caller-supplied
+   * `action.reversible` member is refused (422 REVERSIBLE_NOT_CALLER_SUPPLIED) and this value is the
+   * one the gate signs. Adapters that leave it undefined keep the caller-supplied flag.
+   */
+  derivedReversible?: boolean;
 }
 export interface ProjectionError {
   ok: false;
@@ -421,16 +436,19 @@ const commandExec: DisplayProjection = (() => {
 })();
 
 /**
- * `noa.ledger.transfer/1` — a SEALED reference adapter that is deliberately UNREGISTERED.
+ * `noa.ledger.transfer/1` — a SEALED reference adapter, registered as EFFECT-OWNED.
  *
- * WHY UNREGISTERED. A registered canonical becomes ENFORCED (`engine.ts`: `getProjection(canonical)
- * ? "ENFORCED" : "RAW"`), and an approved ENFORCED hold yields an execution grant the agent can read.
- * For a ledger transfer that would put a gate-signed transfer authority in the agent's hands before
- * any effect owner exists to consume it at commit time. Registration is left to a later revision of
- * the reference Gate that ships it together with that effect-owner path. Until then the adapter is
- * exported for tests only, is NOT re-exported from the package index, REGISTRY below does not name
- * it, and a hold for this canonical is refused with UNREGISTERED_CRITICAL_ACTION — all pinned by
- * `test/ledger-transfer-projection.test.ts`.
+ * WHY EFFECT-OWNED AND NOT MERELY REGISTERED. A registered canonical becomes ENFORCED (`engine.ts`:
+ * `getProjection(canonical) ? "ENFORCED" : "RAW"`), and an approved ENFORCED hold normally yields an
+ * execution grant the agent can read. For a ledger transfer that would put a gate-signed transfer
+ * authority in the agent's hands before the effect exists. So the adapter is registered only together
+ * with `EFFECT_OWNED` below: the gate withholds the grant from every view, refuses `reserve` and
+ * `report` for it, and commits the transfer itself through an in-process effect owner. Without a
+ * configured owner a hold for this canonical is refused (503 EFFECT_OWNER_UNCONFIGURED), so no human
+ * is asked to approve a transfer nothing can execute.
+ *
+ * `run()` also returns the canonical bytes (`canonicalParams`, kept on the hold for the effect owner's
+ * re-derivation) and `derivedReversible: false` — a transfer is never reversible by caller say-so.
  *
  * THIN BY DESIGN. Validation, canonicalization, hashing and display derivation all belong to the
  * public kernel function `projectLedgerTransfer`, which takes BYTES. `run()` (1) refuses a
@@ -480,6 +498,8 @@ export const ledgerTransferProjection: DisplayProjection = (() => {
       actionSchema,
       displayProjection,
       derivedRisk: LEDGER_TRANSFER_RISK_FLOOR,
+      canonicalParams: r.canonical,
+      derivedReversible: false,
     };
   }
   return sealProjection({ canonical: LEDGER_TRANSFER_CANONICAL, actionSchema, displayProjection, run });
@@ -531,8 +551,37 @@ function sealProjection<T>(v: T): T {
 const REGISTRY: Readonly<Record<string, DisplayProjection>> = Object.freeze(
   Object.assign(Object.create(null) as Record<string, DisplayProjection>, {
     [commandExec.canonical]: sealProjection(commandExec),
+    [ledgerTransferProjection.canonical]: ledgerTransferProjection,
   }),
 );
+
+/**
+ * THE EFFECT-OWNED ACTIONS — a frozen, null-prototype table read only through `isEffectOwned` (the
+ * `RISK_ORDER` discipline in `engine.ts`: an own-property probe through the captured `hasOwn`).
+ *
+ * For a canonical named here the gate commits the effect itself: the approved grant never appears in
+ * a hold view, `reserve` and `report` refuse, and `POST /v1/holds/:holdId/commit` is the only way the
+ * authority is consumed. The refusals key on THIS static table, never on whether an owner happens to
+ * be configured, so an engine without an owner that shares the store cannot reopen `reserve`.
+ */
+const EFFECT_OWNED: Readonly<Record<string, true>> = Object.freeze(
+  Object.assign(Object.create(null) as Record<string, true>, {
+    [LEDGER_TRANSFER_CANONICAL]: true as const,
+  }),
+);
+
+// Load-time consistency: an effect-owned canonical with no registered adapter could never be frozen,
+// so the table would name something the gate cannot serve. Refused at import, before any hold exists.
+for (const canonical of Object.keys(EFFECT_OWNED)) {
+  if (!hasOwn(REGISTRY, canonical)) {
+    throw new Error(`projection registry: effect-owned canonical ${JSON.stringify(canonical)} has no registered adapter`);
+  }
+}
+
+/** True iff the gate commits this canonical's effect itself (see `EFFECT_OWNED`). */
+export function isEffectOwned(canonical: string): boolean {
+  return hasOwn(EFFECT_OWNED, canonical);
+}
 
 /**
  * The only accessor. Returns the frozen entry itself — `frozenTable` froze it transitively, so a

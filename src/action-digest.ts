@@ -572,15 +572,18 @@ export function verifyActionDigest(
   if (!isObject(grantSig) || typeof grantSig["kid"] !== "string" || typeof grantSig["value"] !== "string") {
     return fail("context.grant.sig: missing kid/value");
   }
-  const grantKey = resolveVerificationKey(keyringBytes, grantSig["kid"]);
-  if (!grantKey.ok) return fail(`context.grant: ${grantKey.reason}`);
   const grantWithoutSig = objectCreateNull<Record<string, unknown>>();
   const grantNames = objectGetOwnPropertyNames(grantDoc);
   for (let i = 0; i < grantNames.length; i++) {
     const k = grantNames[i] as string;
     if (k !== "sig") grantWithoutSig[k] = grantDoc[k];
   }
-  if (!verifyEd25519(grantKey.publicKey, signingMessage(GRANT_SIG_DOMAIN, canonicalize(grantWithoutSig)), grantSig["value"])) {
+  const grantMessage = signingMessage(GRANT_SIG_DOMAIN, canonicalize(grantWithoutSig));
+  // The message and signature go to the resolver too, so a RETIRED grant kid is refused as retired
+  // only when this signature is authentic; a forgery naming it is an invalid signature.
+  const grantKey = resolveVerificationKey(keyringBytes, grantSig["kid"], grantMessage, grantSig["value"]);
+  if (!grantKey.ok) return fail(`context.grant: ${grantKey.reason}`);
+  if (!verifyEd25519(grantKey.publicKey, grantMessage, grantSig["value"])) {
     return fail(`context.grant: invalid signature (kid ${grantSig["kid"]})`);
   }
 

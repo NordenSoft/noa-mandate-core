@@ -431,11 +431,12 @@ independence claim, and ADR-R-007 stays UNRESOLVED.
 
 `packages/gate` defines a sealed adapter for `noa.ledger.transfer`, built on `projectLedgerTransfer`,
 and measures its identity from that function at load, refusing to load if the result differs from the
-pins in §7. It does **not** register the adapter: a hold for `noa.ledger.transfer` is refused with
-`UNREGISTERED_CRITICAL_ACTION`, exactly as for any unregistered action. Registration would make an
-approved transfer yield an execution grant the requesting agent can read before any effect owner can
-consume it at commit time; it is left to a later revision of the reference Gate that ships the
-effect-owner path with it.
+pins in §7. It registers the adapter only as an **effect-owned** action: the approved grant is never
+handed to the requesting agent, and the transfer is committed by an in-process effect owner that
+re-derives `paramsHash` from the stored canonical bytes, refuses a tuple whose `ledger` is not its own,
+parses `amount` from the validated string and writes the row that consumes the authority in the same
+step (`docs/gate-effect-owner.md`). Without a configured owner a hold for this action is refused. That
+owner is a reference implementation with an in-memory ledger; its limits are `NON-CLAIMS.md` §S9.
 
 The adapter's risk floor is that Gate's own policy and not wire language: a fixed `HIGH` for every
 transfer, independent of the amount, so that splitting a transfer cannot lower its approver tier. A

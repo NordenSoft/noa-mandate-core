@@ -65,6 +65,41 @@ test("P0-14 cached lifecycle handle stays current and retired keys fail closed",
   assert.equal(signer.historicalKeyring, undefined, "no lifecycle-stripping downgrade helper may be exposed");
 });
 
+test("retired outcome key: a forged signature is a signature mismatch, not a retirement", () => {
+  // The kernel resolver checks the outcome's signature against the retired key's retained public
+  // material before naming the refusal: only an authentic signature is reported as retired.
+  const first = keyPair();
+  const second = keyPair();
+  let now = "2026-01-01T00:00:00.000Z";
+  const signer = createRotatableSigner(
+    { kid: "outcome-1", privateKey: first.privateKey, publicKey: first.publicKey },
+    { now: () => Date.parse(now) },
+  );
+  const lifecycle = signer.verificationLifecycle();
+  const oldOutcome = buildOutcomeReceipt({ decisionReceipt: decisionReceipt("old"), tool: "tool-a", outcome: "success", ts: now }, signer);
+  const otherOutcome = buildOutcomeReceipt({ decisionReceipt: decisionReceipt("other"), tool: "tool-a", outcome: "error", ts: now }, signer);
+  now = "2026-01-02T00:00:00.000Z";
+  signer.rotate({ kid: "outcome-2", privateKey: second.privateKey, publicKey: second.publicKey });
+
+  // Same content and kid, the signature of a different outcome.
+  const forged = { ...oldOutcome, sig: { ...oldOutcome.sig, value: otherOutcome.sig.value } };
+  const attack = verifyOutcomeReceipt(forged, { verification: lifecycle });
+  assert.equal(attack.ok, false);
+  assert.match(attack.reason ?? "", /invalid signature/, `a forged outcome naming a retired kid was labelled ${JSON.stringify(attack.reason)}`);
+  assert.doesNotMatch(attack.reason ?? "", /retired/i);
+  const authentic = verifyOutcomeReceipt(oldOutcome, { verification: lifecycle });
+  assert.equal(authentic.ok, false);
+  assert.match(authentic.reason ?? "", /retired/i);
+
+  // The signed bytes are now built BEFORE the key is resolved, so an outcome that cannot be
+  // canonicalized is refused as malformed whatever its kid (it was "not in keyring" for an unknown
+  // kid before, and already malformed for a known one).
+  const malformed = { ...oldOutcome, outcome: { ...oldOutcome.outcome, ratio: 0.5 }, sig: { ...oldOutcome.sig, kid: "outcome-unknown" } };
+  const refused = verifyOutcomeReceipt(malformed, { verification: lifecycle });
+  assert.equal(refused.ok, false);
+  assert.match(refused.reason ?? "", /^verify threw: /);
+});
+
 test("P0-14 non-rotating consumers retain a multi-key static-map control", () => {
   const first = keyPair();
   const second = keyPair();

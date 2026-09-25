@@ -1,13 +1,14 @@
 /**
- * `noa.ledger.transfer/1` inside the reference Gate — the sealed adapter that is deliberately NOT
- * registered (src/projections.ts, `ledgerTransferProjection`).
+ * `noa.ledger.transfer/1` inside the reference Gate — the sealed adapter, registered as EFFECT-OWNED
+ * (src/projections.ts, `ledgerTransferProjection` and `EFFECT_OWNED`; docs/gate-effect-owner.md).
  *
  * What this file pins, and why each assertion exists:
  *
- *   1. NOT REGISTERED. `getProjection("noa.ledger.transfer")` is undefined and a hold for this
- *      canonical is refused with UNREGISTERED_CRITICAL_ACTION. A registered transfer would yield an
- *      agent-readable, gate-signed grant before any effect owner can consume it at commit time. A
- *      later revision of the reference Gate that registers it must flip BOTH assertions on purpose.
+ *   1. REGISTERED ONLY AS EFFECT-OWNED. `getProjection("noa.ledger.transfer")` is this adapter and
+ *      `isEffectOwned` is true for it, so the gate withholds the grant and commits the transfer itself.
+ *      A hold is created only when an effect owner is configured (201); without one it is refused
+ *      (503 EFFECT_OWNER_UNCONFIGURED) and leaves no state. Both assertions were flipped on purpose
+ *      when the effect-owner path shipped: before it, this canonical was deliberately unregistered.
  *   2. ONE IDENTITY. The identity the gate measures from the kernel function equals the kernel's
  *      published pins (the module also throws at import if it does not).
  *   3. ONE DERIVATION. Every corpus vector whose text strict-parses, fed to `run()` as a parsed
@@ -28,8 +29,9 @@ import {
   LEDGER_TRANSFER_DISPLAY_ID,
   projectLedgerTransfer,
 } from "noa-receipt";
-import { getProjection, ledgerTransferProjection } from "../src/projections.js";
-import { setupGate, body, sampleCommandParams } from "./helpers.js";
+import { getProjection, isEffectOwned, ledgerTransferProjection } from "../src/projections.js";
+import { body, sampleCommandParams } from "./helpers.js";
+import { effectGate } from "./helpers/effect.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // dist/test -> packages/gate -> packages -> repository root
@@ -59,28 +61,36 @@ const BASE_HASH = "sha256:aa9256899837f204583f28e483ed67129b204e7edabf378eaf60f2
 /** Called WITHOUT a receiver on purpose: the adapter must not depend on `this`. */
 const run = ledgerTransferProjection.run;
 
-test("noa.ledger.transfer is NOT registered: no adapter is returned for it, and the reviewed adapter is unchanged", () => {
+test("noa.ledger.transfer is registered, and only as EFFECT-OWNED; the reviewed command adapter is unchanged", () => {
   assert.equal(corpus.canonical, LEDGER_TRANSFER_CANONICAL);
   assert.equal(ledgerTransferProjection.canonical, LEDGER_TRANSFER_CANONICAL);
-  assert.equal(getProjection(LEDGER_TRANSFER_CANONICAL), undefined,
-    "registering this adapter is a deliberate later change that must update this assertion");
-  assert.ok(getProjection("noa.command.exec"), "the registry still carries its one reviewed adapter");
+  assert.equal(getProjection(LEDGER_TRANSFER_CANONICAL), ledgerTransferProjection,
+    "the registered adapter is exactly the sealed one this file replays");
+  assert.equal(isEffectOwned(LEDGER_TRANSFER_CANONICAL), true, "a registered transfer must be effect-owned");
+  assert.ok(getProjection("noa.command.exec"), "the registry still carries the reviewed command adapter");
+  assert.equal(isEffectOwned("noa.command.exec"), false, "the command adapter keeps its wrapper path");
 });
 
-test("a hold for noa.ledger.transfer is refused as UNREGISTERED_CRITICAL_ACTION and leaves no state", () => {
-  const fx = setupGate();
-  const created = fx.engine.createHold(fx.agent, "idem-ledger-transfer", body({
-    action: { canonical: LEDGER_TRANSFER_CANONICAL, riskClass: "HIGH", reversible: false },
+test("a hold for noa.ledger.transfer is created only with an effect owner: 201 with one, 503 and no state without one", () => {
+  const request = (chain: string) => body({
+    action: { canonical: LEDGER_TRANSFER_CANONICAL, riskClass: "HIGH" },
     params: { ...BASE },
-    chain: "chain-ledger-transfer",
-  }));
-  assert.equal(created.status, 422, JSON.stringify(created.body));
-  assert.equal((created.body as { error: string }).error, "UNREGISTERED_CRITICAL_ACTION");
+    chain,
+  });
+  const owned = effectGate();
+  const accepted = owned.engine.createHold(owned.agent, "idem-ledger-owned", request("chain-ledger-owned"));
+  assert.equal(accepted.status, 201, JSON.stringify(accepted.body));
+
+  const fx = effectGate({ owner: false });
+  const created = fx.engine.createHold(fx.agent, "idem-ledger-transfer", request("chain-ledger-transfer"));
+  assert.equal(created.status, 503, JSON.stringify(created.body));
+  assert.equal((created.body as { error: string }).error, "EFFECT_OWNER_UNCONFIGURED");
   // The store is keyed by a gate-generated hold id, so a lookup by chain name could never find
   // anything. Count every hold, and look the request up by the key the store actually indexes.
   assert.equal(fx.store.listHolds({}).length, 0, "a refused request must create no hold");
   assert.equal(fx.store.getHoldByIdem(fx.agent.id, "idem-ledger-transfer"), undefined);
-  // Anti-vacuity: the same probes DO see a hold when one is created — here the registered adapter.
+  // Anti-vacuity: the same probes DO see a hold when one is created — here the command adapter,
+  // which needs no effect owner.
   const control = fx.engine.createHold(fx.agent, "idem-command-control", body({
     mode: "ENFORCED",
     action: { canonical: "noa.command.exec", riskClass: "HIGH", reversible: false },

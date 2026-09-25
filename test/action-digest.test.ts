@@ -38,7 +38,7 @@ import { sha256Prefixed } from "../src/hash.js";
 import { signingMessage } from "../src/signing.js";
 import { receiptHashInput } from "../src/canonicalize.js";
 import { buildReceipt } from "../src/builder.js";
-import { generateKeyPair, verifyEd25519 } from "../src/keys.js";
+import { generateKeyPair, signEd25519, verifyEd25519 } from "../src/keys.js";
 import { verifyChain } from "../src/verify.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -443,6 +443,39 @@ test("HIGH-3: the verifier refuses when it cannot authenticate at all", () => {
     JSON.stringify({ chain: ctx.chain, grant: ctx.grant, keyring: {}, expect: ctx.expect }),
   );
   assert.equal(emptyRoot.ok, false);
+});
+
+test("retired grant key: a forged grant signature is an integrity failure, and only an authentic one is a retirement", () => {
+  // The grant key is resolved through the kernel resolver, which now checks the grant's signature
+  // against a retired key's retained public material before it names the refusal.
+  const ctx = validContext();
+  const authorization = authorizationOf(ctx);
+  const grantKey = generateKeyPair("grant-label-old");
+  const attacker = generateKeyPair("grant-label-attacker");
+  const keys: Record<string, { publicKey: string; retiredAt: string | null }> = Object.create(null);
+  for (const [kid, publicKey] of Object.entries(ctx.keyring as Record<string, string>)) keys[kid] = { publicKey, retiredAt: null };
+  keys[grantKey.kid] = { publicKey: grantKey.publicKey, retiredAt: "2026-07-01T00:00:00.000Z" };
+  const keyring = { spec: "noa.signing-key-lifecycle/0.1", keys };
+  const signedGrant = (privateKey: string): Record<string, unknown> => {
+    const unsigned: Record<string, unknown> = { ...(ctx.grant as Record<string, unknown>) };
+    delete unsigned.sig;
+    const value = signEd25519(privateKey, signingMessage("NOA-ExecGrant-v0.1-sig", canonicalize(unsigned)));
+    return { ...unsigned, sig: { alg: "ed25519", kid: grantKey.kid, value } };
+  };
+  const reasonFor = (grant: Record<string, unknown>): string => {
+    const built = buildActionDigest(JSON.stringify(authorization), JSON.stringify(grant));
+    assert.ok(built.ok, built.ok ? "" : built.reason);
+    const res = verifyActionDigest(
+      JSON.stringify({ spec: ACTION_DIGEST_SPEC, digest: built.digest }),
+      JSON.stringify({ ...ctx, grant, keyring }),
+    );
+    assert.equal(res.ok, false);
+    return res.ok ? "" : res.reason;
+  };
+  const forged = reasonFor(signedGrant(attacker.privateKey));
+  assert.match(forged, /^context\.grant: invalid signature/, `a forged grant naming a retired kid was labelled ${JSON.stringify(forged)}`);
+  assert.doesNotMatch(forged, /retired/i);
+  assert.match(reasonFor(signedGrant(grantKey.privateKey)), /^context\.grant: signing key .* is retired/);
 });
 
 /**

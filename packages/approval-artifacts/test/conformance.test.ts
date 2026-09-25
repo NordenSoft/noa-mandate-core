@@ -13,6 +13,7 @@ import { ARTIFACTS } from "../src/domains.js";
 import { generateKeyPair, isStrictEd25519PublicKey, verifyEd25519 } from "../src/crypto.js";
 import { keyHolderRCases } from "./ed25519-keyholder.js";
 import { verifyArtifact, type KeyEntry, type VerifyContext } from "../src/verify.js";
+import { signArtifact } from "../src/sign.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 /** Documents are bytes at the boundary (ADR §3.1). */
@@ -138,7 +139,7 @@ const REASON_BY_CLASS: Record<string, RegExp[]> = {
   // `equality failed at sig.kid` — pairing-accepted's wrong-key vector measures the caller's
   // sig.kid binding by its own description; `equality failed at recipientKid` — the unsigned
   // encrypted-reason blob's wrong-audit-kid refusal is the equality check.
-  "wrong-key": [/^unknown signing key/, /^signer type /, /^signer roles /, /^signer identity mismatch/, /was revoked/, /^equality failed at recipientKid/, /^equality failed at sig\.kid/],
+  "wrong-key": [/^unknown signing key/, /^signer type /, /^signer roles /, /^signer identity mismatch/, /^equality failed at recipientKid/, /^equality failed at sig\.kid/],
   "wrong-role": [/^signer roles /],
   "revoked-key": [/was revoked/],
   "signer-identity-split": [/^signer identity mismatch/],
@@ -165,6 +166,42 @@ for (const { slug, file, vec } of vectors) {
     }
   });
 }
+
+// A key-state label (revoked, not yet active, wrong type, wrong role) says something true about an
+// AUTHENTIC signature by that key. For a signature the key never made it would send incident response
+// after a key-lifecycle event instead of a forgery, so the signature is checked first and a forgery
+// under a key in any of those states is an invalid signature.
+test("a key-state label is given only to an authentic signature; a forgery under that key is an invalid signature", () => {
+  const valid = vectors.find((v) => v.slug === "decision" && v.vec.expect === "ACCEPT");
+  assert.ok(valid, "the decision folder has no valid vector");
+  const unsigned: Record<string, unknown> = { ...(valid.vec.artifact as Record<string, unknown>) };
+  delete unsigned.sig;
+  const kid = "approver-1-device-2";
+  const domain = ARTIFACTS["noa.decision/0.1"]!.domain!;
+  const holder = generateKeyPair(kid);
+  const forger = generateKeyPair(kid);
+  const authentic = signArtifact(b(unsigned), domain, { kid, privateKey: holder.privateKey });
+  const forged = signArtifact(b(unsigned), domain, { kid, privateKey: forger.privateKey });
+  const run = (artifact: unknown, state: Partial<KeyEntry>) => verifyArtifact(b(artifact), b({
+    ...valid.vec.context,
+    schemas,
+    keyring: { ...keyring, [kid]: { ...keyring[kid]!, publicKey: holder.publicKey, ...state } },
+  }));
+  assert.equal(run(authentic, {}).ok, true, run(authentic, {}).reason ?? "");
+  assert.match(run(forged, {}).reason ?? "", /^invalid signature/);
+  const states: Array<[string, Partial<KeyEntry>, RegExp]> = [
+    ["revoked", { revokedAt: "2026-07-01T00:00:00.000Z" }, /was revoked at /],
+    ["not yet active", { validFrom: "2026-07-15T00:00:00.000Z" }, /before its validFrom/],
+    ["wrong type", { type: "GATE" }, /^signer type /],
+    ["wrong role", { roles: ["settlement-observer"] }, /^signer roles /],
+  ];
+  for (const [name, state, label] of states) {
+    assert.match(run(authentic, state).reason ?? "", label, `authentic signature, ${name} key`);
+    const refused = run(forged, state);
+    assert.equal(refused.ok, false, `forged signature, ${name} key: accepted`);
+    assert.match(refused.reason ?? "", /^invalid signature/, `forged signature, ${name} key: labelled ${JSON.stringify(refused.reason)}`);
+  }
+});
 
 test("strict Ed25519 parity rejects all canonical small-order public keys", () => {
   const spkiPrefix = Buffer.from("302a300506032b6570032100", "hex");

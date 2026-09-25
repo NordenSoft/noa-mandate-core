@@ -399,6 +399,26 @@ export function verifyArtifact(artifactBytes: Uint8Array | string, ctxBytes: Uin
     if (ctx.authorizationTime !== undefined && parseTime(ctx.authorizationTime, timeSchema) === null) {
       return { ok: false, reason: "invalid verifier-controlled authorizationTime" };
     }
+
+    // AUTHENTICATE FIRST, THEN LABEL. Every refusal below names a state of the KEY (not yet active,
+    // revoked, wrong type, wrong role), which is true of an authentic signature by that key. A
+    // signature the key never made must not carry that label: it would send incident response after
+    // a key-lifecycle event instead of a forgery. So the key and the signature are checked here, and
+    // a forgery under a key in any of those states is an invalid signature.
+    //
+    // Strict public-key validation at key load, before signature verification: a trust-root key
+    // that is a non-canonical, off-curve, small-order or mixed-order encoding authenticates nothing.
+    if (!isStrictEd25519PublicKey(entry.publicKey)) {
+      return { ok: false, reason: `invalid signature (kid ${sig.kid}): signing key refused by strict public-key validation` };
+    }
+
+    // Ed25519 over the §6 preimage: domain ++ SHA256(JCS(doc without sig)).
+    const withoutSig = { ...doc };
+    delete (withoutSig as Record<string, unknown>).sig;
+    const msg = signingMessage(meta.domain, canonicalize(withoutSig));
+    if (!verifyEd25519(entry.publicKey, msg, sig.value)) {
+      return { ok: false, reason: `invalid signature (kid ${sig.kid})` };
+    }
     // ACTIVATION (validFrom) — the mirror of revocation, evaluated only at trusted caller time.
     if (entry.validFrom != null) {
       if (trustedActivationTime === undefined) {
@@ -446,19 +466,6 @@ export function verifyArtifact(artifactBytes: Uint8Array | string, ctxBytes: Uin
       return { ok: false, reason: `signer roles [${entry.roles.join(",")}] lack required ${requiredRoles.join("|")}` };
     }
 
-    // Strict public-key validation at key load, before signature verification: a trust-root key
-    // that is a non-canonical, off-curve, small-order or mixed-order encoding authenticates nothing.
-    if (!isStrictEd25519PublicKey(entry.publicKey)) {
-      return { ok: false, reason: `invalid signature (kid ${sig.kid}): signing key refused by strict public-key validation` };
-    }
-
-    // Ed25519 over the §6 preimage: domain ++ SHA256(JCS(doc without sig)).
-    const withoutSig = { ...doc };
-    delete (withoutSig as Record<string, unknown>).sig;
-    const msg = signingMessage(meta.domain, canonicalize(withoutSig));
-    if (!verifyEd25519(entry.publicKey, msg, sig.value)) {
-      return { ok: false, reason: `invalid signature (kid ${sig.kid})` };
-    }
   }
 
   // 3. REFHASH (cross-artifact bindings, F1) + transitive refEquals (F7b/G7)

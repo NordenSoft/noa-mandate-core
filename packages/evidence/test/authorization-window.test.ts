@@ -141,3 +141,34 @@ test("integrity is never claimed INTACT for a bundle that failed before it was p
   assert.equal(r.verdict, "INVALID");
   assert.equal(r.dimensions.integrity, "BROKEN", "unproven must never be reported as intact");
 });
+
+test("step 18 names a checkpoint signer's manifest state only when that key actually signed the checkpoint", () => {
+  // The shipped vector's checkpoint is signed by a manifest key the manifest revoked. When the
+  // external checkpoint keyring does not know that kid, step 17 leaves the checkpoint as an untrusted
+  // anchor; its kid is then only a name, and "revoked" is true only if that key made the signature.
+  interface CheckpointFixture {
+    now: string;
+    maxAgeHours: number;
+    bundle: { checkpoint: { sig: { kid: string; value: string } } } & Record<string, unknown>;
+    tenantRoot: Record<string, unknown>;
+    checkpointKeyring: Record<string, string>;
+  }
+  const base = JSON.parse(readFileSync(join(CONF, "reject", "step18-checkpoint-signer-revoked-at-cp-ts.json"), "utf8")) as CheckpointFixture;
+  const cpKid = base.bundle.checkpoint.sig.kid;
+  const verify = (checkpoint: unknown, checkpointKeyring: Record<string, string>) => verifyEvidence(b({ ...base.bundle, checkpoint }), {
+    tenantRoot: b(base.tenantRoot),
+    checkpointKeyring: b(checkpointKeyring),
+    now: base.now,
+    maxAgeMs: base.maxAgeHours * 60 * 60 * 1000,
+    schemas,
+  });
+  const outcomeOf = (r: ReturnType<typeof verifyEvidence>) => `${r.verdict} ${r.failedStep ?? "-"} ${r.code ?? "-"}`;
+  const unknownToExternal = { "checkpoint-witness-other": base.checkpointKeyring[cpKid]! };
+  const forged = { ...base.bundle.checkpoint, sig: { ...base.bundle.checkpoint.sig, value: Buffer.alloc(64).toString("base64") } };
+
+  assert.equal(outcomeOf(verify(base.bundle.checkpoint, base.checkpointKeyring)), "INVALID STEP_18_TEMPORAL_AUTHORIZATION E_TEMPORAL_AUTH");
+  assert.equal(outcomeOf(verify(base.bundle.checkpoint, unknownToExternal)), "INVALID STEP_18_TEMPORAL_AUTHORIZATION E_TEMPORAL_AUTH",
+    "an authentic checkpoint by the revoked manifest key is refused whether or not the external keyring knows it");
+  assert.equal(outcomeOf(verify(forged, unknownToExternal)), "VALID_SEGMENT_ONLY - -",
+    "a checkpoint its named key never signed is an untrusted anchor, not a revoked-key refusal");
+});

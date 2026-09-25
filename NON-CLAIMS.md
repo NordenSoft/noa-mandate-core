@@ -459,11 +459,11 @@ behaviour without moving the identity. The reference Gate refuses to load if the
 differs from the published pins; because the pins and the code ship together, that detects accidental
 drift, not a deliberate substitution of both.
 
-### NC-S7.11 — The reference Gate does not enforce this action in this revision
+### NC-S7.11 — The reference Gate's enforcement of this action is a reference implementation only
 
-The reference Gate defines an adapter for `noa.ledger.transfer` but does not register it, so a hold for
-it is refused like any unregistered action. Its fixed `HIGH` risk floor is that Gate's policy, not part
-of the wire language.
+The reference Gate registers `noa.ledger.transfer` only as an effect-owned action and commits it through
+an in-memory reference ledger (`docs/gate-effect-owner.md`); what that establishes and does not is §S9.
+Its fixed `HIGH` risk floor is that Gate's policy, not part of the wire language.
 
 ### NC-S7.12 — One implementation is not an independence claim
 
@@ -480,7 +480,8 @@ less.
 
 The gate re-checks audience, epoch and roster expiry at `reserve()`, but the signed grant is already
 visible to the owning agent through the hold view and `wait`. A caller that acts without reserving is
-not stopped here. Single-use enforcement belongs at the component that owns the effect.
+not stopped here. Single-use enforcement belongs at the component that owns the effect. For an
+effect-owned action the reference gate is that component in-process, with the limits in §S9.
 
 ### NC-S8.2 — A persistent gate key keeps old envelopes verifiable for the key's lifetime
 
@@ -585,6 +586,150 @@ key file's directory) cannot see each other's pids, so one can find the other's 
 take it over. The pinned mode makes no claim for a key-file directory shared that way. A takeover
 mutex left by a process that died is not removed automatically (`STATE_TAKEOVER_STALE`): liveness is
 restored by an administrator, not by the gate.
+
+## S9. Effect-owned commit in the reference gate (`noa.ledger.transfer`)
+
+These statements apply to the reference gate in `packages/gate` committing an effect-owned action
+through its in-process effect owner (`docs/gate-effect-owner.md`). The owner defends against a hostile
+caller of its commit API — hostile input objects and a hostile sealer — while its own code is trusted
+(NC-S9.11). It re-verifies the signed authority listed there, verifies the evidence it signs, and writes
+one ledger row per authority; the statements below qualify what that establishes.
+
+### NC-S9.1 — The effect and its record die together
+
+The reference ledger lives in the gate process's memory with the holds and grants. A crash or restart
+loses the effect, the row and the authority state together. It is not a system of record, and the
+reference command line does not wire it. Commit-or-nothing behaviour and durability across processes, one authoritative
+ledger that a cloned volume cannot fork, and a single boot identifier shared by all of a gate's
+processes are left to a later revision.
+
+### NC-S9.2 — A compromised gate process holds the keys and the ledger
+
+The owner re-verifies the authority it commits on — the envelope (signature, tenant, gate, hold id,
+epoch, mode), the deferred and approval receipts (signatures, linkage, verdict, the held action), the
+grant and its bindings, the decision, the approver's identity and key and the display's recipients —
+and verifies the attestation it signs, bound to the commit's instant. It does not stop a compromised
+gate process or its uid, which holds the gate key, the ledger and, with an in-process grant key, full
+authority: whoever can sign with the gate key can sign a grant, an envelope and a receipt that pass
+these checks. The owner also does not check, from the artifacts it is given:
+
+- that the boot identifier it is handed is true: it is store state, not signed. The owner also refuses
+  a hold whose gate-signed freeze time precedes the boot's start, which a clock rollback or a restart
+  within the same millisecond defeats; deleting a row in a shared store re-enables a commit;
+- the roster's expiry, which bounds the grant's signed expiry only when an honest signer issued it;
+- the approval's time window, which decide checks when it issues the grant.
+
+Store custody is left to a later revision.
+
+### NC-S9.3 — The gate is the witness of its own effect
+
+The EXECUTED receipt and the consumption are signed by the gate that wrote the row. No independent
+party observes the effect, and the hold resolution keeps `HUMAN_APPROVED_INTENT_NOT_EXECUTION_BOUND`.
+
+### NC-S9.4 — The approval binds the transfer tuple, not the balance
+
+A human approves the six-member transfer. The balance at approval time is not bound; funds are checked
+at commit, and a transfer the balance no longer covers ends as a terminal REFUSED row.
+
+### NC-S9.5 — The agent decides whether and when to commit
+
+After approval the agent can withhold the commit until the grant expires, and there is no cancel after
+approval. Withholding is a denial of the effect, not a way to change it.
+
+### NC-S9.6 — Account existence is revealed after approval
+
+Accounts are not checked at hold creation, so an agent cannot probe them before a human approves. After
+approval a commit to an unknown account answers `LEDGER_ACCOUNT_UNKNOWN`.
+
+### NC-S9.7 — Refusals are not signed
+
+A REFUSED row carries no signature, and no signed `FAILED_BEFORE_DISPATCH` is produced. The evidence
+layer renders a hold with no execution evidence as `APPROVED_NO_EXECUTION_EVIDENCE`.
+
+### NC-S9.8 — Clock, quorum, money and understanding
+
+The gate's clock decides every expiry and a clock rollback is not detected. The quorum is exactly 1.
+`XTS` is a testing code, not money. Nothing here proves that the human understood what they approved.
+
+### NC-S9.9 — Only this action is effect-owned
+
+Every other action keeps the wrapper path of §S8.1: its grant is visible to the owning agent, and an
+adapter that does not derive reversibility keeps the caller-supplied `action.reversible`.
+Console-issued grants, two-person rules and every other effect are outside this revision.
+
+### NC-S9.10 — One effect-owning engine per boot is enforced in one process only
+
+In a process, a boot (a trust root's `bootId`; a copy of the trust root is the same boot) serves one
+engine with owners, and an owner serves one engine. A hold is committed only by the boot that froze it.
+A second process, or a second store over the same ledger, is not detected: two owners for one ledger,
+each with its own record, could both commit one approval. One owner per ledger, over one store, is the
+embedder's rule. A boot stays reserved for the life of the process.
+
+### NC-S9.11 — The owner's callers are not trusted; its code is
+
+The owner defends against a hostile caller of its commit API: an in-process holder of a reference to it
+that supplies hostile input objects (getters, throwing members, forged or re-signed artifacts) or a
+hostile sealer. It does not defend against its own code being replaced, and the engine accepts any
+object that implements the owner interface, checking only its canonical, its boot identifier and that
+it is not already bound: an embedder-supplied owner is trusted code, and what it does is not verified
+by the gate.
+
+## R1. Package release controller — what a released `noa-receipt` version does and does not establish
+
+`.github/workflows/release-npm-noa-receipt.yml` stages `noa-receipt` on npm and never publishes it
+directly; a staged version becomes public only when a package maintainer approves the npm stage. A
+released version establishes only that the public bytes were staged from one checked, merged, signed
+squash commit that was the tip of `main` when the workflow re-read it right before staging, that a
+human approved the run as the `npm-release` environment reviewer, and that a maintainer then approved
+the npm stage.
+
+### NC-R1.1 — A merged pull request is not evidence of code review
+
+The branch ruleset requires no approving review, and the required `review` context is dependency
+scanning. The controller checks that the source was merged through the protected path with every
+required check green; it does not check that anyone reviewed the change.
+
+### NC-R1.2 — The release approvals are one person's decision
+
+The environment reviewer, the maintainer who approves the npm stage and the person who dispatches the
+release can be the same person. The approvals separate releasing from merging; they are not an
+independent second party. Which second factor npm asks for when a stage is approved is npm account
+policy; the workflow cannot see it.
+
+### NC-R1.3 — Provenance binds bytes to a workflow run, not to correct behaviour
+
+The attestation proves which repository, workflow file, ref and commit produced the published
+tarball. It does not prove the code in that commit is correct, safe, or what its documentation says.
+
+### NC-R1.4 — Controls outside the workflow file are provider settings
+
+Environment protection and the npm trusted-publisher binding live in GitHub and npm settings. The
+binding must allow stage publish only: a binding that also allows direct publish would let a changed
+workflow on `main` publish without a maintainer's npm approval, and the workflow cannot read the
+binding to refuse that. The workflow reads what it can and refuses when a reading is missing, with
+one deliberate exception: GitHub returns ruleset bypass actors only to ruleset writers, so the
+workflow accepts an absent `bypass_actors` field (and an absent `current_user_can_bypass`) and refuses
+only a visible bypass actor or a job token that may bypass. The environment reviewer reads the bypass
+actors at approval time (NC-R1.5). The workflow cannot prove a setting that the provider does not
+expose to it.
+
+### NC-R1.5 — A repository administrator can weaken the rules
+
+An administrator can add ruleset bypass actors, relax a rule or merge around one, and the workflow's
+job token cannot see bypass actors. The workflow refuses a live ruleset that no longer requires every
+(context, app) pair of its pinned minimum set, and refuses a merge whose required checks, tree or
+signature are missing, but a bypass that leaves all of that evidence intact is not detectable by the
+workflow. The compensating controls are the human approvals: the environment reviewer reads the
+bypass actors at approval time and records them in the release receipt, and a maintainer approves
+the npm stage.
+
+### NC-R1.6 — STAGED is not released
+
+A run that ends STAGED has placed the bytes in npm's stage area; they are not public, and the readback
+reports ABSENT until a maintainer approves the stage. The provenance attestation is generated and
+signed inside the workflow when it stages. That npm publishes that attestation with the version on
+approval is npm's behaviour, not this repository's; the readback checks it afterwards, from the public
+registry, and refuses when it is missing or names another workflow, ref, commit or bytes.
 
 ## 7. Changing this document
 

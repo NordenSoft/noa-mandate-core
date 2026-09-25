@@ -211,7 +211,10 @@ export function coseSign1Verify(coseBytes: Uint8Array, keyring: Uint8Array | str
   const kParsed = parseVerificationKeyring(keyring, "keyring");
   if (!kParsed.ok) return { ok: false, kid: null, payload: null, kidAuthenticated: false, reason: kParsed.reason };
   const result = coseSign1VerifyParsed(coseBytes, kParsed.value.keyring);
-  if (result.kid !== null && kParsed.value.retiredKids[result.kid] === true) {
+  // The parsed keyring retains a retired key's public material, so `result` has already checked the
+  // signature: a forged or altered envelope naming a retired kid keeps its own integrity refusal,
+  // and only an authentic one is relabelled as retired.
+  if (result.ok && result.kid !== null && kParsed.value.retiredKids[result.kid] === true) {
     return {
       ok: false,
       kid: result.kid,

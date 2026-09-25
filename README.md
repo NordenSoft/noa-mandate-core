@@ -154,9 +154,14 @@ signature was made before retirement. Its `reason` and one `key-retired:` warnin
 usual completeness caveats) point to `--purpose historical`, the only path that can attribute such a
 signature, through an independently trusted checkpoint. Scope: that meaning of `KEY_RETIRED` holds
 on `verifyChain`/`verifyChainText`, the `noa verify` CLI, `noa --serve` and the witnessed
-(`--anchors`/`--trust-set`) path. The standalone helpers `verifyCheckpoint`, `resolveVerificationKey`,
-the COSE verifiers and the compliance check still refuse a retired key before checking its
-signature, so their "retired" answer does not say the signature was authentic (tracked separately). A historical checkpoint is authenticated only through the separately
+(`--anchors`/`--trust-set`) path. The standalone helpers `verifyCheckpoint`, the COSE verifiers and the compliance check refuse a
+retired key too, and they also authenticate first: a forged or altered signature naming a retired
+kid gets the helper's integrity refusal, and only an authentic one is answered as retired.
+`resolveVerificationKey` does the same when the caller passes the signed message and signature.
+It is a key resolver by design: without those two arguments it authenticates nothing, its "retired"
+answer names the key state only, and a current kid resolves with no signature check, so a caller
+that verifies an artifact passes them and checks the signature itself, as every such caller here
+does. A historical checkpoint is authenticated only through the separately
 supplied `checkpointKeyring`; receipt trust is never a fallback. Its signing key must also differ
 from every receipt signer by both key ID and decoded SPKI bytes. Separate keys do not establish
 separate organizations, so `organizationalIndependence` remains `UNVERIFIED`.

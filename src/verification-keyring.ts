@@ -1,5 +1,5 @@
 import { parseDocument } from "./bytes.js";
-import type { Keyring } from "./keys.js";
+import { verifyEd25519, type Keyring } from "./keys.js";
 import {
   arrayIncludes,
   dateParse,
@@ -189,20 +189,38 @@ export type ResolveVerificationKeyResult =
   | { readonly ok: true; readonly publicKey: string; readonly lifecycle: boolean }
   | { readonly ok: false; readonly reason: string };
 
-/** Resolve a kid without permitting lifecycle state to be narrowed away. */
+/**
+ * Resolve a kid without permitting lifecycle state to be narrowed away.
+ *
+ * A retired kid never resolves. A caller that is about to verify a signature passes the signed
+ * `message` and the `signature` value as well: the retired key's public material is retained, so the
+ * signature is authenticated against it FIRST, exactly as `verifyChain` does, and only an authentic
+ * one is refused as retired. A signature that does not verify is refused as `invalid signature`, an
+ * integrity failure, so a forgery that merely names a retired kid is never reported as a retirement.
+ * Without `message`/`signature` the refusal names the key state only and says nothing about whether
+ * any signature is authentic. A current kid resolves as before; its caller verifies the signature.
+ */
 export function resolveVerificationKey(
   document: Uint8Array | string,
   kid: string,
+  message?: Buffer,
+  signature?: string,
 ): ResolveVerificationKeyResult {
   const parsed = parseVerificationKeyring(document);
   if (!parsed.ok) return parsed;
+  const publicKey = parsed.value.keyring[kid];
   if (parsed.value.retiredKids[kid] === true) {
+    if (
+      (message !== undefined || signature !== undefined)
+      && !verifyEd25519(publicKey as string, message as Buffer, signature as string)
+    ) {
+      return { ok: false, reason: `invalid signature (kid ${jsonStringify(kid)})` };
+    }
     return {
       ok: false,
       reason: `signing key ${jsonStringify(kid)} is retired; signer-chosen artifact time is not an independent witness`,
     };
   }
-  const publicKey = parsed.value.keyring[kid];
   if (!publicKey) return { ok: false, reason: `signing key ${jsonStringify(kid)} not in keyring` };
   return { ok: true, publicKey, lifecycle: parsed.value.lifecycle };
 }

@@ -60,6 +60,20 @@ function pinned(world: RosterWorld, clock: Clock, over: Record<string, unknown> 
   return pinnedTrustFrom(rosterDoc(world, clock.t, over), gateKey, { now: () => clock.t, ids });
 }
 
+/**
+ * The same trust root as `trust`, on the boot of `a`. A hold records the boot that froze it, and a
+ * hold from another boot is refused at decide (410 HOLD_FROM_DEAD_BOOT, docs/gate-effect-owner.md).
+ * Every test below where a second gate acts on the first gate's holds therefore pins EQUAL bootIds:
+ * otherwise that check would refuse first, and a knockout of the control the test names would fail
+ * only by its error code while the consequence (no grant) still held.
+ */
+function onBootOf(a: Engine, trust: GateTrust): GateTrust {
+  return { ...trust, bootId: a.trust.bootId };
+}
+function assertSameBoot(a: { trust: GateTrust }, b: { trust: GateTrust }): void {
+  assert.equal(b.trust.bootId, a.trust.bootId, "fixture: both gates are on one boot, so only the control under test can refuse");
+}
+
 /** Roster `approvers` with exactly one active approver `a`. */
 function only(a: ApproverKeys, validFrom: number): Record<string, unknown> {
   return {
@@ -166,7 +180,8 @@ test("K1 — a hold frozen under epoch v2 cannot be decided by a gate at epoch v
   const clock = makeClock();
   const store = new InMemoryStore();
   const a = engineFor(pinned(world, clock), store, clock);
-  const b = engineFor(pinned(world, clock, { epoch: { keyManifestVersion: 3, keyManifestHash: "sha256:" + "3".repeat(64) } }), store, clock);
+  const b = engineFor(onBootOf(a, pinned(world, clock, { epoch: { keyManifestVersion: 3, keyManifestHash: "sha256:" + "3".repeat(64) } })), store, clock);
+  assertSameBoot(a, b);
   const hold = holdOf(store, createHold(a, "epoch"));
   const d = decision(a.trust, store, hold.id, world.approver);
   const r = b.engine.decide(hold.id, d);
@@ -184,7 +199,8 @@ test("K2 — a gate for another tenant cannot grant on this tenant's envelope: 4
   const a = engineFor(pinned(world, clock), store, clock);
   // Everything but the tenant is identical, so no signature, chain or epoch check can tell the two
   // gates apart: the audience check is the only thing between B and a grant on A's hold.
-  const b = engineFor(pinned(world, clock, { tenant: "tenant-example-2" }), store, clock);
+  const b = engineFor(onBootOf(a, pinned(world, clock, { tenant: "tenant-example-2" })), store, clock);
+  assertSameBoot(a, b);
   const hold = holdOf(store, createHold(a, "audience"));
   const d = decision(a.trust, store, hold.id, world.approver);
   const r = b.engine.decide(hold.id, d);
@@ -199,7 +215,8 @@ test("audience — a gate with another gate key is refused by kid before any sig
   const clock = makeClock();
   const store = new InMemoryStore();
   const a = engineFor(pinned(world, clock), store, clock);
-  const b = engineFor(pinned({ ...world, gate: generateKeyPair("gate-example-2") }, clock), store, clock);
+  const b = engineFor(onBootOf(a, pinned({ ...world, gate: generateKeyPair("gate-example-2") }, clock)), store, clock);
+  assertSameBoot(a, b);
   const hold = holdOf(store, createHold(a, "audience-key"));
   const r = b.engine.decide(hold.id, decision(a.trust, store, hold.id, world.approver));
   nothingHappened(store, hold.id, "a gate with another gate key");
@@ -215,7 +232,8 @@ test("K3 — an approver who was never sent the display cannot approve it: 422 A
   const y = approverKeys(2);
   // Engine B's roster names Y as its active approver; nothing about the epoch or the gate changed, so
   // the epoch check alone cannot see this case.
-  const b = engineFor(pinned(world, clock, { approvers: only(y, clock.t - HOUR) }), store, clock);
+  const b = engineFor(onBootOf(a, pinned(world, clock, { approvers: only(y, clock.t - HOUR) })), store, clock);
+  assertSameBoot(a, b);
   const hold = holdOf(store, createHold(a, "recipient"));
   assert.deepEqual((hold.encryptedDisplay.recipients ?? []).map((r) => r.kid), [world.approver.kid, AUDIT_KID]);
   const r = b.engine.decide(hold.id, decision(b.trust, store, hold.id, y));
@@ -228,6 +246,8 @@ test("alpha too: two alpha trust roots sharing one store — the second cannot d
   const fxA = setupGate({ approverRole: "approve-critical" });
   const fxB = setupGate({ approverRole: "approve-critical", store: fxA.store });
   fxB.clock.t = fxA.clock.t;
+  // setupGate's id seam starts every trust at the same first id, and bootId is that first draw.
+  assertSameBoot(fxA, fxB);
   const created = fxA.engine.createHold(fxA.agent, "idem-alpha-shared", body({
     mode: "ENFORCED",
     action: { canonical: "noa.command.exec", riskClass: "HIGH", reversible: false },
@@ -254,6 +274,7 @@ test("K5 — an injected trust whose roster quorum is 2 refuses at decide: 500 Q
   // createGate accepts an injected GateTrust; the loader's refusal of q=2 does not protect this path.
   const injected: GateTrust = { ...trustA, pinned: Object.freeze({ ...trustA.pinned!, quorum: Object.freeze({ HIGH: 2, CRITICAL: 2 }) }) };
   const b = engineFor(injected, store, clock);
+  assertSameBoot(a, b);
   const hold = holdOf(store, createHold(a, "quorum"));
   const r = b.engine.decide(hold.id, decision(a.trust, store, hold.id, world.approver));
   nothingHappened(store, hold.id, "one approval where the roster asks for two");
@@ -276,7 +297,8 @@ test("K6 — a class the roster does not name is refused at createHold, and at d
 
   const store2 = new InMemoryStore();
   const full = engineFor(pinned(world, clock, { quorum: { HIGH: 1, CRITICAL: 1, IRREVERSIBLE: 1 } }), store2, clock);
-  const narrowed = engineFor(pinned(world, clock, { quorum: { HIGH: 1 } }), store2, clock);
+  const narrowed = engineFor(onBootOf(full, pinned(world, clock, { quorum: { HIGH: 1 } })), store2, clock);
+  assertSameBoot(full, narrowed);
   const hold = holdOf(store2, createHold(full, "class-decide", CRITICAL_PARAMS));
   const r = narrowed.engine.decide(hold.id, decision(full.trust, store2, hold.id, world.approver));
   nothingHappened(store2, hold.id, "a class the deciding gate's roster does not name");
@@ -453,7 +475,8 @@ test("a foreign gate on a shared store signs nothing for another gate's holds: d
   const clock = makeClock();
   const store = new InMemoryStore();
   const a = engineFor(pinned(world, clock), store, clock);
-  const b = engineFor(pinned(world, clock, { tenant: "tenant-example-2", epoch: { keyManifestVersion: 3, keyManifestHash: "sha256:" + "3".repeat(64) } }), store, clock);
+  const b = engineFor(onBootOf(a, pinned(world, clock, { tenant: "tenant-example-2", epoch: { keyManifestVersion: 3, keyManifestHash: "sha256:" + "3".repeat(64) } })), store, clock);
+  assertSameBoot(a, b);
   const pending = holdOf(store, createHold(a, "foreign-pending"));
   const granted = holdOf(store, createHold(a, "foreign-granted"));
   const unreserved = holdOf(store, createHold(a, "foreign-unreserved"));
