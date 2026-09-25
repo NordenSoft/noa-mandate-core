@@ -707,7 +707,7 @@ function workflowSteps(file) {
       }
     }
     if (/^ {8}env:\s*$/.test(line)) {
-      current.env = Object.create(null);
+      current.env = {};
       for (let cursor = index + 1; cursor < lines.length; cursor++) {
         if (/^\s*$/.test(lines[cursor]) || /^ {10}#/.test(lines[cursor])) continue;
         const entry = /^ {10}([A-Za-z_][A-Za-z0-9_]*):(?:[ \t]*(.*))?$/.exec(lines[cursor]);
