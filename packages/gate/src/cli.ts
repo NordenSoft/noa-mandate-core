@@ -43,6 +43,7 @@ import {
   type PinnedBootCode,
 } from "./trust.js";
 import { isRosterId } from "./roster.js";
+import { gatePinFingerprint } from "./gate-pin.js";
 import { remoteExecutionSigner } from "./exec-signer.js";
 import { hashSecret } from "./auth.js";
 import { InMemoryStore } from "./store.js";
@@ -214,11 +215,15 @@ async function servePinned(boot: PinnedBoot, common: ServeCommon): Promise<numbe
         epoch: { keyManifestVersion: trust.keyManifestVersion, keyManifestHash: trust.keyManifestHash },
         gateKid: trust.gate.kid,
         gatePublicKey: trust.gate.publicKey,
+        gatePin: gatePinLine(trust.tenant, trust.gate.kid, trust.gate.publicKey),
         executionSignerKid: trust.executionSigner?.kid ?? trust.gate.kid,
         grantKeyCustody: trust.executionSigner ? `out-of-process (${common.grantSignerSocket})` : "IN-PROCESS (see NON-CLAIMS.md)",
         activeApproverKid: boot.activeApproverKid,
         quorum: boot.roster.quorum,
         bootId: trust.bootId,
+        bootIdSource: boot.bootIdSource,
+        bootStartedAt: trust.uptimeResetAt,
+        bootStartSource: boot.bootStartSource,
         displaySealer: "hpke",
       },
       null,
@@ -419,6 +424,7 @@ function rosterCheck(args: string[]): number {
         rosterExpiresAt: r.expiresAt,
         epoch: r.epoch,
         gateKid: r.gate.kid,
+        gatePin: gatePinLine(r.tenant, r.gate.kid, r.gate.publicKey),
         executionSignerKid: r.executionSigner?.kid ?? null,
         activeApproverKid: result.activeApproverKid,
         auditKid: r.audit.kid,
@@ -432,6 +438,16 @@ function rosterCheck(args: string[]): number {
     ) + "\n",
   );
   return 0;
+}
+
+/**
+ * The `noa.gate-pin/1` fingerprint a person compares when pinning this Gate on a device
+ * (docs/gate-pin-spec.md). The roster already enforced every input rule, so a refusal cannot occur;
+ * it would print null rather than a string nobody can match.
+ */
+function gatePinLine(tenant: string, gateKid: string, publicKey: string): string | null {
+  const pin = gatePinFingerprint({ tenant, gateKid, publicKey });
+  return pin.ok ? pin.fingerprint : null;
 }
 
 function flag(args: string[], name: string): string | undefined {

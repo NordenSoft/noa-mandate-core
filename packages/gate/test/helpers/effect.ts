@@ -111,6 +111,22 @@ export const AGENT_1_SECRET = "noa_gateagent_example_1";
 export const DEFAULT_ACCOUNTS: Readonly<Record<string, number>> = { [ACCT_1]: 1000, [ACCT_2]: 0, [ACCT_3]: 50 };
 
 /**
+ * Builds the effect owner a fixture runs: the in-memory reference owner by default, or any other owner
+ * under test (the owner conformance runner, test/effect-owner-conformance.ts). `store` is the store the
+ * fixture's engine uses; an owner that records the grant's consumption itself writes there.
+ */
+export type EffectOwnerFactory = (o: {
+  trust: GateTrust;
+  now: () => number;
+  ledger: string;
+  accounts: Readonly<Record<string, number>>;
+  store: Store;
+}) => EffectOwner;
+
+export const inMemoryOwnerFactory: EffectOwnerFactory = (o) =>
+  createInMemoryLedgerEffectOwner({ trust: o.trust, now: o.now, ledger: o.ledger, accounts: o.accounts });
+
+/**
  * A pinned gate with (by default) an in-memory ledger owner. Pass the same `world`, `clock`, `store` and
  * `roster` document with a different `ids` prefix to model a RESTART: same roster, gate key and epoch,
  * a new bootId, and a new (empty-history) ledger owner.
@@ -128,6 +144,8 @@ export function effectGate(opts: {
   log?: (event: string, fields: Record<string, unknown>) => void;
   /** Builds the engine from its dependencies (default `new GateEngine(deps)`), e.g. through `createGate`. */
   makeEngine?: (deps: GateEngineDeps) => GateEngine;
+  /** Builds the effect owner (default: the in-memory reference owner). */
+  ownerFactory?: EffectOwnerFactory;
 } = {}): EffectGate {
   const world = opts.world ?? newWorld();
   const clock = opts.clock ?? makeClock();
@@ -139,7 +157,7 @@ export function effectGate(opts: {
   const signer = countingSigner(trust);
   const owner = opts.owner === false
     ? null
-    : createInMemoryLedgerEffectOwner({ trust, now, ledger: opts.ledger ?? LEDGER, accounts: opts.accounts ?? DEFAULT_ACCOUNTS });
+    : (opts.ownerFactory ?? inMemoryOwnerFactory)({ trust, now, ledger: opts.ledger ?? LEDGER, accounts: opts.accounts ?? DEFAULT_ACCOUNTS, store });
   const deps: GateEngineDeps = {
     store,
     config: resolveGateConfig({ now, ...(opts.config ?? {}) }),
@@ -339,10 +357,11 @@ export function extendEnvelope(fx: EffectGate, holdId: string, extraMs: number):
  * roster changed by `rosterOver`, on `fx`'s BOOT: only the roster facts differ, so only the check under
  * test can refuse `fx`'s artifacts.
  */
-export function ownerOn(fx: EffectGate, rosterOver: Record<string, unknown>, prefix: string, ledger: string = LEDGER): { trust: GateTrust; owner: EffectOwner } {
+export function ownerOn(fx: EffectGate, rosterOver: Record<string, unknown>, prefix: string, ledger: string = LEDGER, ownerFactory: EffectOwnerFactory = inMemoryOwnerFactory): { trust: GateTrust; owner: EffectOwner } {
   const base = pinnedTrustFrom(rosterDoc(fx.world, fx.clock.t, rosterOver), fx.world.gate, { now: () => fx.clock.t, ids: idSource(prefix) });
   const trust: GateTrust = { ...base, bootId: fx.trust.bootId };
-  const owner = createInMemoryLedgerEffectOwner({ trust, now: () => fx.clock.t, ledger, accounts: DEFAULT_ACCOUNTS });
+  // Its own store: this owner is called directly and must not share records with `fx`'s owner.
+  const owner = ownerFactory({ trust, now: () => fx.clock.t, ledger, accounts: DEFAULT_ACCOUNTS, store: new InMemoryStore() });
   return { trust, owner };
 }
 

@@ -113,11 +113,13 @@ const ARM_TERMINAL_PROTOCOL = "noa-boundary-arm-terminal/1";
 const ARM_TERMINAL_PREFIX = "NOA_BOUNDARY_ARM_TERMINAL ";
 const ARM_CHILD_OUTPUT_MAX_BYTES = 1024 * 1024;
 // Counts are diagnostics only. The domain-separated, reviewed ID-set digests below are the case-plan
-// authority; both manifests were recalculated from these exact registered bytes by independent
-// execution and syntax-tree calculators.
-const ARM_DIAGNOSTIC_FULL_CASE_COUNT = 254;
+// authority; both manifests were first calculated from these exact registered bytes by independent
+// execution and syntax-tree calculators. The full digest was recalculated by executing this registry
+// when the five race-writer cases were added, with a calculation that reproduces each previous
+// reviewed full digest and its knockout substitution digest exactly.
+const ARM_DIAGNOSTIC_FULL_CASE_COUNT = 259;
 const ARM_DIAGNOSTIC_SPOOL_ONLY_CASE_COUNT = 23;
-const ARM_REVIEWED_FULL_CASE_PLAN_SHA256 = "f9f32d81c09d933e1c900b46c5fec5dbbb8fe9d0e21aefb27fe83adb53fbb12a";
+const ARM_REVIEWED_FULL_CASE_PLAN_SHA256 = "963311e62aabed0ed93b3b6310af057b420c3de1b25b41ddd3c5a69734db5a46";
 const ARM_REVIEWED_SPOOL_ONLY_CASE_PLAN_SHA256 = "a03420b437d9c15e9c0213844f6d911fc01494cba6ab658be242f22f2875e188";
 const ARM_TERMINAL_WATCHDOG_MS = 10 * 60 * 1000;
 
@@ -180,6 +182,11 @@ const ARM_STATIC_CASES = Object.freeze({
   case_ratchet_editing_the_file_makes_the_entry_stop_applying_a_suppre_a5d0fb95: defineArmCase("case.ratchet-editing-the-file-makes-the-entry-stop-applying-a-suppression-cannot-generalise", "ratchet: editing the file makes the entry stop applying — a suppression cannot generalise", ARM_FULL_ONLY),
   case_key_custody_a_regular_32_byte_0600_single_link_key_in_an_owner__d0eea8e7: defineArmCase("case.key-custody-a-regular-32-byte-0600-single-link-key-in-an-owner-only-directory-passes", "key custody: a regular 32-byte, 0600, single-link key in an owner-only directory passes", ARM_FULL_ONLY),
   case_key_custody_an_in_place_writer_is_refused_by_ctime_and_stable_d_0aeb5dae: defineArmCase("case.key-custody-an-in-place-writer-is-refused-by-ctime-and-stable-double-read-evidence", "key custody: an in-place writer is refused by ctime and stable double-read evidence", ARM_FULL_ONLY),
+  case_key_custody_the_race_writer_is_killed_when_the_arm_run_throws: defineArmCase("case.key-custody-the-race-writer-is-killed-when-the-arm-run-throws", "key custody: the race writer is killed when the arm's run throws", ARM_FULL_ONLY),
+  case_key_custody_the_race_writer_exits_by_itself_when_its_parent_is_killed: defineArmCase("case.key-custody-the-race-writer-exits-by-itself-when-its-parent-is-killed", "key custody: the race writer exits by itself when its parent is killed", ARM_FULL_ONLY),
+  case_key_custody_the_race_writer_exits_by_itself_at_its_lifetime_cap: defineArmCase("case.key-custody-the-race-writer-exits-by-itself-at-its-lifetime-cap", "key custody: the race writer exits by itself at its monotonic lifetime cap, also with a frozen wall clock, and a longer cap is refused", ARM_FULL_ONLY),
+  case_key_custody_the_stand_in_parent_and_its_writer_exit_when_the_arm_is_killed: defineArmCase("case.key-custody-the-stand-in-parent-and-its-writer-exit-by-themselves-when-the-arm-is-killed", "key custody: the stand-in parent and its writer exit by themselves when the arm is killed", ARM_FULL_ONLY),
+  case_key_custody_race_writer_observation_never_counts_an_unknown_process_as_gone_or_signals_it: defineArmCase("case.key-custody-race-writer-observation-never-counts-an-unknown-process-as-gone-or-signals-it", "key custody: race-writer observation never counts an unknown process as gone, and never signals a pid", ARM_FULL_ONLY),
   case_exclusion_migration_valid_reviewed_input_creates_one_0600_singl_e5f7cabb: defineArmCase("case.exclusion-migration-valid-reviewed-input-creates-one-0600-single-link-canonical-v3-policy-and-print-e5f7cabb", "exclusion migration: valid reviewed input creates one 0600 single-link canonical v3 policy and prints no values", ARM_FULL_ONLY),
   case_exclusion_policy_an_authenticated_narrowed_current_control_mani_9a94c19e: defineArmCase("case.exclusion-policy-an-authenticated-narrowed-current-control-manifest-is-refused", "exclusion policy: an authenticated narrowed current control manifest is refused", ARM_FULL_ONLY),
   case_exclusion_policy_an_authenticated_wrong_current_control_manifes_1cfef9ee: defineArmCase("case.exclusion-policy-an-authenticated-wrong-current-control-manifest-version-is-refused", "exclusion policy: an authenticated wrong current control-manifest version is refused", ARM_FULL_ONLY),
@@ -1531,6 +1538,176 @@ function materializeScannerRuntime(sourceRoot, destinationRoot) {
     copied.push(relativePath);
   }
   return Object.freeze({ files: Object.freeze(copied), version: locked.version });
+}
+
+// ── THE KEY-CUSTODY RACE WRITER ─────────────────────────────────────────────────────────────────
+// The in-place-writer case needs a process that rewrites a file for as long as one gate run reads
+// it. MEASURED: when that writer was an endless loop killed only after `run()` returned, an arm that
+// threw or was killed first left it behind — three such writers, reparented to init, rewrote 1 MiB
+// in a loop at about 40% CPU each for 10 to 12 hours. The writer now bounds its OWN life, so no
+// abort of the arm can leave it running: it stops as soon as its parent is gone (its parent pid
+// changes, which is how a killed parent shows) and in any case at a hard lifetime cap, measured on a
+// monotonic clock so a wall-clock step backwards cannot extend it. The helper below also kills it
+// through its own process handle in `finally`, so an ordinary throw does not have to wait for either.
+//
+// Nothing here ever signals a process by bare pid. A writer whose parent is gone has been handed to
+// another process to collect; once collected, its pid can belong to anything, so a signal sent to
+// that number can reach a stranger. An orphaned writer is only observed until it ends itself.
+const RACE_WRITER_MAX_LIFETIME_MS = 30_000;
+const RACE_WRITER_SOURCE = `
+const fs = require("node:fs");
+// The fifth argument is an identity token that only makes this process recognizable by pid.
+const [target, ready, parentText, lifetimeText] = process.argv.slice(1);
+const parent = Number(parentText);
+const requested = Number(lifetimeText);
+const lifetime = Number.isSafeInteger(requested) && requested > 0 && requested <= ${RACE_WRITER_MAX_LIFETIME_MS}
+  ? requested : ${RACE_WRITER_MAX_LIFETIME_MS};
+const started = process.hrtime.bigint();
+const limit = BigInt(lifetime) * 1000000n;
+const size = 1024 * 1024;
+let turn = 0;
+fs.writeFileSync(ready, "ready");
+process.stdout.write("ready\\n");
+while (process.ppid === parent && process.hrtime.bigint() - started < limit) {
+  const fd = fs.openSync(target, "r+");
+  const bytes = Buffer.alloc(size, turn++ % 2 === 0 ? 0x61 : 0x62);
+  fs.writeSync(fd, bytes, 0, bytes.length, 0);
+  fs.closeSync(fd);
+}
+process.exit(0);
+`;
+// The stand-in processes below exist only so the arm can reproduce a killed parent. Each is bounded
+// exactly like the writer — it stops when its own parent pid changes and at the same monotonic cap —
+// so the arm being killed while one of them is running cannot leave it behind either.
+const RACE_WRITER_BOUND_SOURCE = `
+const boundParent = Number(process.argv[process.argv.length - 1]);
+const boundStarted = process.hrtime.bigint();
+const boundLimit = BigInt(${RACE_WRITER_MAX_LIFETIME_MS}) * 1000000n;
+setInterval(() => {
+  if (process.ppid !== boundParent || process.hrtime.bigint() - boundStarted >= boundLimit) process.exit(0);
+}, 50);
+`;
+// A parent that starts the writer exactly as the arm does and then only waits, so the arm can kill
+// it with SIGKILL the way a watchdog or an operator kills a stuck arm. The writer shares this
+// parent's stdout, so the arm's end-of-file on that pipe is the writer's own exit.
+const RACE_WRITER_PARENT_SOURCE = `
+const { spawn } = require("node:child_process");
+const [writerSource, target, ready, lifetime, token] = process.argv.slice(1);
+const writer = spawn(process.execPath, ["-e", writerSource, target, ready, String(process.pid), lifetime, token], {
+  stdio: ["ignore", "inherit", "ignore"],
+});
+process.stdout.write("writer " + writer.pid + "\\n");
+${RACE_WRITER_BOUND_SOURCE}`;
+// An arm stand-in that starts the parent above and is then killed in its place, reproducing an arm
+// killed between starting the parent and killing it.
+const RACE_WRITER_ARM_STAND_IN_SOURCE = `
+const { spawn } = require("node:child_process");
+const [parentSource, writerSource, target, ready, lifetime, token] = process.argv.slice(1);
+const helper = spawn(process.execPath, ["-e", parentSource, writerSource, target, ready, lifetime, token, String(process.pid)], {
+  stdio: ["ignore", "inherit", "ignore"],
+});
+process.stdout.write("helper " + helper.pid + "\\n");
+${RACE_WRITER_BOUND_SOURCE}`;
+
+const raceWriterToken = () => `noa-race-writer-${randomBytes(8).toString("hex")}`;
+
+/** Start the race writer, run `body(writer, token)` while it writes, and kill it however `body` ends. */
+async function withRaceWriter({ target, ready, maxLifetimeMs = RACE_WRITER_MAX_LIFETIME_MS }, body) {
+  if (!Number.isSafeInteger(maxLifetimeMs) || maxLifetimeMs < 1 || maxLifetimeMs > RACE_WRITER_MAX_LIFETIME_MS) {
+    throw new RangeError(`race writer lifetime must be 1..${RACE_WRITER_MAX_LIFETIME_MS} ms`);
+  }
+  const token = raceWriterToken();
+  const writer = spawn(
+    process.execPath,
+    ["-e", RACE_WRITER_SOURCE, target, ready, String(process.pid), String(maxLifetimeMs), token],
+    { stdio: ["ignore", "pipe", "ignore"] },
+  );
+  try {
+    await new Promise((resolveReady, rejectReady) => {
+      const timeout = setTimeout(() => rejectReady(new Error("race writer did not become ready")), 2_000);
+      writer.stdout.once("data", () => { clearTimeout(timeout); resolveReady(); });
+      writer.once("error", (error) => { clearTimeout(timeout); rejectReady(error); });
+    });
+    return await body(writer, token);
+  } finally {
+    writer.kill("SIGKILL");
+  }
+}
+
+/** Resolve with the child's exit once it has been reaped, or with null after `timeoutMs`. */
+function raceWriterExit(child, timeoutMs) {
+  return new Promise((resolveExit) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolveExit(Object.freeze({ code: child.exitCode, signal: child.signalCode }));
+      return;
+    }
+    const timeout = setTimeout(() => resolveExit(null), timeoutMs);
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      resolveExit(Object.freeze({ code, signal }));
+    });
+  });
+}
+
+/**
+ * The live process reads. They are a parameter of the observation below only so that its decisions
+ * can be exercised on exact interleavings; signal 0 is the only signal the observation ever sends.
+ */
+const LIVE_PROCESS_PROBES = Object.freeze({
+  signal: (pid, signal) => process.kill(pid, signal),
+  readStat: (pid) => readFileSync(`/proc/${pid}/stat`, "utf8"),
+  readCommandLine: (pid) => {
+    try {
+      return readFileSync(`/proc/${pid}/cmdline`, "utf8");
+    } catch {
+      const listed = spawnSync("ps", ["-ww", "-p", String(pid), "-o", "command="], { encoding: "utf8", shell: false });
+      return listed.status === 0 && typeof listed.stdout === "string" ? listed.stdout : null;
+    }
+  },
+});
+
+/**
+ * What can be said about THIS race writer: GONE, PRESENT, or UNKNOWN. A pid alone is not an
+ * identity — once the writer has been collected the number can be handed to an unrelated process —
+ * so PRESENT needs the writer's token in the command line held by that pid. GONE needs positive
+ * evidence: no process holds the pid, it holds a zombie (exited, holding no file, waiting to be
+ * collected, which an init inside a container may never do), or it holds a different command line.
+ * When a process holds the pid and its identity cannot be read, the answer is UNKNOWN, never GONE.
+ */
+function raceWriterPresence(pid, token, probes = LIVE_PROCESS_PROBES) {
+  if (!Number.isSafeInteger(pid) || pid < 1 || typeof token !== "string" || token.length === 0) return "UNKNOWN";
+  try {
+    probes.signal(pid, 0);
+  } catch (error) {
+    if (error?.code === "ESRCH") return "GONE";
+    // EPERM or anything else: some process holds the pid, and only its identity says whose it is.
+  }
+  try {
+    const stat = String(probes.readStat(pid));
+    const close = stat.lastIndexOf(")");
+    const state = close === -1 ? "" : stat.slice(close + 2, close + 3);
+    if (state === "Z" || state === "X") return "GONE";
+  } catch {
+    // Not Linux, or the read was refused: the identity read below decides.
+  }
+  let commandLine = null;
+  try {
+    commandLine = probes.readCommandLine(pid);
+  } catch {
+    commandLine = null;
+  }
+  if (typeof commandLine !== "string") return "UNKNOWN";
+  return commandLine.includes(token) ? "PRESENT" : "GONE";
+}
+
+/** Observe until the race writer is GONE, for at most `timeoutMs`; true only on positive evidence. */
+async function raceWriterGone(pid, token, timeoutMs, probes = LIVE_PROCESS_PROBES) {
+  const deadline = performance.now() + timeoutMs;
+  for (;;) {
+    if (raceWriterPresence(pid, token, probes) === "GONE") return true;
+    if (performance.now() >= deadline) return false;
+    await new Promise((resolvePoll) => setTimeout(resolvePoll, 50));
+  }
 }
 
 export async function runArm({ root, knockoutJson, spoolOnly = false }) {
@@ -3363,28 +3540,7 @@ process.exit(9);
       const ready = join(keyFixtureHome, "writer-ready");
       writeFileSync(target, Buffer.alloc(1024 * 1024, 0x61), { mode: KEY_MODE });
       chmodSync(target, KEY_MODE);
-      const writer = spawn(process.execPath, ["-e", `
-const fs = require("node:fs");
-const target = process.argv[1];
-const ready = process.argv[2];
-const size = 1024 * 1024;
-let turn = 0;
-fs.writeFileSync(ready, "ready");
-process.stdout.write("ready\\n");
-while (true) {
-  const fd = fs.openSync(target, "r+");
-  const bytes = Buffer.alloc(size, turn++ % 2 === 0 ? 0x61 : 0x62);
-  fs.writeSync(fd, bytes, 0, bytes.length, 0);
-  fs.closeSync(fd);
-}
-`, target, ready], { stdio: ["ignore", "pipe", "ignore"] });
-      await new Promise((resolveReady, rejectReady) => {
-        const timeout = setTimeout(() => rejectReady(new Error("race writer did not become ready")), 2_000);
-        writer.stdout.once("data", () => { clearTimeout(timeout); resolveReady(); });
-        writer.once("error", (error) => { clearTimeout(timeout); rejectReady(error); });
-      });
-      const raced = run(["--lane", "L-WT"], { env: fixtureEnv });
-      writer.kill("SIGKILL");
+      const raced = await withRaceWriter({ target, ready }, () => run(["--lane", "L-WT"], { env: fixtureEnv }));
       check(
         ARM_STATIC_CASES.case_key_custody_an_in_place_writer_is_refused_by_ctime_and_stable_d_0aeb5dae,
         raced.code === 2 && raced.findings.some((finding) =>
@@ -3393,6 +3549,207 @@ while (true) {
         `exit ${raced.code}; subjects ${JSON.stringify(raced.findings.map((finding) => finding.subject))}`,
       );
       restore();
+    }
+    // The race writer's own lifetime, observed by pid and identity token. A writer this arm still
+    // holds as its own child is stopped through that handle; an orphaned one is only watched, and a
+    // case that still sees it after the bound FAILS rather than signal a pid that may be reused.
+    {
+      const target = join(work, "race-writer-throw-target");
+      const ready = join(work, "race-writer-throw-ready");
+      writeFileSync(target, Buffer.alloc(1024 * 1024, 0x61));
+      let writerHandle = null;
+      let writerToken = null;
+      let exited = Promise.resolve(null);
+      let thrown = null;
+      try {
+        await withRaceWriter({ target, ready }, (writer, token) => {
+          writerHandle = writer;
+          writerToken = token;
+          exited = raceWriterExit(writer, 5_000);
+          throw new Error("synthetic arm run failure");
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      const exit = await exited;
+      const gone = await raceWriterGone(writerHandle?.pid ?? null, writerToken, 5_000);
+      writerHandle?.kill("SIGKILL");
+      check(
+        ARM_STATIC_CASES.case_key_custody_the_race_writer_is_killed_when_the_arm_run_throws,
+        thrown?.message === "synthetic arm run failure" && exit !== null && exit.signal === "SIGKILL" && gone,
+        `thrown ${JSON.stringify(thrown?.message ?? null)}; exit ${JSON.stringify(exit)}; pid ${writerHandle?.pid} gone ${gone}`,
+      );
+    }
+    // Starts one of the stand-in chains above, waits for every pid line it names and for the writer
+    // to be ready, then kills the process this arm holds with SIGKILL and only watches the rest.
+    const killStandInAndWatch = async ({ source, args, names }) => {
+      const writerToken = raceWriterToken();
+      const child = spawn(process.execPath, ["-e", source, ...args, writerToken, String(process.pid)], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      let output = "";
+      let childError = null;
+      child.once("error", (error) => { childError = error; });
+      // End of file on the shared stdout arrives only when the last holder has exited.
+      const closed = new Promise((resolveClosed) => {
+        child.stdout.on("data", (chunk) => { output += chunk.toString("utf8"); });
+        child.stdout.once("end", () => resolveClosed(true));
+      });
+      const pidOf = (name) => {
+        const match = new RegExp(`^${name} (\\d+)$`, "m").exec(output);
+        return match === null ? null : Number(match[1]);
+      };
+      const started = performance.now();
+      while ((names.some((name) => pidOf(name) === null) || !/^ready$/m.test(output))
+          && performance.now() - started < 5_000) {
+        await new Promise((resolvePoll) => setTimeout(resolvePoll, 20));
+      }
+      const pids = Object.fromEntries(names.map((name) => [name, pidOf(name)]));
+      const runningBeforeKill = /^ready$/m.test(output)
+        && names.every((name) => raceWriterPresence(pids[name], writerToken) === "PRESENT");
+      child.kill("SIGKILL");
+      // Well inside the 30 s lifetime cap, so only the parent-death checks can end them in time.
+      const eof = await Promise.race([closed, new Promise((resolveLate) => setTimeout(() => resolveLate(false), 10_000))]);
+      const gone = {};
+      for (const name of names) gone[name] = await raceWriterGone(pids[name], writerToken, 5_000);
+      child.stdout.destroy();
+      return Object.freeze({
+        childError,
+        elapsedMs: performance.now() - started,
+        eof,
+        gone: Object.freeze(gone),
+        pids: Object.freeze(pids),
+        runningBeforeKill,
+      });
+    };
+    {
+      const target = join(work, "race-writer-orphan-target");
+      const ready = join(work, "race-writer-orphan-ready");
+      writeFileSync(target, Buffer.alloc(1024 * 1024, 0x61));
+      const seen = await killStandInAndWatch({
+        source: RACE_WRITER_PARENT_SOURCE,
+        args: [RACE_WRITER_SOURCE, target, ready, String(RACE_WRITER_MAX_LIFETIME_MS)],
+        names: ["writer"],
+      });
+      check(
+        ARM_STATIC_CASES.case_key_custody_the_race_writer_exits_by_itself_when_its_parent_is_killed,
+        seen.childError === null && seen.runningBeforeKill && seen.eof === true && seen.gone.writer
+          && seen.elapsedMs < RACE_WRITER_MAX_LIFETIME_MS,
+        canonicalJson({ ...seen, childError: seen.childError?.message ?? null, elapsedMs: Math.round(seen.elapsedMs) }),
+      );
+    }
+    {
+      const target = join(work, "race-writer-stand-in-target");
+      const ready = join(work, "race-writer-stand-in-ready");
+      writeFileSync(target, Buffer.alloc(1024 * 1024, 0x61));
+      const seen = await killStandInAndWatch({
+        source: RACE_WRITER_ARM_STAND_IN_SOURCE,
+        args: [RACE_WRITER_PARENT_SOURCE, RACE_WRITER_SOURCE, target, ready, String(RACE_WRITER_MAX_LIFETIME_MS)],
+        names: ["helper", "writer"],
+      });
+      check(
+        ARM_STATIC_CASES.case_key_custody_the_stand_in_parent_and_its_writer_exit_when_the_arm_is_killed,
+        seen.childError === null && seen.runningBeforeKill && seen.eof === true && seen.gone.helper
+          && seen.gone.writer && seen.elapsedMs < RACE_WRITER_MAX_LIFETIME_MS,
+        canonicalJson({ ...seen, childError: seen.childError?.message ?? null, elapsedMs: Math.round(seen.elapsedMs) }),
+      );
+    }
+    {
+      const target = join(work, "race-writer-cap-target");
+      const ready = join(work, "race-writer-cap-ready");
+      writeFileSync(target, Buffer.alloc(1024 * 1024, 0x61));
+      let writerHandle = null;
+      let writerToken = null;
+      let exit = null;
+      let capError = null;
+      // The body waits while the arm is alive and has not killed the writer, so an exit with code 0
+      // and no signal can only be the writer's own lifetime cap.
+      try {
+        exit = await withRaceWriter({ target, ready, maxLifetimeMs: 500 }, (writer, token) => {
+          writerHandle = writer;
+          writerToken = token;
+          return raceWriterExit(writer, 10_000);
+        });
+      } catch (error) {
+        capError = error;
+      }
+      const gone = await raceWriterGone(writerHandle?.pid ?? null, writerToken, 5_000);
+      writerHandle?.kill("SIGKILL");
+      // The same cap with the wall clock frozen: a clock that never advances, like one stepped back,
+      // must not extend it.
+      const frozenToken = raceWriterToken();
+      const frozen = spawn(process.execPath, [
+        "--import", "data:text/javascript,Date.now=()=>0;",
+        "-e", RACE_WRITER_SOURCE, target, `${ready}-frozen`, String(process.pid), "500", frozenToken,
+      ], { stdio: ["ignore", "ignore", "ignore"] });
+      const frozenExit = await raceWriterExit(frozen, 10_000);
+      frozen.kill("SIGKILL");
+      let longerCapRefused = false;
+      let longerCapStarted = false;
+      try {
+        await withRaceWriter(
+          { target, ready, maxLifetimeMs: RACE_WRITER_MAX_LIFETIME_MS + 1 },
+          () => { longerCapStarted = true; },
+        );
+      } catch (error) {
+        longerCapRefused = error instanceof RangeError;
+      }
+      check(
+        ARM_STATIC_CASES.case_key_custody_the_race_writer_exits_by_itself_at_its_lifetime_cap,
+        capError === null && exit !== null && exit.code === 0 && exit.signal === null && gone
+          && frozenExit !== null && frozenExit.code === 0 && frozenExit.signal === null
+          && longerCapRefused && !longerCapStarted,
+        `exit ${JSON.stringify(exit)}; pid ${writerHandle?.pid} gone ${gone}; frozen-clock exit ${JSON.stringify(frozenExit)}; ` +
+          `longer cap refused ${longerCapRefused}; error ${JSON.stringify(capError?.message ?? null)}`,
+      );
+    }
+    {
+      // The observation's decisions on exact interleavings. Every probe below is a stub; the only
+      // signal the observation may send is 0.
+      const token = raceWriterToken();
+      const pid = 4_194_000;
+      const own = `node -e <writer> target ready 1 500 ${token}`;
+      const sent = [];
+      const probes = ({ signal = () => {}, readStat = () => { throw Object.assign(new Error("no /proc"), { code: "ENOENT" }); }, readCommandLine }) => ({
+        signal: (target, value) => { if (value !== 0) sent.push([target, value]); return signal(target, value); },
+        readStat,
+        readCommandLine,
+      });
+      const refused = () => { throw Object.assign(new Error("refused"), { code: "EACCES" }); };
+      const esrch = () => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); };
+      const eperm = () => { throw Object.assign(new Error("not ours"), { code: "EPERM" }); };
+      const replacementAfterFirstRead = () => {
+        let reads = 0;
+        return () => (reads++ === 0 ? own : "/usr/sbin/an-unrelated-process");
+      };
+      const observed = {
+        unreadableIdentity: raceWriterPresence(pid, token, probes({ readStat: refused, readCommandLine: () => null })),
+        refusedIdentityRead: raceWriterPresence(pid, token, probes({ readStat: refused, readCommandLine: refused })),
+        unreadableNotGoneInTime: await raceWriterGone(pid, token, 200, probes({ readCommandLine: () => null })),
+        foreignOwnerUnreadable: raceWriterPresence(pid, token, probes({ signal: eperm, readCommandLine: () => null })),
+        foreignOwnerOtherProcess: raceWriterPresence(pid, token, probes({ signal: eperm, readCommandLine: () => "/sbin/other" })),
+        present: raceWriterPresence(pid, token, probes({ readCommandLine: () => own })),
+        zombie: raceWriterPresence(pid, token, probes({ readStat: () => `${pid} (node) Z 1 1 1`, readCommandLine: () => own })),
+        noProcess: raceWriterPresence(pid, token, probes({ signal: esrch, readCommandLine: () => own })),
+        // The reuse interleaving: the pid first reads as this writer, is then collected and handed on.
+        reusedAfterFirstRead: await raceWriterGone(pid, token, 1_000, probes({ readCommandLine: replacementAfterFirstRead() })),
+      };
+      const expected = {
+        unreadableIdentity: "UNKNOWN",
+        refusedIdentityRead: "UNKNOWN",
+        unreadableNotGoneInTime: false,
+        foreignOwnerUnreadable: "UNKNOWN",
+        foreignOwnerOtherProcess: "GONE",
+        present: "PRESENT",
+        zombie: "GONE",
+        noProcess: "GONE",
+        reusedAfterFirstRead: true,
+      };
+      check(
+        ARM_STATIC_CASES.case_key_custody_race_writer_observation_never_counts_an_unknown_process_as_gone_or_signals_it,
+        canonicalJson(observed) === canonicalJson(expected) && sent.length === 0,
+        `observed ${canonicalJson(observed)}; signals other than 0 ${JSON.stringify(sent)}`,
+      );
     }
     failClosed(
       ARM_FAIL_CLOSED_CASES.fail_a_31_byte_boundary_key,

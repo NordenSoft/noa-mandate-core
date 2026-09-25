@@ -674,6 +674,37 @@ object that implements the owner interface, checking only its canonical, its boo
 it is not already bound: an embedder-supplied owner is trusted code, and what it does is not verified
 by the gate.
 
+### NC-S9.12 — Passing the owner conformance runner is not correctness
+
+An embedder's owner that runs `verifyEffectAuthority`, `deriveLedgerCommit` and
+`verifyEffectAttestation` shares the reference owner's signed-bytes and attestation checks, and one
+that passes `runEffectOwnerConformance` and `effectOwnerKeyringProof` meets the reference owner's
+tests. Neither shows that what stays the owner's own is correct: its re-entry guard (in-process state
+in the reference owner; a durable owner needs an equivalent guard at transaction level), its record
+(uniqueness, balances, the write and the grant's consumption in one step) and its store.
+
+### NC-S9.13 — A supervisor-supplied boot is taken as given
+
+The gate checks only that a supplied `bootId` is 32 lowercase hex characters and that the
+`bootStartedAt` supplied with it is a canonical UTC instant not later than this process's clock plus
+five seconds. It cannot tell a fresh 128-bit value from a constant a supervisor reuses across restarts.
+With a reused identifier, decide and the effect owner both still refuse a hold whose gate-signed freeze
+time precedes the supplied boot start; a supervisor that also reuses the start instant defeats that
+too (NC-S9.2).
+
+### NC-S9.14 — One transition out of PENDING is atomic only in a store that makes it so
+
+`settleHold` is atomic in the in-memory store because its compare and writes are one synchronous
+block. A durable store must express it as one transaction whose compare is the stored status; the gate
+cannot tell a store that reads and then writes, and such a store restores the race it replaced.
+
+### NC-S9.15 — The Gate-pin fingerprint is a display
+
+`noa.gate-pin/1` (`docs/gate-pin-spec.md`) is an 80-bit comparison string. Equal strings mean a device
+was offered the tenant, kid and key the Gate host printed; they do not show that the host is
+uncompromised, that the key is still the Gate's, or that the person compared them. Nothing accepts a
+key because of it.
+
 ## R1. Package release controller — what a released `noa-receipt` version does and does not establish
 
 `.github/workflows/release-npm-noa-receipt.yml` stages `noa-receipt` on npm and never publishes it

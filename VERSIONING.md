@@ -121,7 +121,7 @@ nobody has to discover it from a failing pipeline:
   `0.8.0` over your archive. Anything that was `VALID` and is now `MALFORMED` is a receipt whose own
   contents disagree with each other, and the error message names the two fields that do.
 
-### 3.2 Exception 2 — refusal labels under the optional lifecycle keyring (added after 0.8.0)
+### 3.2 Exception 2 — refusal labels under the optional lifecycle keyring (added 0.9.0)
 
 This one changes label compatibility only. Under the optional `noa.signing-key-lifecycle/0.1`
 keyring, `verifyChain` now authenticates a retired key's signature against its retained public

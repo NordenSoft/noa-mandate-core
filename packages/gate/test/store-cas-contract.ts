@@ -31,7 +31,11 @@ function detach<T>(value: T): T {
 }
 
 export class DetachedStore implements Store {
-  private readonly inner = new InMemoryStore();
+  /**
+   * The authoritative state. Two `DetachedStore`s over ONE `inner` model two processes over one
+   * database: each reads its own detached copies, and every write lands on the shared state.
+   */
+  constructor(private readonly inner: InMemoryStore = new InMemoryStore()) {}
   /** Every CAS attempt, won or lost — so a test can assert the engine went through the primitive. */
   readonly casAttempts: Array<{ kind: "status" | "reported"; grantId: string; won: boolean }> = [];
 
@@ -104,5 +108,10 @@ export class DetachedStore implements Store {
     const won = this.inner.claimGrantReported(grantId, at);
     this.casAttempts.push({ kind: "reported", grantId, won: won !== null });
     return won ? detach(won) : null;
+  }
+
+  settleHold(next: HoldRecord, grant: GrantRecord | null): boolean {
+    // ONE indivisible step against the authoritative state, like the grant CAS above.
+    return this.inner.settleHold(detach(next), grant === null ? null : detach(grant));
   }
 }
