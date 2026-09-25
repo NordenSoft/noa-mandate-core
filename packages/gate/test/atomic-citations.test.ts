@@ -10,7 +10,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lstatSync, readFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -20,13 +20,18 @@ type Findings = { problems: string[]; checked: Array<{ doc: string; line: number
 type Rule = (md: string, readSource: (path: string) => string | null, docName: string) => Findings;
 
 function readRepoSource(path: string): string | null {
-  const abs = join(ROOT, path);
+  // One open without following a symlink, then fstat and read on that descriptor: no check-then-read race.
+  let fd: number;
   try {
-    if (!lstatSync(abs).isFile()) return null;
+    fd = openSync(join(ROOT, path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   } catch {
     return null;
   }
-  return readFileSync(abs, "utf8");
+  try {
+    return fstatSync(fd).isFile() ? readFileSync(fd, "utf8") : null;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 test("ATOMIC-CITATION — every line citation in an \"atomic\" sentence of NON-CLAIMS.md and CHANGELOG.md names exactly its tagged block", async () => {

@@ -95,7 +95,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, mkdtempSync, openSync, readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -985,13 +985,18 @@ for (const { file, docName, requireQuickstart } of GATED_DOCUMENTS) {
 // Rule 9 — ATOMIC CITATION, over the claim boundary and the release notes. Repository-only: a source is
 // read only when it is a regular file inside the repository (no symlink is followed).
 function readRepoSource(path) {
-  const abs = join(ROOT, path);
+  // One open without following a symlink, then fstat and read on that descriptor: no check-then-read race.
+  let fd;
   try {
-    if (!lstatSync(abs).isFile()) return null;
+    fd = openSync(join(ROOT, path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   } catch {
     return null;
   }
-  return readFileSync(abs, "utf8");
+  try {
+    return fstatSync(fd).isFile() ? readFileSync(fd, "utf8") : null;
+  } finally {
+    closeSync(fd);
+  }
 }
 for (const file of ATOMIC_CITATION_DOCUMENTS) {
   console.log(`\n── ${file} (atomic citations) ──`);
