@@ -225,7 +225,7 @@ export function isRosterId(v: unknown): v is string {
 }
 
 /** 1..256 printable ASCII characters (0x21-0x7E): no space, no control, no non-ASCII. */
-function isTenant(v: unknown): v is string {
+export function isTenant(v: unknown): v is string {
   if (typeof v !== "string") return false;
   const n = v.length;
   if (n === 0 || n > MAX_TENANT) return false;

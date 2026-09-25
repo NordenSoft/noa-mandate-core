@@ -95,7 +95,8 @@ test("ENFORCED golden chain: hold→decision→reserve→execute→consumption�
   }));
   assert.ok(consCheck.ok, `consumption: ${consCheck.reason}`);
 
-  const resolution = hold.holdResolution!;
+  // Re-read after decide: a decided hold is a new record, never the object read before it.
+  const resolution = store.getHold(holdId)!.holdResolution!;
   const resCheck = verifyArtifact(b(resolution as unknown as Record<string, unknown>), b({
     schemas,
     keyring,

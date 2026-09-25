@@ -47,12 +47,13 @@
 import { parseDocument, refHash, receiptRefHash, verifyArtifact, virtualHash } from "noa-approval-artifacts";
 import { intrinsics, projectLedgerTransfer, verifyChain, LEDGER_TRANSFER_CANONICAL } from "noa-receipt";
 import { encodeDocument } from "./bytes.js";
-import { getProjection } from "./projections.js";
+import { getProjection, type DisplayProjection } from "./projections.js";
 import { loadSchemas } from "./schemas.js";
 import { buildAttemptReceipt } from "./receipts.js";
 import { buildConsumption } from "./grants.js";
 import type { ExecutionSigner } from "./exec-signer.js";
-import type { GateKeyPair, GateTrust } from "./trust.js";
+import type { Store } from "./store.js";
+import { frozenBeforeBoot, type GateKeyPair, type GateTrust } from "./trust.js";
 import type { EncryptedDisplay, ExecutionConsumption, ExecutionGrant, HoldEnvelope, Receipt, RiskClass } from "./types.js";
 
 const { hasOwn } = intrinsics;
@@ -103,7 +104,9 @@ export type EffectRefusalCode =
   | "LEDGER_NOT_OWNED"
   | "LEDGER_SAME_ACCOUNT"
   | "EFFECT_SIGNER_UNAVAILABLE"
-  | "EFFECT_ATTESTATION_INVALID";
+  | "EFFECT_ATTESTATION_INVALID"
+  /** An owner with its own durable store could not reach it: nothing was written; the commit may be retried. */
+  | "EFFECT_STORE_UNAVAILABLE";
 
 /** A refusal that writes a terminal, unsigned REFUSED row: the authority is consumed without an effect. */
 export type LedgerRefusalCode = "LEDGER_ACCOUNT_UNKNOWN" | "LEDGER_INSUFFICIENT_FUNDS";
@@ -150,6 +153,14 @@ export interface EffectOwner {
   readonly bootId: string;
   /** True once an engine has bound this owner. */
   readonly bound: boolean;
+  /**
+   * Set when this owner records the grant's consumption itself, in the same step as its row (a durable
+   * owner over the engine's own store). The engine then does not mirror the consumption, and refuses at
+   * construction an owner whose `store` is not the engine's store (EFFECT_OWNER_STORE_MISMATCH).
+   */
+  readonly recordsGrantConsumption?: true;
+  /** The store the owner records the grant's consumption in. Required with `recordsGrantConsumption`. */
+  readonly store?: Store;
   /** Bind this owner to one engine; a second engine is refused (EFFECT_OWNER_ALREADY_BOUND). */
   bindEngine(engine: object): void;
   /** createHold-time admission: does this owner commit the ledger the transfer names? No account check. */
@@ -338,6 +349,362 @@ type AuthorityCheck =
   | { ok: true; verified: VerifiedAuthority; keys: { envelope: string; decision: string; grant: string } }
   | { ok: false; token: string };
 
+/** The schemas every verification context carries. Module-private; loaded by `prepareEffectVerification`. */
+let verificationSchemas: Record<string, unknown> | null = null;
+
+/**
+ * Load what the exported checks verify with (the artifact schemas), once. An owner calls it at
+ * construction, so a missing schema stops the boot instead of the first commit. Idempotent.
+ */
+export function prepareEffectVerification(): void {
+  if (verificationSchemas === null) verificationSchemas = loadSchemas();
+}
+
+/**
+ * THE ONE VERIFICATION CONTEXT, so a trust root's keyring is consumed at exactly one site: every signed
+ * artifact an effect-owned commit rests on or produces is verified through it.
+ */
+function verificationContext(trust: GateTrust, extra: Record<string, unknown>): Uint8Array {
+  prepareEffectVerification();
+  return encodeDocument({
+    schemas: verificationSchemas,
+    keyring: trust.keyring,
+    ...extra,
+  });
+}
+
+/** The ONE receipt-chain check: signatures under the trust root's receipt keyring, linkage, one tenant. */
+function chainValid(trust: GateTrust, receipts: readonly unknown[]): boolean {
+  return verifyChain(encodeDocument(receipts), { keyring: encodeDocument(trust.receiptKeyring), requireTenantConsistency: true }).status === "VALID";
+}
+
+/** O1 — every signed byte the commit rests on, verified here, in a fixed order. First failure wins. */
+function verifySignedAuthority(trust: GateTrust, registered: DisplayProjection, input: EffectCommitInput, nowIso: string): AuthorityCheck {
+  // (1) the hold envelope: signed by this gate's hold-signer, for this tenant and gate, at this epoch.
+  const env = snapshotOf(input.holdEnvelope, "hold envelope");
+  if (env === null) return { ok: false, token: "envelope" };
+  if (!verifyArtifact(env.bytes, verificationContext(trust, { now: nowIso })).ok) return { ok: false, token: "envelope" };
+  if (stringAt(env.doc, "tenant") !== trust.tenant || stringAt(env.doc, "gateKid") !== trust.gate.kid) {
+    return { ok: false, token: "envelope-audience" };
+  }
+  if (stringAt(env.doc, "holdId") !== input.holdId) return { ok: false, token: "envelope-hold" };
+  if (valueAt(env.doc, "keyManifestVersion") !== trust.keyManifestVersion || stringAt(env.doc, "keyManifestHash") !== trust.keyManifestHash) {
+    return { ok: false, token: "envelope-epoch" };
+  }
+
+  // (2) the deferred receipt is the one the envelope binds, for this owner's canonical, and the
+  //     envelope names the registered projection identities.
+  const deferred = snapshotOf(input.deferredReceipt, "deferred receipt");
+  if (deferred === null) return { ok: false, token: "deferred-binding" };
+  const deferredAction = recordAt(deferred.doc, "action");
+  if (
+    receiptRefHash(deferred.doc) !== stringAt(env.doc, "deferredReceiptHash") ||
+    stringAt(deferredAction, "canonical") !== registered.canonical
+  ) {
+    return { ok: false, token: "deferred-binding" };
+  }
+  if (
+    stringAt(env.doc, "mode") !== "ENFORCED" ||
+    !sameIdentity(recordAt(env.doc, "actionSchema"), registered.actionSchema) ||
+    !sameIdentity(recordAt(env.doc, "displayProjection"), registered.displayProjection)
+  ) {
+    return { ok: false, token: "projection-identity" };
+  }
+
+  // (3) the approval receipt: the deferred and approval receipts verify under the receipt keyring
+  //     and link, and the verdict is ALLOWED.
+  const approval = snapshotOf(input.approvalReceipt, "approval receipt");
+  if (approval === null) return { ok: false, token: "receipt-chain" };
+  if (!chainValid(trust, [deferred.doc, approval.doc])) return { ok: false, token: "receipt-chain" };
+  if (stringAt(recordAt(approval.doc, "governance"), "verdict") !== "ALLOWED") return { ok: false, token: "approval-verdict" };
+  const approvalAction = recordAt(approval.doc, "action");
+  for (let i = 0; i < ACTION_FIELDS.length; i++) {
+    const f = ACTION_FIELDS[i]!;
+    if (valueAt(approvalAction, f) === undefined || valueAt(approvalAction, f) !== valueAt(deferredAction, f)) return { ok: false, token: "approval-action" };
+  }
+
+  // (4) the execution grant, signed by the execution-signer, bound to this hold, this envelope,
+  //     this approval receipt and this action's params hash.
+  const grant = snapshotOf(input.grant, "execution grant");
+  if (grant === null) return { ok: false, token: "grant" };
+  if (!verifyArtifact(grant.bytes, verificationContext(trust, { now: nowIso })).ok) return { ok: false, token: "grant" };
+  const envelopeHash = refHash(env.doc);
+  const bindings: ReadonlyArray<readonly [string, string | null]> = [
+    ["holdId", input.holdId],
+    ["holdEnvelopeHash", envelopeHash],
+    ["approvalReceiptHash", receiptRefHash(approval.doc)],
+    ["paramsHash", stringAt(deferredAction, "paramsHash")],
+  ];
+  for (let i = 0; i < bindings.length; i++) {
+    const [field, expected] = bindings[i]!;
+    if (expected === null || stringAt(grant.doc, field) !== expected) {
+      return { ok: false, token: `grant-binding:${field}` };
+    }
+  }
+
+  // (5) the approver's decision: signed by a roster approver of the tier this action's risk class
+  //     needs, bound to THIS envelope and tenant, evaluated at the decide-time instant the grant
+  //     carries (`issuedAt`, the value the gate signed when it verified the same decision).
+  const decision = snapshotOf(input.decisionArtifact, "decision artifact");
+  if (decision === null) return { ok: false, token: "decision" };
+  const decisionCheck = verifyArtifact(decision.bytes, verificationContext(trust, {
+    now: nowIso,
+    authorizationTime: stringAt(grant.doc, "issuedAt"),
+    riskClass: stringAt(deferredAction, "riskClass"),
+    refHashChecks: [
+      { path: "holdEnvelopeHash", rule: "side", artifact: env.doc, refEquals: [{ path: "tenant", value: trust.tenant }] },
+    ],
+  }));
+  if (!decisionCheck.ok) return { ok: false, token: "decision" };
+  if (stringAt(decision.doc, "decision") !== "APPROVE") return { ok: false, token: "decision-not-approve" };
+
+  // (6) the approval receipt is the deciding approver's own: signed by that kid, naming it, by a HUMAN.
+  const approverKid = stringAt(decision.doc, "approverKid");
+  const approvalBy = stringAt(recordAt(recordAt(approval.doc, "governance"), "approval"), "by");
+  if (
+    approverKid === null ||
+    stringAt(recordAt(approval.doc, "sig"), "kid") !== approverKid ||
+    approvalBy !== approverKid ||
+    stringAt(recordAt(approval.doc, "agent"), "principal") !== "HUMAN"
+  ) {
+    return { ok: false, token: "approver-identity" };
+  }
+  // The decision keyring and the receipt keyring must name ONE key for that approver (decide's
+  // TRUST_KEYRING_INCONSISTENT rule): an injected trust root must not verify each half under a different key.
+  const decisionKey = stringAt(recordAt(trust.keyring as unknown as Record<string, unknown>, approverKid), "publicKey");
+  const receiptKey = stringAt(recordAt(recordAt(trust.receiptKeyring as unknown as Record<string, unknown>, "keys"), approverKid), "publicKey");
+  if (decisionKey === null || decisionKey !== receiptKey) return { ok: false, token: "keyring-consistency" };
+
+  // (7) the display the envelope binds was sealed to that approver.
+  const display = snapshotOf(input.encryptedDisplay, "encrypted display");
+  if (display === null || virtualHash(display.doc) !== stringAt(env.doc, "displayCiphertextHash")) {
+    return { ok: false, token: "display-binding" };
+  }
+  if (!displayNames(display.doc, approverKid)) return { ok: false, token: "display-recipient" };
+
+  const verified: VerifiedAuthority = Object.freeze({
+    envelope: env.doc,
+    deferred: deferred.doc,
+    approval: approval.doc,
+    decision: decision.doc,
+    grant: grant.doc,
+  });
+  return {
+    ok: true,
+    verified,
+    keys: { envelope: envelopeHash, decision: refHash(decision.doc), grant: stringAt(grant.doc, "grantId") ?? "" },
+  };
+}
+
+/** What `verifyEffectAuthority` established: the input snapshot, the verified parses and the three unique keys. */
+export interface VerifiedEffectAuthority {
+  readonly ok: true;
+  /** The caller's input, read exactly once into a frozen snapshot. Every later step reads this, never the input. */
+  readonly input: EffectCommitInput;
+  readonly verified: VerifiedAuthority;
+  /** The three uniqueness keys: the envelope's refHash, the decision's refHash and the grant id. */
+  readonly keys: { readonly envelope: string; readonly decision: string; readonly grant: string };
+}
+
+export type EffectAuthority =
+  | VerifiedEffectAuthority
+  | { readonly ok: false; readonly code: "COMMIT_AUTHORITY_INVALID" | "HOLD_FROM_DEAD_BOOT"; readonly detail: string };
+
+/**
+ * THE OWNER'S AUTHORITY CHECK, exported so that every effect owner — this in-memory reference and any
+ * durable owner an embedder builds — runs ONE implementation of it (docs/gate-effect-owner.md):
+ *   the entry snapshot (the caller's input read once), the hold's boot, O1 (every signed byte the
+ *   commit rests on) and the signed boot (the gate-signed freeze time against this boot's start),
+ * in that order; first failure wins. Pure apart from the verifiers it calls: it reads no store and
+ * writes nothing. Uniqueness (O2) belongs to the owner's own record and is not checked here.
+ */
+export function verifyEffectAuthority(trust: GateTrust, registered: DisplayProjection, input: EffectCommitInput, nowIso: string): EffectAuthority {
+  // ENTRY SNAPSHOT — the caller's input is read here, once, and never again.
+  let snap: EffectCommitInput | null;
+  try {
+    snap = snapshotInput(input);
+  } catch {
+    snap = null;
+  }
+  if (snap === null) return { ok: false, code: "COMMIT_AUTHORITY_INVALID", detail: "input" };
+
+  // BOOT — a hold frozen by another boot of the gate is never committed by this one.
+  if (snap.holdBootId !== trust.bootId) {
+    return { ok: false, code: "HOLD_FROM_DEAD_BOOT", detail: "this hold was frozen by an earlier boot of the gate" };
+  }
+
+  // O1 — the signed bytes.
+  const authority = verifySignedAuthority(trust, registered, snap, nowIso);
+  if (!authority.ok) {
+    return { ok: false, code: "COMMIT_AUTHORITY_INVALID", detail: authority.token };
+  }
+
+  // SIGNED BOOT — the gate-signed freeze time is not earlier than this boot's start, whatever boot
+  // identifier the caller supplied.
+  if (frozenBeforeBoot(trust, stringAt(authority.verified.deferred as Record<string, unknown>, "ts"))) {
+    return { ok: false, code: "HOLD_FROM_DEAD_BOOT", detail: "this hold was frozen before this boot of the gate began" };
+  }
+  return Object.freeze({ ok: true as const, input: snap, verified: authority.verified, keys: Object.freeze(authority.keys) });
+}
+
+/** The effect a verified authority moves, and the bindings its ledger row records. Frozen. */
+export interface LedgerCommit {
+  readonly ledger: string;
+  readonly fromAccount: string;
+  readonly toAccount: string;
+  /** The validated 1..15-digit amount text. */
+  readonly amount: string;
+  /** The same amount as an exact integer, walked from that digit string. */
+  readonly units: number;
+  readonly unit: string;
+  readonly paramsHash: string;
+  /** The snapshot's canonical text: the text that was checked is the text that is recorded. */
+  readonly canonicalParams: string;
+  /** The hold id the verified envelope names. */
+  readonly holdId: string;
+  readonly holdEnvelopeHash: string;
+  readonly decisionRefHash: string;
+  readonly grantId: string;
+}
+
+export type LedgerCommitResult =
+  | { readonly ok: true; readonly commit: LedgerCommit }
+  | { readonly ok: false; readonly code: "GRANT_EXPIRED" | "PARAMS_SNAPSHOT_MISMATCH" | "LEDGER_NOT_OWNED" | "LEDGER_SAME_ACCOUNT"; readonly detail: string };
+
+/**
+ * O3–O5, exported and PURE (docs/gate-effect-owner.md): the grant's expiry clamped to the envelope's,
+ * the params hash re-derived from the snapshot's canonical text with the registered kernel function,
+ * this owner's ledger, and two distinct accounts. It reads only the verified authority (whose `input`
+ * is the entry snapshot), so the caller's input is never read again. First failure wins.
+ */
+export function deriveLedgerCommit(authority: VerifiedEffectAuthority, ledger: string, at: number): LedgerCommitResult {
+  const verified = authority.verified;
+  const snap = authority.input;
+
+  // O3 — the grant's own expiry, clamped here to the envelope's: the issuance clamp is not trusted.
+  const grantExpiry = gateDateParse(stringAt(verified.grant as Record<string, unknown>, "expiresAt") ?? "");
+  const envelopeExpiry = gateDateParse(stringAt(verified.envelope as Record<string, unknown>, "expiresAt") ?? "");
+  const expiresAtMs = Math.min(grantExpiry, envelopeExpiry);
+  if (!(at < expiresAtMs)) {
+    return { ok: false, code: "GRANT_EXPIRED", detail: "the grant or its hold has expired" };
+  }
+
+  // O4 — re-derive the params hash from the snapshot's canonical text; later steps read only `r.value`.
+  const r = projectLedgerTransfer(snap.canonicalParams);
+  if (!r.ok || r.canonical !== snap.canonicalParams || r.paramsHash !== stringAt(verified.grant as Record<string, unknown>, "paramsHash")) {
+    return { ok: false, code: "PARAMS_SNAPSHOT_MISMATCH", detail: "the stored params do not re-derive the params hash the grant binds" };
+  }
+  const transfer = r.value;
+
+  // O5 — this owner's ledger only. No row: the authority belongs to another ledger.
+  if (transfer.ledger !== ledger) {
+    return { ok: false, code: "LEDGER_NOT_OWNED", detail: "the transfer names a ledger this owner does not commit" };
+  }
+  // Conservation does not rest on the kernel alone: a self-transfer would credit what it debits.
+  if (transfer.fromAccount === transfer.toAccount) {
+    return { ok: false, code: "LEDGER_SAME_ACCOUNT", detail: "a transfer must move between two accounts" };
+  }
+
+  return {
+    ok: true,
+    commit: Object.freeze({
+      ledger: transfer.ledger,
+      fromAccount: transfer.fromAccount,
+      toAccount: transfer.toAccount,
+      amount: transfer.amount,
+      units: amountOf(transfer.amount),
+      unit: transfer.unit,
+      paramsHash: r.paramsHash,
+      canonicalParams: snap.canonicalParams,
+      holdId: stringAt(verified.envelope as Record<string, unknown>, "holdId") ?? snap.holdId,
+      holdEnvelopeHash: authority.keys.envelope,
+      decisionRefHash: authority.keys.decision,
+      grantId: authority.keys.grant,
+    }),
+  };
+}
+
+/** What `verifyEffectAttestation` found: the first problem (null when none) and the owner's verified parses. */
+export interface EffectAttestationCheck {
+  readonly problem: string | null;
+  readonly attestation: EffectAttestation;
+}
+
+/**
+ * O8, exported (after signing) — the attestation the sealer returned is what the gate is about to
+ * record as its own signed evidence, so it is verified like any other input: the EXECUTED receipt is signed
+ * by this gate, links onto the verified approval receipt and carries exactly the verified action and
+ * scope; the consumption is signed by the execution signer and binds the verified grant and that
+ * receipt. The row keeps the verified parses, never the returned objects. `alreadyRecorded` answers
+ * whether an EXECUTED receipt id is already in the owner's record: a recorded attestation is never
+ * recorded again. Pure apart from the verifiers it calls; the in-memory owner calls exactly this.
+ */
+export function verifyEffectAttestation(
+  trust: GateTrust,
+  raw: unknown,
+  v: VerifiedAuthority,
+  nowIso: string,
+  alreadyRecorded: (receiptId: string) => boolean,
+): EffectAttestationCheck {
+  const rec = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : null;
+  const ex = rec === null ? null : snapshotOf(valueAt(rec, "executedReceipt"), "executed receipt");
+  const cons = rec === null ? null : snapshotOf(valueAt(rec, "executionConsumption"), "execution consumption");
+  const attestation: EffectAttestation = Object.freeze({
+    executedReceipt: (ex === null ? null : ex.doc) as unknown as Receipt,
+    executionConsumption: (cons === null ? null : cons.doc) as unknown as ExecutionConsumption,
+  });
+  const fail = (problem: string) => ({ problem, attestation });
+  if (ex === null) return fail("executed-receipt");
+  if (cons === null) return fail("consumption");
+  // Bound to THIS commit: signed at this commit's instant (the owner's clock, no skew allowed — the
+  // sealer is handed that instant), with a receipt id never recorded before.
+  if (stringAt(ex.doc, "ts") !== nowIso || stringAt(cons.doc, "consumedAt") !== nowIso) return fail("attestation-time");
+  const exId = stringAt(ex.doc, "id");
+  if (exId === null || alreadyRecorded(exId) || exId === stringAt(v.deferred as Record<string, unknown>, "id") || exId === stringAt(v.approval as Record<string, unknown>, "id")) {
+    return fail("executed-receipt-fresh");
+  }
+  if (!chainValid(trust, [v.deferred, v.approval, ex.doc])) return fail("executed-receipt-chain");
+  if (stringAt(recordAt(ex.doc, "sig"), "kid") !== trust.gate.kid) return fail("executed-receipt-signer");
+  if (stringAt(recordAt(ex.doc, "governance"), "verdict") !== "EXECUTED") return fail("executed-receipt-verdict");
+  // Every other member is exactly what the gate's own sealer writes: a SERVICE agent with no model,
+  // the approvals mode, no rule, no approval, not sandboxed, no rollback reference.
+  const exAgent = recordAt(ex.doc, "agent");
+  const exGov = recordAt(ex.doc, "governance");
+  if (
+    valueAt(exAgent, "model") !== null || stringAt(exAgent, "principal") !== "SERVICE" ||
+    stringAt(exGov, "mode") !== "approvals_on" || valueAt(exGov, "ruleId") !== null ||
+    valueAt(exGov, "approval") !== null || valueAt(exGov, "sandboxed") !== false ||
+    valueAt(recordAt(ex.doc, "action"), "rollbackRef") !== null
+  ) {
+    return fail("executed-receipt-shape");
+  }
+  const exAction = recordAt(ex.doc, "action");
+  const dAction = recordAt(v.deferred as Record<string, unknown>, "action");
+  const fields = ["id", "canonical", "riskClass", "paramsHash", "reversible"] as const;
+  for (let i = 0; i < fields.length; i++) {
+    const f = fields[i]!;
+    if (valueAt(exAction, f) === undefined || valueAt(exAction, f) !== valueAt(dAction, f)) return fail("executed-receipt-action");
+  }
+  const exScope = recordAt(ex.doc, "scope");
+  const dScope = recordAt(v.deferred as Record<string, unknown>, "scope");
+  if (
+    stringAt(exScope, "tenant") !== stringAt(dScope, "tenant") ||
+    stringAt(exScope, "chain") !== stringAt(dScope, "chain") ||
+    stringAt(recordAt(ex.doc, "agent"), "id") !== stringAt(recordAt(v.deferred as Record<string, unknown>, "agent"), "id")
+  ) {
+    return fail("executed-receipt-scope");
+  }
+  if (!verifyArtifact(cons.bytes, verificationContext(trust, { now: nowIso })).ok) return fail("consumption");
+  if (
+    stringAt(cons.doc, "grantHash") !== refHash(v.grant) ||
+    stringAt(cons.doc, "attemptReceiptHash") !== receiptRefHash(ex.doc) ||
+    stringAt(cons.doc, "result") !== "DISPATCHED"
+  ) {
+    return fail("consumption-binding");
+  }
+  return { problem: null, attestation };
+}
+
 /**
  * Build an in-memory reference ledger and its effect owner. Balances are whole `XTS` units.
  *
@@ -360,10 +727,13 @@ export function createInMemoryLedgerEffectOwner(o: {
   const now = o.now;
   const ledger = o.ledger;
   const canonical = LEDGER_TRANSFER_CANONICAL;
-  const registered = getProjection(canonical);
-  if (registered === undefined) {
+  const found = getProjection(canonical);
+  if (found === undefined) {
     throw new Error(`EFFECT_OWNER_CANONICAL_INVALID: ${canonical} has no registered adapter`);
   }
+  const registered: DisplayProjection = found;
+  // The schemas are loaded now: a missing one stops the owner's construction, not its first commit.
+  prepareEffectVerification();
 
   if (typeof ledger !== "string" || !identifiersAccepted(ledger, "a")) {
     throw ledgerInvalid(`the ledger identifier ${JSON.stringify(ledger)} fails the noa.ledger.transfer/1 identifier rules`);
@@ -387,7 +757,6 @@ export function createInMemoryLedgerEffectOwner(o: {
     balances[id] = balance;
   }
 
-  const schemas = loadSchemas();
   const rows: LedgerRow[] = [];
   const rowsById = new Map<string, LedgerRow>();
   // The three unique keys, each mapped to the effectId of the row that consumed it.
@@ -399,207 +768,6 @@ export function createInMemoryLedgerEffectOwner(o: {
   let boundEngine: object | null = null;
   // The EXECUTED receipt ids already recorded: a recorded attestation is never recorded again.
   const recordedReceiptIds = new Set<string>();
-  // This boot's start, from the trust root: a hold whose gate-signed freeze time precedes it is not this boot's.
-  const bootStartMs = gateDateParse(trust.uptimeResetAt);
-
-  /** The ONE verification context, so the trust root's keyring is consumed at exactly one site. */
-  function verificationContext(extra: Record<string, unknown>): Uint8Array {
-    return encodeDocument({
-      schemas,
-      keyring: trust.keyring,
-      ...extra,
-    });
-  }
-
-  /** The ONE receipt-chain check: signatures under the trust root's receipt keyring, linkage, one tenant. */
-  function chainValid(receipts: readonly unknown[]): boolean {
-    return verifyChain(encodeDocument(receipts), { keyring: encodeDocument(trust.receiptKeyring), requireTenantConsistency: true }).status === "VALID";
-  }
-
-  /** O1 — every signed byte the commit rests on, verified here, in a fixed order. First failure wins. */
-  function verifyAuthority(input: EffectCommitInput, nowIso: string): AuthorityCheck {
-    // (1) the hold envelope: signed by this gate's hold-signer, for this tenant and gate, at this epoch.
-    const env = snapshotOf(input.holdEnvelope, "hold envelope");
-    if (env === null) return { ok: false, token: "envelope" };
-    if (!verifyArtifact(env.bytes, verificationContext({ now: nowIso })).ok) return { ok: false, token: "envelope" };
-    if (stringAt(env.doc, "tenant") !== trust.tenant || stringAt(env.doc, "gateKid") !== trust.gate.kid) {
-      return { ok: false, token: "envelope-audience" };
-    }
-    if (stringAt(env.doc, "holdId") !== input.holdId) return { ok: false, token: "envelope-hold" };
-    if (valueAt(env.doc, "keyManifestVersion") !== trust.keyManifestVersion || stringAt(env.doc, "keyManifestHash") !== trust.keyManifestHash) {
-      return { ok: false, token: "envelope-epoch" };
-    }
-
-    // (2) the deferred receipt is the one the envelope binds, for this owner's canonical, and the
-    //     envelope names the registered projection identities.
-    const deferred = snapshotOf(input.deferredReceipt, "deferred receipt");
-    if (deferred === null) return { ok: false, token: "deferred-binding" };
-    const deferredAction = recordAt(deferred.doc, "action");
-    if (
-      receiptRefHash(deferred.doc) !== stringAt(env.doc, "deferredReceiptHash") ||
-      stringAt(deferredAction, "canonical") !== canonical
-    ) {
-      return { ok: false, token: "deferred-binding" };
-    }
-    if (
-      stringAt(env.doc, "mode") !== "ENFORCED" ||
-      !sameIdentity(recordAt(env.doc, "actionSchema"), registered!.actionSchema) ||
-      !sameIdentity(recordAt(env.doc, "displayProjection"), registered!.displayProjection)
-    ) {
-      return { ok: false, token: "projection-identity" };
-    }
-
-    // (3) the approval receipt: the deferred and approval receipts verify under the receipt keyring
-    //     and link, and the verdict is ALLOWED.
-    const approval = snapshotOf(input.approvalReceipt, "approval receipt");
-    if (approval === null) return { ok: false, token: "receipt-chain" };
-    if (!chainValid([deferred.doc, approval.doc])) return { ok: false, token: "receipt-chain" };
-    if (stringAt(recordAt(approval.doc, "governance"), "verdict") !== "ALLOWED") return { ok: false, token: "approval-verdict" };
-    const approvalAction = recordAt(approval.doc, "action");
-    for (let i = 0; i < ACTION_FIELDS.length; i++) {
-      const f = ACTION_FIELDS[i]!;
-      if (valueAt(approvalAction, f) === undefined || valueAt(approvalAction, f) !== valueAt(deferredAction, f)) return { ok: false, token: "approval-action" };
-    }
-
-    // (4) the execution grant, signed by the execution-signer, bound to this hold, this envelope,
-    //     this approval receipt and this action's params hash.
-    const grant = snapshotOf(input.grant, "execution grant");
-    if (grant === null) return { ok: false, token: "grant" };
-    if (!verifyArtifact(grant.bytes, verificationContext({ now: nowIso })).ok) return { ok: false, token: "grant" };
-    const envelopeHash = refHash(env.doc);
-    const bindings: ReadonlyArray<readonly [string, string | null]> = [
-      ["holdId", input.holdId],
-      ["holdEnvelopeHash", envelopeHash],
-      ["approvalReceiptHash", receiptRefHash(approval.doc)],
-      ["paramsHash", stringAt(deferredAction, "paramsHash")],
-    ];
-    for (let i = 0; i < bindings.length; i++) {
-      const [field, expected] = bindings[i]!;
-      if (expected === null || stringAt(grant.doc, field) !== expected) {
-        return { ok: false, token: `grant-binding:${field}` };
-      }
-    }
-
-    // (5) the approver's decision: signed by a roster approver of the tier this action's risk class
-    //     needs, bound to THIS envelope and tenant, evaluated at the decide-time instant the grant
-    //     carries (`issuedAt`, the value the gate signed when it verified the same decision).
-    const decision = snapshotOf(input.decisionArtifact, "decision artifact");
-    if (decision === null) return { ok: false, token: "decision" };
-    const decisionCheck = verifyArtifact(decision.bytes, verificationContext({
-      now: nowIso,
-      authorizationTime: stringAt(grant.doc, "issuedAt"),
-      riskClass: stringAt(deferredAction, "riskClass"),
-      refHashChecks: [
-        { path: "holdEnvelopeHash", rule: "side", artifact: env.doc, refEquals: [{ path: "tenant", value: trust.tenant }] },
-      ],
-    }));
-    if (!decisionCheck.ok) return { ok: false, token: "decision" };
-    if (stringAt(decision.doc, "decision") !== "APPROVE") return { ok: false, token: "decision-not-approve" };
-
-    // (6) the approval receipt is the deciding approver's own: signed by that kid, naming it, by a HUMAN.
-    const approverKid = stringAt(decision.doc, "approverKid");
-    const approvalBy = stringAt(recordAt(recordAt(approval.doc, "governance"), "approval"), "by");
-    if (
-      approverKid === null ||
-      stringAt(recordAt(approval.doc, "sig"), "kid") !== approverKid ||
-      approvalBy !== approverKid ||
-      stringAt(recordAt(approval.doc, "agent"), "principal") !== "HUMAN"
-    ) {
-      return { ok: false, token: "approver-identity" };
-    }
-    // The decision keyring and the receipt keyring must name ONE key for that approver (decide's
-    // TRUST_KEYRING_INCONSISTENT rule): an injected trust root must not verify each half under a different key.
-    const decisionKey = stringAt(recordAt(trust.keyring as unknown as Record<string, unknown>, approverKid), "publicKey");
-    const receiptKey = stringAt(recordAt(recordAt(trust.receiptKeyring as unknown as Record<string, unknown>, "keys"), approverKid), "publicKey");
-    if (decisionKey === null || decisionKey !== receiptKey) return { ok: false, token: "keyring-consistency" };
-
-    // (7) the display the envelope binds was sealed to that approver.
-    const display = snapshotOf(input.encryptedDisplay, "encrypted display");
-    if (display === null || virtualHash(display.doc) !== stringAt(env.doc, "displayCiphertextHash")) {
-      return { ok: false, token: "display-binding" };
-    }
-    if (!displayNames(display.doc, approverKid)) return { ok: false, token: "display-recipient" };
-
-    const verified: VerifiedAuthority = Object.freeze({
-      envelope: env.doc,
-      deferred: deferred.doc,
-      approval: approval.doc,
-      decision: decision.doc,
-      grant: grant.doc,
-    });
-    return {
-      ok: true,
-      verified,
-      keys: { envelope: envelopeHash, decision: refHash(decision.doc), grant: stringAt(grant.doc, "grantId") ?? "" },
-    };
-  }
-
-  /**
-   * O8 (after signing) — the attestation the sealer returned is what the gate is about to record as
-   * its own signed evidence, so it is verified like any other input: the EXECUTED receipt is signed
-   * by this gate, links onto the verified approval receipt and carries exactly the verified action and
-   * scope; the consumption is signed by the execution signer and binds the verified grant and that
-   * receipt. The row keeps the verified parses, never the returned objects.
-   */
-  function checkAttestation(raw: unknown, v: VerifiedAuthority, nowIso: string): { problem: string | null; attestation: EffectAttestation } {
-    const rec = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : null;
-    const ex = rec === null ? null : snapshotOf(valueAt(rec, "executedReceipt"), "executed receipt");
-    const cons = rec === null ? null : snapshotOf(valueAt(rec, "executionConsumption"), "execution consumption");
-    const attestation: EffectAttestation = Object.freeze({
-      executedReceipt: (ex === null ? null : ex.doc) as unknown as Receipt,
-      executionConsumption: (cons === null ? null : cons.doc) as unknown as ExecutionConsumption,
-    });
-    const fail = (problem: string) => ({ problem, attestation });
-    if (ex === null) return fail("executed-receipt");
-    if (cons === null) return fail("consumption");
-    // Bound to THIS commit: signed at this commit's instant (the owner's clock, no skew allowed — the
-    // sealer is handed that instant), with a receipt id never recorded before.
-    if (stringAt(ex.doc, "ts") !== nowIso || stringAt(cons.doc, "consumedAt") !== nowIso) return fail("attestation-time");
-    const exId = stringAt(ex.doc, "id");
-    if (exId === null || recordedReceiptIds.has(exId) || exId === stringAt(v.deferred as Record<string, unknown>, "id") || exId === stringAt(v.approval as Record<string, unknown>, "id")) {
-      return fail("executed-receipt-fresh");
-    }
-    if (!chainValid([v.deferred, v.approval, ex.doc])) return fail("executed-receipt-chain");
-    if (stringAt(recordAt(ex.doc, "sig"), "kid") !== trust.gate.kid) return fail("executed-receipt-signer");
-    if (stringAt(recordAt(ex.doc, "governance"), "verdict") !== "EXECUTED") return fail("executed-receipt-verdict");
-    // Every other member is exactly what the gate's own sealer writes: a SERVICE agent with no model,
-    // the approvals mode, no rule, no approval, not sandboxed, no rollback reference.
-    const exAgent = recordAt(ex.doc, "agent");
-    const exGov = recordAt(ex.doc, "governance");
-    if (
-      valueAt(exAgent, "model") !== null || stringAt(exAgent, "principal") !== "SERVICE" ||
-      stringAt(exGov, "mode") !== "approvals_on" || valueAt(exGov, "ruleId") !== null ||
-      valueAt(exGov, "approval") !== null || valueAt(exGov, "sandboxed") !== false ||
-      valueAt(recordAt(ex.doc, "action"), "rollbackRef") !== null
-    ) {
-      return fail("executed-receipt-shape");
-    }
-    const exAction = recordAt(ex.doc, "action");
-    const dAction = recordAt(v.deferred as Record<string, unknown>, "action");
-    const fields = ["id", "canonical", "riskClass", "paramsHash", "reversible"] as const;
-    for (let i = 0; i < fields.length; i++) {
-      const f = fields[i]!;
-      if (valueAt(exAction, f) === undefined || valueAt(exAction, f) !== valueAt(dAction, f)) return fail("executed-receipt-action");
-    }
-    const exScope = recordAt(ex.doc, "scope");
-    const dScope = recordAt(v.deferred as Record<string, unknown>, "scope");
-    if (
-      stringAt(exScope, "tenant") !== stringAt(dScope, "tenant") ||
-      stringAt(exScope, "chain") !== stringAt(dScope, "chain") ||
-      stringAt(recordAt(ex.doc, "agent"), "id") !== stringAt(recordAt(v.deferred as Record<string, unknown>, "agent"), "id")
-    ) {
-      return fail("executed-receipt-scope");
-    }
-    if (!verifyArtifact(cons.bytes, verificationContext({ now: nowIso })).ok) return fail("consumption");
-    if (
-      stringAt(cons.doc, "grantHash") !== refHash(v.grant) ||
-      stringAt(cons.doc, "attemptReceiptHash") !== receiptRefHash(ex.doc) ||
-      stringAt(cons.doc, "result") !== "DISPATCHED"
-    ) {
-      return fail("consumption-binding");
-    }
-    return { problem: null, attestation };
-  }
 
   function notCommitted(code: EffectRefusalCode, effectId: string | null, detail: string): EffectOutcome {
     return { kind: "NOT_COMMITTED", code, effectId, detail };
@@ -619,34 +787,11 @@ export function createInMemoryLedgerEffectOwner(o: {
     const at = now();
     const atIso = new Date(at).toISOString();
 
-    // ENTRY SNAPSHOT — the caller's input is read here, once, and never again.
-    let snap: EffectCommitInput | null;
-    try {
-      snap = snapshotInput(input);
-    } catch {
-      snap = null;
-    }
-    if (snap === null) return notCommitted("COMMIT_AUTHORITY_INVALID", null, "input");
-
-    // BOOT — a hold frozen by another boot of the gate is never committed by this one.
-    if (snap.holdBootId !== trust.bootId) {
-      return notCommitted("HOLD_FROM_DEAD_BOOT", null, "this hold was frozen by an earlier boot of the gate");
-    }
-
-    // O1 — the signed bytes.
-    const authority = verifyAuthority(snap, atIso);
-    if (!authority.ok) {
-      return notCommitted("COMMIT_AUTHORITY_INVALID", null, authority.token);
-    }
+    // ENTRY SNAPSHOT, BOOT, O1 AND THE SIGNED BOOT — the exported authority check, one implementation.
+    const authority = verifyEffectAuthority(trust, registered, input, atIso);
+    if (!authority.ok) return notCommitted(authority.code, null, authority.detail);
     const keys = authority.keys;
     const verified = authority.verified;
-
-    // SIGNED BOOT — the gate-signed freeze time is not earlier than this boot's start, whatever boot
-    // identifier the caller supplied.
-    const frozenAtMs = gateDateParse(stringAt(verified.deferred as Record<string, unknown>, "ts") ?? "");
-    if (!(frozenAtMs >= bootStartMs)) {
-      return notCommitted("HOLD_FROM_DEAD_BOOT", null, "this hold was frozen before this boot of the gate began");
-    }
 
     // O2 — uniqueness, before any time or funds check, so a replay always gets the recorded result.
     const byEnvelope = envelopeIndex.get(keys.envelope);
@@ -661,29 +806,10 @@ export function createInMemoryLedgerEffectOwner(o: {
       return notCommitted("EFFECT_AUTHORITY_CONSUMED", consumedBy, "this authority has already been consumed by another row");
     }
 
-    // O3 — the grant's own expiry, clamped here to the envelope's: the issuance clamp is not trusted.
-    const grantExpiry = gateDateParse(stringAt(verified.grant as Record<string, unknown>, "expiresAt") ?? "");
-    const envelopeExpiry = gateDateParse(stringAt(verified.envelope as Record<string, unknown>, "expiresAt") ?? "");
-    const expiresAtMs = Math.min(grantExpiry, envelopeExpiry);
-    if (!(at < expiresAtMs)) {
-      return notCommitted("GRANT_EXPIRED", null, "the grant or its hold has expired");
-    }
-
-    // O4 — re-derive the params hash from the snapshot's canonical text; later steps read only `r.value`.
-    const r = projectLedgerTransfer(snap.canonicalParams);
-    if (!r.ok || r.canonical !== snap.canonicalParams || r.paramsHash !== stringAt(verified.grant as Record<string, unknown>, "paramsHash")) {
-      return notCommitted("PARAMS_SNAPSHOT_MISMATCH", null, "the stored params do not re-derive the params hash the grant binds");
-    }
-    const transfer = r.value;
-
-    // O5 — this owner's ledger only. No row: the authority belongs to another ledger.
-    if (transfer.ledger !== ledger) {
-      return notCommitted("LEDGER_NOT_OWNED", null, "the transfer names a ledger this owner does not commit");
-    }
-    // Conservation does not rest on the kernel alone: a self-transfer would credit what it debits.
-    if (transfer.fromAccount === transfer.toAccount) {
-      return notCommitted("LEDGER_SAME_ACCOUNT", null, "a transfer must move between two accounts");
-    }
+    // O3–O5 — the exported derivation, one implementation: expiry, params re-derivation, ledger, accounts.
+    const derived = deriveLedgerCommit(authority, ledger, at);
+    if (!derived.ok) return notCommitted(derived.code, null, derived.detail);
+    const transfer = derived.commit;
 
     const committedAt = atIso;
     const base = {
@@ -692,12 +818,12 @@ export function createInMemoryLedgerEffectOwner(o: {
       toAccount: transfer.toAccount,
       amount: transfer.amount,
       unit: transfer.unit,
-      paramsHash: r.paramsHash,
-      canonicalParams: snap.canonicalParams,
-      holdId: stringAt(verified.envelope as Record<string, unknown>, "holdId") ?? snap.holdId,
-      holdEnvelopeHash: keys.envelope,
-      decisionRefHash: keys.decision,
-      grantId: keys.grant,
+      paramsHash: transfer.paramsHash,
+      canonicalParams: transfer.canonicalParams,
+      holdId: transfer.holdId,
+      holdEnvelopeHash: transfer.holdEnvelopeHash,
+      decisionRefHash: transfer.decisionRefHash,
+      grantId: transfer.grantId,
       committedAt,
     };
     const refusedRow = (refusalCode: LedgerRefusalCode): EffectOutcome => {
@@ -718,7 +844,7 @@ export function createInMemoryLedgerEffectOwner(o: {
       return refusedRow("LEDGER_ACCOUNT_UNKNOWN");
     }
     // O7 — funds, on the exact integer walked from the validated digit string.
-    const amount = amountOf(transfer.amount);
+    const amount = transfer.units;
     const fromBalance = balances[transfer.fromAccount] as number;
     const toBalance = balances[transfer.toAccount] as number;
     if (fromBalance < amount) {
@@ -734,9 +860,9 @@ export function createInMemoryLedgerEffectOwner(o: {
     } catch {
       return notCommitted("EFFECT_SIGNER_UNAVAILABLE", null, "the execution signer did not sign the attestation; nothing was written");
     }
-    let sealed: { problem: string | null; attestation: EffectAttestation };
+    let sealed: EffectAttestationCheck;
     try {
-      sealed = checkAttestation(raw, verified, atIso);
+      sealed = verifyEffectAttestation(trust, raw, verified, atIso, (id) => recordedReceiptIds.has(id));
     } catch {
       return notCommitted("EFFECT_ATTESTATION_INVALID", null, "attestation-unreadable");
     }

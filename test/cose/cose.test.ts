@@ -160,10 +160,155 @@ test("retired kid: both COSE surfaces authenticate a signature before they answe
   // Controls: the same shapes signed by the retired key itself are still refused as retired.
   const authenticEnvelope = receiptToCose(mkReceipt({ kid: current.kid, privateKey: current.privateKey }), { kid: retired.kid, privateKey: retired.privateKey });
   assert.match(coseSign1Verify(authenticEnvelope, lifecycle).reason ?? "", /retired/);
-  assert.match(receiptFromCose(authenticEnvelope, lifecycle).reason ?? "", /retired/);
+  const authenticEnvelopeVerdict = receiptFromCose(authenticEnvelope, lifecycle);
+  assert.equal(authenticEnvelopeVerdict.ok, false, "an authentic receipt inside a retired key's envelope was accepted");
+  assert.match(authenticEnvelopeVerdict.reason ?? "", /retired/);
   const authenticNative = receiptFromCose(receiptToCose(mkReceipt({ kid: retired.kid, privateKey: retired.privateKey }), { kid: relay.kid, privateKey: relay.privateKey }), lifecycle);
   assert.equal(authenticNative.ok, false);
   assert.match(authenticNative.reason ?? "", /own signing key .* is retired/);
+});
+
+test("retired envelope key: the receipt inside is authenticated before the envelope's retirement is named", () => {
+  // Every envelope below is GENUINELY signed by the retired key, so the outer signature verifies and
+  // only the retirement refuses it. What is under test is which failure gets named when the receipt
+  // inside is forged or malformed as well: the receipt's own failure, never the envelope key's
+  // retirement. Every input whose verdict this ordering decides has a row, not only the forged one.
+  const retired = generateKeyPair("cose-order-old");
+  const current = generateKeyPair("cose-order-current");
+  const attacker = generateKeyPair("cose-order-attacker");
+  const stranger = generateKeyPair("cose-order-stranger");
+  const lifecycle = b({
+    spec: "noa.signing-key-lifecycle/0.1",
+    keys: {
+      [retired.kid]: { publicKey: retired.publicKey, retiredAt: "2026-08-01T08:36:12.643Z" },
+      [current.kid]: { publicKey: current.publicKey, retiredAt: null },
+    },
+  });
+  const byRetired = { kid: retired.kid, privateKey: retired.privateKey };
+  const genuine = mkReceipt({ kid: current.kid, privateKey: current.privateKey });
+  const rows: Array<{
+    name: string;
+    envelope: Buffer;
+    reason: RegExp;
+    retirementNamed: boolean;
+    nativeKid: string | null;
+    agentClaim: string;
+    manifest?: Record<string, string[]>;
+  }> = [
+    {
+      name: "forged receipt: its own signature names the current kid but was made by another key",
+      envelope: receiptToCose(mkReceipt({ kid: current.kid, privateKey: attacker.privateKey }), byRetired),
+      reason: /own signature does not verify under its kid/,
+      retirementNamed: false,
+      nativeKid: current.kid,
+      agentClaim: "FAILED",
+    },
+    {
+      name: "the receipt's own key is not in the keyring",
+      envelope: receiptToCose(mkReceipt({ kid: stranger.kid, privateKey: stranger.privateKey }), byRetired),
+      reason: /own signing key .* is not in the keyring/,
+      retirementNamed: false,
+      nativeKid: stranger.kid,
+      agentClaim: "FAILED",
+    },
+    {
+      name: "a genuine signature beside a chain.hash that is not the receipt's own",
+      envelope: receiptToCose({ ...genuine, chain: { ...genuine.chain, hash: sha256Prefixed("not this receipt") } }, byRetired),
+      reason: /chain\.hash is not a hash of its own contents/,
+      retirementNamed: false,
+      nativeKid: current.kid,
+      agentClaim: "FAILED",
+    },
+    {
+      name: "a payload that is not a NOA receipt",
+      envelope: coseSign1(Buffer.from(canonicalize({ note: "not a receipt" }), "utf8"), byRetired),
+      reason: /^payload is not a NOA receipt/,
+      retirementNamed: false,
+      nativeKid: null,
+      agentClaim: "NOT_EVALUATED",
+    },
+    {
+      name: "a payload that is not canonical JCS",
+      envelope: coseSign1(Buffer.from(JSON.stringify(JSON.parse(canonicalize(genuine)), null, 1), "utf8"), byRetired),
+      reason: /not canonical JCS/,
+      retirementNamed: false,
+      nativeKid: null,
+      agentClaim: "NOT_EVALUATED",
+    },
+    {
+      name: "a payload that is not JSON",
+      envelope: coseSign1(Buffer.from("not json", "utf8"), byRetired),
+      reason: /^payload parse:/,
+      retirementNamed: false,
+      nativeKid: null,
+      agentClaim: "NOT_EVALUATED",
+    },
+    // Once both signatures have authenticated, the agent claim beside the envelope's retirement is the
+    // one the receipt's own checks establish, never more: UNBOUND without a manifest, FAILED when the
+    // receipt's key is retired too, and VERIFIED or UNAUTHORIZED from the manifest.
+    {
+      name: "an authentic receipt by a current key: the envelope retirement is named",
+      envelope: receiptToCose(genuine, byRetired),
+      reason: /^signing key "cose-order-old" is retired/,
+      retirementNamed: true,
+      nativeKid: current.kid,
+      agentClaim: "UNBOUND",
+    },
+    {
+      name: "an authentic receipt by the retired key itself: the envelope retirement is named first",
+      envelope: receiptToCose(mkReceipt(byRetired), byRetired),
+      reason: /^signing key "cose-order-old" is retired/,
+      retirementNamed: true,
+      nativeKid: retired.kid,
+      agentClaim: "FAILED",
+    },
+    {
+      name: "an authentic receipt whose agent the manifest authorizes for its key",
+      envelope: receiptToCose(genuine, byRetired),
+      reason: /^signing key "cose-order-old" is retired/,
+      retirementNamed: true,
+      nativeKid: current.kid,
+      agentClaim: "VERIFIED",
+      manifest: { a1: [current.kid] },
+    },
+    {
+      name: "an authentic receipt whose agent the manifest does not authorize for its key",
+      envelope: receiptToCose(genuine, byRetired),
+      reason: /^signing key "cose-order-old" is retired/,
+      retirementNamed: true,
+      nativeKid: current.kid,
+      agentClaim: "UNAUTHORIZED",
+      manifest: { a1: [stranger.kid] },
+    },
+  ];
+  for (const row of rows) {
+    const r = receiptFromCose(row.envelope, lifecycle, row.manifest === undefined ? undefined : b(row.manifest));
+    assert.equal(r.ok, false, row.name);
+    assert.equal(r.receipt, null, row.name);
+    assert.match(r.reason ?? "", row.reason, `${row.name}: labelled ${JSON.stringify(r.reason)}`);
+    if (!row.retirementNamed) {
+      assert.doesNotMatch(r.reason ?? "", /retired/i, `${row.name}: the envelope retirement stood in for the receipt's own failure`);
+    }
+    assert.equal(r.kid, retired.kid, row.name);
+    assert.equal(r.nativeKid, row.nativeKid, row.name);
+    assert.equal(r.agentClaim, row.agentClaim, row.name);
+    // Not the reason on six rows, and still never hidden: a retired envelope key is not reported as
+    // an authenticated emitter on any row.
+    assert.equal(r.envelopeClaim, "FAILED", row.name);
+    assert.equal(r.envelopeKid, null, row.name);
+  }
+
+  // CONTROL: the same forged receipt under a CURRENT envelope key is refused for the same reason, and
+  // there the envelope claim is VERIFIED, so the FAILED above is the retirement, not the forgery.
+  const currentEnvelope = receiptFromCose(
+    receiptToCose(mkReceipt({ kid: current.kid, privateKey: attacker.privateKey }), { kid: current.kid, privateKey: current.privateKey }),
+    lifecycle,
+  );
+  assert.equal(currentEnvelope.ok, false);
+  assert.match(currentEnvelope.reason ?? "", /own signature does not verify under its kid/);
+  assert.equal(currentEnvelope.agentClaim, "FAILED");
+  assert.equal(currentEnvelope.envelopeClaim, "VERIFIED");
+  assert.equal(currentEnvelope.envelopeKid, current.kid);
 });
 
 test("COSE_Sign1: tampered payload fails verification", () => {

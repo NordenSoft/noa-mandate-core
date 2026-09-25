@@ -40,12 +40,16 @@
     "NOTICE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "postinstall": "node scripts/apply-dependency-hardening.mjs --apply",
+    "check:dependency-hardening": "node scripts/apply-dependency-hardening.mjs --check",
+    "build": "npm run check:dependency-hardening && tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/*.test.js",
     "start": "npm run build && node dist/src/cli.js"
   },
   "dependencies": {
-    "@noble/curves": "2.3.0",
+    "@noble/ciphers": "2.4.0",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
     "noa-signer": "file:../signer-core"
   },
   "devDependencies": {

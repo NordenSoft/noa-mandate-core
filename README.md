@@ -157,6 +157,8 @@ on `verifyChain`/`verifyChainText`, the `noa verify` CLI, `noa --serve` and the 
 (`--anchors`/`--trust-set`) path. The standalone helpers `verifyCheckpoint`, the COSE verifiers and the compliance check refuse a
 retired key too, and they also authenticate first: a forged or altered signature naming a retired
 kid gets the helper's integrity refusal, and only an authentic one is answered as retired.
+`receiptFromCose` names a retired envelope key only after both signatures authenticate, so that
+retirement never stands in for a forged or malformed receipt.
 `resolveVerificationKey` does the same when the caller passes the signed message and signature.
 It is a key resolver by design: without those two arguments it authenticates nothing, its "retired"
 answer names the key state only, and a current kid resolves with no signature check, so a caller

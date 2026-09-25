@@ -65,6 +65,19 @@ export interface Store {
    * UNKNOWN hint is explicitly NOT terminal and must not consume the lock.
    */
   claimGrantReported(grantId: string, at: number): GrantRecord | null;
+
+  /**
+   * THE ONE TRANSITION OUT OF PENDING (decide, expiry by read, long-poll or sweep, cancel).
+   * Atomically: when the stored hold `next.id` is still PENDING, replace it with `next` and, when
+   * `grant` is not null, record that grant in the same step. Returns true when THIS caller made the
+   * transition, false when the hold is gone or no longer PENDING. A `false` is a LOST RACE, never an
+   * error: the caller persists nothing, returns nothing it signed, and re-reads the hold.
+   *
+   * A durable driver expresses it as one transaction whose compare is the statement
+   *   UPDATE holds SET ... WHERE id = $id AND status = 'PENDING'      (one row changed = won)
+   * with the grant INSERT in the same transaction, only on a win. Read-then-write is the defect.
+   */
+  settleHold(next: HoldRecord, grant: GrantRecord | null): boolean;
 }
 
 export class InMemoryStore implements Store {
@@ -146,5 +159,15 @@ export class InMemoryStore implements Store {
     rec.reportedAt = at;
     this.grants.set(grantId, rec);
     return rec;
+  }
+
+  // One synchronous block: the compare, then the hold and its grant, with nothing in between.
+  settleHold(next: HoldRecord, grant: GrantRecord | null): boolean {
+    const current = this.holds.get(next.id);
+    if (current === undefined || current.status !== "PENDING") return false;
+    if (grant !== null) this.grants.set(grant.grant.grantId, grant);
+    this.holds.set(next.id, next);
+    this.holdsByIdem.set(this.idemKey(next.agentId, next.idempotencyKey), next.id);
+    return true;
   }
 }

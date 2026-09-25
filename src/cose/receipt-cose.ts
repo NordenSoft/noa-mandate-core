@@ -210,19 +210,19 @@ export function receiptFromCose(
   }
   const r = coseSign1VerifyParsed(coseBytes, keyring);
   if (!r.ok || !r.payload) return refuse(r.reason ?? "COSE signature did not verify", { kid: r.kid, envelopeClaim: "FAILED" });
-  // Retirement is judged after the envelope signature authenticated against the retained public
-  // material: a forged envelope naming a retired kid was refused just above for what it is.
-  if (r.kid !== null && verification.retiredKids[r.kid] === true) {
-    return refuse(
-      `signing key ${jsonStringify(r.kid)} is retired; signer-chosen artifact time is not an independent witness`,
-      { kid: r.kid, envelopeClaim: "FAILED" },
-    );
-  }
+  // The envelope signature authenticated against the retained public material, so a retired kid here
+  // is a real retirement: a forged envelope naming one was refused just above for what it is. The
+  // retirement is NAMED only after the receipt inside has authenticated too (below). An authentic
+  // envelope from a retired key around a forged or malformed receipt is refused for the receipt,
+  // because a retirement label must not stand in for an integrity failure one layer down. Until then
+  // every refusal still reports the envelope claim as FAILED, never VERIFIED or NOT_EVALUATED.
+  const envelopeRetired = r.kid !== null && verification.retiredKids[r.kid] === true;
+  const payloadRefusal = { kid: r.kid, envelopeClaim: envelopeRetired ? "FAILED" : "NOT_EVALUATED" } as const;
   let parsed: unknown;
   try {
     parsed = safeParse(bufToString(r.payload, "utf8"));
   } catch (e) {
-    return refuse(`payload parse: ${(e as Error).message}`, { kid: r.kid });
+    return refuse(`payload parse: ${(e as Error).message}`, payloadRefusal);
   }
   // H5 — the receipt returned MUST re-canonicalize to EXACTLY the signed payload bytes. safeParse
   // rejects duplicate/prototype keys and unpaired surrogates, but a signed payload can still be
@@ -240,13 +240,13 @@ export function receiptFromCose(
   try {
     recanon = bufferFrom(canonicalize(parsed), "utf8");
   } catch (e) {
-    return refuse(`payload is not canonicalizable: ${(e as Error).message}`, { kid: r.kid });
+    return refuse(`payload is not canonicalizable: ${(e as Error).message}`, payloadRefusal);
   }
   if (!bufEquals(recanon, r.payload)) {
-    return refuse("COSE payload is not canonical JCS: it does not re-canonicalize to the signed bytes (non-canonical encoding, or invalid/lossy UTF-8) — the returned receipt would not match the bytes the signature covers", { kid: r.kid });
+    return refuse("COSE payload is not canonical JCS: it does not re-canonicalize to the signed bytes (non-canonical encoding, or invalid/lossy UTF-8) — the returned receipt would not match the bytes the signature covers", payloadRefusal);
   }
   const v = validateReceiptShapeParsed(parsed);
-  if (!v.ok) return refuse(`payload is not a NOA receipt: ${v.errors[0]}`, { kid: r.kid });
+  if (!v.ok) return refuse(`payload is not a NOA receipt: ${v.errors[0]}`, payloadRefusal);
   const receipt = parsed as Receipt;
 
   // ── THE ENVELOPE CLAIM: who emitted this envelope ─────────────────────────────────────────────
@@ -258,15 +258,17 @@ export function receiptFromCose(
   // identity, so `envelopeKid` is null and the disposition says why (§6). It no longer sinks the
   // whole receipt: the agent claim is carried by the native signature, which an unsigned emitter
   // label cannot touch.
-  const envelopeAuthenticated = r.kidAuthenticated && r.kid !== null;
+  // A retired envelope key is never reported as an authenticated emitter: its kid is withheld from
+  // `envelopeKid` and its claim is FAILED on every refusal below.
+  const envelopeAuthenticated = r.kidAuthenticated && r.kid !== null && !envelopeRetired;
   const envelopeKid = envelopeAuthenticated ? r.kid : null;
-  const envelopeClaim: CoseAttribution = envelopeAuthenticated ? "VERIFIED" : "UNAUTHENTICATED";
+  const envelopeClaim: CoseAttribution = envelopeRetired ? "FAILED" : envelopeAuthenticated ? "VERIFIED" : "UNAUTHENTICATED";
   // `warnings[warnings.length] = …` rather than the captured `arrayPush` used elsewhere: index
   // assignment reaches no prototype METHOD at all, so there is nothing to swap. (Both forms perform an
   // ordinary [[Set]] and are equally exposed to an inherited index accessor; neither is weaker, and
   // this one has no method slot to capture in the first place.) Not an oversight of the house idiom.
   const warnings: string[] = [];
-  if (!envelopeAuthenticated) {
+  if (envelopeClaim === "UNAUTHENTICATED") {
     warnings[warnings.length] = `the outer COSE kid ${jsonStringify(r.kid)} is not in the signed (protected) header — it resolved the envelope key but is NOT reported as an identity (envelopeKid is null); an unprotected label is swappable between keyring aliases (H4)`;
   }
 
@@ -299,6 +301,23 @@ export function receiptFromCose(
     return refuse(
       `the enveloped receipt's own signature does not verify under its kid ${jsonStringify(nativeKid)} — a valid envelope around an unsigned receipt`,
       { kid: r.kid, nativeKid, envelopeKid, envelopeClaim, agentClaim: "FAILED" },
+    );
+  }
+  // Both signatures have now authenticated, so the envelope key's retirement, remembered above, is
+  // named here, ahead of the receipt key's own retirement. The agent claim reported beside it is the
+  // one the receipt's own checks below establish, evaluated here without being named and never more:
+  // FAILED for a retired receipt key, otherwise UNBOUND without a manifest and VERIFIED or
+  // UNAUTHORIZED from it.
+  if (envelopeRetired) {
+    let agentClaim: CoseAttribution = "UNBOUND";
+    if (verification.retiredKids[nativeKid] === true) agentClaim = "FAILED";
+    else if (haveManifest) {
+      const authorizedKids = mapGet(manifest, receipt.agent.id);
+      agentClaim = authorizedKids !== undefined && arrayIncludes(authorizedKids, nativeKid) ? "VERIFIED" : "UNAUTHORIZED";
+    }
+    return refuse(
+      `signing key ${jsonStringify(r.kid)} is retired; signer-chosen artifact time is not an independent witness`,
+      { kid: r.kid, nativeKid, agentClaim, envelopeClaim: "FAILED" },
     );
   }
   // The receipt's own key is judged for retirement only now that its signature authenticated

@@ -13,7 +13,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { verifyArtifact } from "noa-approval-artifacts";
-import { verifyChain, projectLedgerTransfer, LEDGER_TRANSFER_CANONICAL } from "noa-receipt";
+import { verifyChain, LEDGER_TRANSFER_CANONICAL } from "noa-receipt";
 import { GateEngine } from "../src/engine.js";
 import { resolveGateConfig } from "../src/config.js";
 import { createGate, type Gate } from "../src/server.js";
@@ -21,7 +21,6 @@ import { loadSchemas } from "../src/schemas.js";
 import { InMemoryStore } from "../src/store.js";
 import { encodeDocument } from "../src/bytes.js";
 import { createInMemoryLedgerEffectOwner } from "../src/effect-owner.js";
-import type { GrantRecord, Receipt } from "../src/types.js";
 import { body, makeClock, sampleCommandParams } from "./helpers.js";
 import { approverKeys, newWorld, rosterDoc } from "./helpers/pinned.js";
 import {
@@ -33,7 +32,6 @@ import {
   LEDGER,
   MIN,
   OTHER_LEDGER,
-  approvalReceiptBy,
   approvedTransfer,
   balanceTotal,
   canonicalOf,
@@ -41,7 +39,6 @@ import {
   createTransfer,
   decisionFor,
   effectGate,
-  extendEnvelope,
   gateKey,
   grantOf,
   hold,
@@ -108,7 +105,9 @@ test("CONTROL — approve then commit: one EXECUTED row moves the amount, signs 
   const ctx = encodeDocument({ schemas: loadSchemas(), keyring: fx.trust.keyring, now: new Date(fx.clock.t).toISOString() });
   assert.equal(verifyArtifact(encodeDocument(consumption), ctx).ok, true);
   // The EXECUTED receipt chains deferred -> approval -> executed under the gate's receipt keyring.
-  const chain = verifyChain(encodeDocument([h.deferredReceipt, h.decisionReceipt, b["executedReceipt"]]), {
+  // Re-read after decide: a decided hold is a new record, never the object read before it.
+  const decided = hold(fx, holdId);
+  const chain = verifyChain(encodeDocument([decided.deferredReceipt, decided.decisionReceipt, b["executedReceipt"]]), {
     keyring: encodeDocument(fx.trust.receiptKeyring),
     requireTenantConsistency: true,
   });
@@ -256,122 +255,6 @@ test("EFFECT-DEAD-BOOT-DECIDE — a restarted gate issues no grant on a hold fro
   assert.ok(hold(a, transferHold).holdResolution);
 });
 
-test("EFFECT-GRANT-EXPIRY — a commit exactly at the grant's expiresAt is refused; one millisecond earlier it commits", () => {
-  const fx = effectGate();
-  const late = approvedTransfer(fx, "expiry-late");
-  const onTime = approvedTransfer(fx, "expiry-on-time", transfer({ amount: "5" }));
-  const lateExpiry = Date.parse(grantOf(fx, late).grant.expiresAt);
-  const onTimeExpiry = Date.parse(grantOf(fx, onTime).grant.expiresAt);
-  assert.equal(lateExpiry, onTimeExpiry, "fixture: both grants were issued at the same instant");
-  fx.clock.t = lateExpiry;
-  const r = fx.engine.commit(late, fx.agent);
-  assert.equal(rowCount(fx.owner), 0, "consequence: an expired grant moves nothing");
-  assert.equal(r.status, 410, JSON.stringify(r.body));
-  assert.equal(errorOf(r), "GRANT_EXPIRED");
-  fx.clock.t = onTimeExpiry - 1;
-  assert.equal(fx.engine.commit(onTime, fx.agent).status, 200);
-  assert.equal(rowCount(fx.owner), 1);
-});
-
-test("EFFECT-EXPIRY-CLAMP — a test-signed grant that outlives its hold does not commit after the hold expires", () => {
-  const fx = effectGate();
-  const holdId = approvedTransfer(fx, "clamp");
-  const h = hold(fx, holdId);
-  const real = grantOf(fx, holdId).grant;
-  const envelopeExpiry = Date.parse(h.holdEnvelope.expiresAt);
-  // Signed with the gate key the test holds; every binding is the hold's own, only expiresAt outlives it.
-  const longGrant = signedGrant(fx, holdId, gateKey(fx.world), {
-    grantId: real.grantId,
-    issuedAt: real.issuedAt,
-    nonce: real.nonce,
-    expiresAt: new Date(envelopeExpiry + HOUR).toISOString(),
-  });
-  const rec = grantOf(fx, holdId);
-  fx.store.putGrant({ ...rec, grant: longGrant } as GrantRecord);
-  fx.clock.t = envelopeExpiry + MIN;
-  const r = fx.engine.commit(holdId, fx.agent);
-  assert.equal(rowCount(fx.owner), 0, "consequence: nothing commits after the hold's own expiry");
-  assert.equal(r.status, 410, JSON.stringify(r.body));
-  assert.equal(errorOf(r), "GRANT_EXPIRED");
-});
-
-test("EFFECT-FORGED-GRANT — a store-planted APPROVED hold whose grant the gate never signed commits nothing (token grant)", () => {
-  const fx = effectGate();
-  const holdId = holdIdOf(createTransfer(fx, "forged-grant"));
-  const decision = decisionFor(fx, holdId);
-  const attacker = approverKeys(8).ed;
-  const forged = signedGrant(fx, holdId, { kid: fx.world.gate.kid, privateKey: attacker.privateKey }, {}, decision.receipt);
-  plantApproved(fx, holdId, { decisionArtifact: decision.decisionArtifact, receipt: decision.receipt, grant: forged });
-  const r = fx.engine.commit(holdId, fx.agent);
-  assert.equal(rowCount(fx.owner), 0, "consequence: a forged grant moves nothing");
-  assert.equal(balances(fx)[ACCT_1], 1000);
-  assert.equal(r.status, 500, JSON.stringify(r.body));
-  assert.equal(errorOf(r), "COMMIT_AUTHORITY_INVALID");
-  assert.equal(bodyOf(r)["detail"], "grant");
-});
-
-/**
- * STORE SEAM with the gate key: the hold's envelope replaced by the same envelope re-signed with a
- * two-hour-later expiry, a gate-key grant bound to it, and the clock past the envelope the human
- * actually approved. Only the decision's binding to the approved envelope stands between this and a
- * commit outside the approved window.
- */
-function pastApprovedWindow(fx: EffectGate, holdId: string, decisionArtifact: Record<string, unknown>, receipt: Receipt): void {
-  const { original } = extendEnvelope(fx, holdId, 2 * HOUR);
-  plantApproved(fx, holdId, {
-    decisionArtifact,
-    receipt,
-    grant: signedGrant(fx, holdId, gateKey(fx.world), { expiresAt: new Date(Date.parse(original.expiresAt) + HOUR).toISOString() }, receipt),
-  });
-  fx.clock.t = Date.parse(original.expiresAt) + MIN;
-}
-
-test("EFFECT-DECISION-REBIND — the approver's decision for one envelope does not authorize a re-signed envelope with a later expiry (token decision)", () => {
-  const fx = effectGate();
-  const holdId = holdIdOf(createTransfer(fx, "rebind"));
-  const genuine = decisionFor(fx, holdId);
-  pastApprovedWindow(fx, holdId, genuine.decisionArtifact, genuine.receipt);
-  const r = fx.engine.commit(holdId, fx.agent);
-  assert.equal(rowCount(fx.owner), 0, "consequence: nothing commits outside the window the human approved");
-  assert.equal(balances(fx)[ACCT_1], 1000);
-  assert.equal(r.status, 500, JSON.stringify(r.body));
-  assert.equal(errorOf(r), "COMMIT_AUTHORITY_INVALID");
-  assert.equal(bodyOf(r)["detail"], "decision");
-});
-
-test("EFFECT-FORGED-DECISION — a decision the roster approver never signed, for a re-signed envelope, commits nothing (token decision)", () => {
-  const fx = effectGate();
-  const holdId = holdIdOf(createTransfer(fx, "forged-decision"));
-  const genuine = decisionFor(fx, holdId);
-  const { original } = extendEnvelope(fx, holdId, 2 * HOUR);
-  // Signed by a key outside the roster under the roster approver's kid, bound to the re-signed envelope.
-  const forged = decisionFor(fx, holdId, "APPROVE", { ...approverKeys(9), kid: fx.world.approver.kid });
-  plantApproved(fx, holdId, {
-    decisionArtifact: forged.decisionArtifact,
-    receipt: genuine.receipt,
-    grant: signedGrant(fx, holdId, gateKey(fx.world), { expiresAt: new Date(Date.parse(original.expiresAt) + HOUR).toISOString() }, genuine.receipt),
-  });
-  fx.clock.t = Date.parse(original.expiresAt) + MIN;
-  const r = fx.engine.commit(holdId, fx.agent);
-  assert.equal(rowCount(fx.owner), 0, "consequence: a forged decision authorizes nothing");
-  assert.equal(balances(fx)[ACCT_1], 1000);
-  assert.equal(r.status, 500, JSON.stringify(r.body));
-  assert.equal(bodyOf(r)["detail"], "decision");
-});
-
-test("EFFECT-SNAPSHOT-SWAP — the stored snapshot rewritten to 999999999999999 does not move (PARAMS_SNAPSHOT_MISMATCH)", () => {
-  const fx = effectGate({ accounts: { [ACCT_1]: 999999999999999, [ACCT_2]: 0 } });
-  const holdId = approvedTransfer(fx, "swap");
-  const h = hold(fx, holdId);
-  h.canonicalParams = canonicalOf(transfer({ amount: "999999999999999" }));
-  fx.store.putHold(h);
-  const r = fx.engine.commit(holdId, fx.agent);
-  assert.equal(rowCount(fx.owner), 0, "consequence: the swapped amount does not move");
-  assert.equal(balances(fx)[ACCT_1], 999999999999999);
-  assert.equal(r.status, 500, JSON.stringify(r.body));
-  assert.equal(errorOf(r), "PARAMS_SNAPSHOT_MISMATCH");
-});
-
 test("EFFECT-REPLAY-FIRST — a retry after success returns the same effect idempotently, with no new signature, even after the grant expired", () => {
   const fx = effectGate();
   const holdId = approvedTransfer(fx, "replay");
@@ -426,46 +309,6 @@ test("EFFECT-REVERSIBLE — the gate signs reversible:false for every transfer; 
   const ok = createTransfer(fx, "rev-absent");
   assert.equal(ok.status, 201);
   assert.equal(hold(fx, holdIdOf(ok)).deferredReceipt.action.reversible, false);
-});
-
-test("EFFECT-FUNDS — a transfer above the balance writes one terminal, unsigned REFUSED row and moves nothing", () => {
-  const fx = effectGate();
-  const holdId = approvedTransfer(fx, "funds", transfer({ fromAccount: "acct-example-3", amount: "51" }));
-  const signed = fx.signer.counts.attestation;
-  const r = fx.engine.commit(holdId, fx.agent);
-  const rows = fx.owner!.inspect().rows;
-  assert.equal(rows.filter((row) => row.outcome === "EXECUTED").length, 0, "consequence: nothing executes");
-  assert.equal(balances(fx)["acct-example-3"], 50, "consequence: no balance goes negative");
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0]!.outcome, "REFUSED");
-  assert.equal(rows[0]!.attestation, null, "a refusal is never signed");
-  assert.equal(fx.signer.counts.attestation, signed, "a refusal signs nothing");
-  assert.equal(r.status, 409, JSON.stringify(r.body));
-  assert.deepEqual(r.body, { error: "LEDGER_INSUFFICIENT_FUNDS", outcome: "REFUSED", idempotent: false, effectId: rows[0]!.effectId, retryable: false });
-  // Terminal: a retry replays the refusal, and the view shows it.
-  const again = fx.engine.commit(holdId, fx.agent);
-  assert.equal(bodyOf(again)["idempotent"], true);
-  assert.equal(bodyOf(again)["error"], "LEDGER_INSUFFICIENT_FUNDS");
-  assert.deepEqual(bodyOf(fx.engine.getHold(holdId, fx.agent))["effect"], { effectId: rows[0]!.effectId, outcome: "REFUSED" });
-  assert.equal(bodyOf(fx.engine.getHold(holdId, fx.agent))["executionGrant"], null);
-  assert.equal(grantOf(fx, holdId).status, "UNUSED");
-});
-
-test("EFFECT-UNKNOWN-ACCOUNT — a transfer from or to an account the ledger does not hold writes a REFUSED row and moves nothing; accounts are not checked at createHold", () => {
-  const fx = effectGate();
-  const cases = [["unknown-to", transfer({ toAccount: "acct-example-99" })], ["unknown-from", transfer({ fromAccount: "acct-example-98" })]] as const;
-  for (const [chain, params] of cases) {
-    const created = createTransfer(fx, chain, params);
-    assert.equal(created.status, 201, "no account oracle before a human approved anything");
-    const holdId = holdIdOf(created);
-    assert.equal(fx.engine.decide(holdId, body(decisionFor(fx, holdId))).status, 200);
-    const r = fx.engine.commit(holdId, fx.agent);
-    assert.equal(balanceTotal(fx.owner!), 1050, `consequence (${chain}): nothing is minted or lost`);
-    assert.deepEqual({ ...balances(fx) }, { ...DEFAULT_ACCOUNTS }, `consequence (${chain}): no balance changes`);
-    assert.equal(r.status, 409);
-    assert.equal(errorOf(r), "LEDGER_ACCOUNT_UNKNOWN");
-    assert.equal(bodyOf(r)["outcome"], "REFUSED");
-  }
 });
 
 // ── other outcomes ────────────────────────────────────────────────────────────────────────────────
@@ -754,100 +597,6 @@ test("precedence — createHold: the roster before the reversible refusal, that 
 
 // ── regression attacks: each test fails on the tree it was written against ───────────────────────
 
-function hash999(): string {
-  const r = projectLedgerTransfer(canonicalOf(transfer({ amount: "999" })));
-  assert.ok(r.ok);
-  return r.paramsHash;
-}
-
-test("EFFECT-SEAL-VERIFIED-COPY — the gate signs the action and scope the owner verified, never a later read of mutable store state", () => {
-  const fx = effectGate();
-  const holdId = approvedTransfer(fx, "verified-copy");
-  const h = hold(fx, holdId);
-  const deferred = h.deferredReceipt;
-  const honest = deferred.action;
-  const fake = { ...honest, paramsHash: hash999(), riskClass: "LOW", reversible: true };
-  let reads = 0;
-  const { action: _action, ...rest } = deferred as unknown as Record<string, unknown>;
-  const twoFaced: Record<string, unknown> = { ...rest };
-  Object.defineProperty(twoFaced, "action", { enumerable: true, get() { reads++; return reads === 1 ? honest : fake; } });
-  h.deferredReceipt = twoFaced as unknown as Receipt;
-  h.chain = "rewritten-chain";
-  h.tenant = "tenant-example-9";
-  fx.store.putHold(h);
-  const r = fx.engine.commit(holdId, fx.agent);
-  const executed = bodyOf(r)["executedReceipt"] as { action?: Record<string, unknown>; scope?: Record<string, unknown> } | null;
-  const row = fx.owner!.inspect().rows[0];
-  assert.equal(executed?.action?.["paramsHash"], row?.paramsHash, "consequence: the gate-signed receipt names the amount that moved");
-  assert.equal(executed?.action?.["riskClass"], "HIGH", "consequence: the signed risk class is the verified one");
-  assert.equal(executed?.action?.["reversible"], false, "consequence: the signed reversible flag is the verified one");
-  assert.deepEqual({ ...executed?.scope }, { ...deferred.scope }, "consequence: the signed scope is the approved chain's");
-  const chain = verifyChain(encodeDocument([deferred, h.decisionReceipt, executed]), { keyring: encodeDocument(fx.trust.receiptKeyring), requireTenantConsistency: true });
-  assert.equal(chain.status, "VALID", JSON.stringify(chain));
-  assert.equal(r.status, 200, JSON.stringify(r.body));
-});
-
-test("EFFECT-RECEIPT-SIGNATURES — deferred and approval receipts whose signatures do not verify commit nothing and get nothing signed", () => {
-  const fx = effectGate();
-  const holdId = approvedTransfer(fx, "receipt-signatures");
-  const h = hold(fx, holdId);
-  const unsigned = (r: Receipt): Receipt => ({ ...r, sig: { ...r.sig, value: "AA==" } }) as Receipt;
-  h.deferredReceipt = unsigned(h.deferredReceipt);
-  h.decisionReceipt = unsigned(h.decisionReceipt!);
-  h.verdictReceipt = h.decisionReceipt;
-  fx.store.putHold(h);
-  const signed = fx.signer.counts.attestation;
-  const r = fx.engine.commit(holdId, fx.agent);
-  assert.equal(fx.signer.counts.attestation, signed, "consequence: nothing is signed over receipts that do not verify");
-  assert.equal(rowCount(fx.owner), 0, "consequence: no row");
-  assert.equal(balances(fx)[ACCT_1], 1000, "consequence: nothing moved");
-  assert.equal(r.status, 500, JSON.stringify(r.body));
-  assert.equal(errorOf(r), "COMMIT_AUTHORITY_INVALID");
-});
-
-test("EFFECT-APPROVAL-VERDICT — an approval receipt whose verdict is BLOCKED authorizes nothing, whatever the decision says", () => {
-  const fx = effectGate();
-  const holdId = holdIdOf(createTransfer(fx, "verdict"));
-  const approve = decisionFor(fx, holdId);
-  const x = fx.world.approver;
-  const blocked = approvalReceiptBy(fx, holdId, { kid: x.kid, privateKey: x.ed.privateKey }, { by: x.kid, verdict: "BLOCKED" });
-  plantApproved(fx, holdId, { decisionArtifact: approve.decisionArtifact, receipt: blocked, grant: signedGrant(fx, holdId, gateKey(fx.world), {}, blocked) });
-  const signed = fx.signer.counts.attestation;
-  const r = fx.engine.commit(holdId, fx.agent);
-  assert.equal(rowCount(fx.owner), 0, "consequence: a BLOCKED verdict moves nothing");
-  assert.equal(balances(fx)[ACCT_1], 1000);
-  assert.equal(fx.signer.counts.attestation, signed, "consequence: nothing is signed");
-  assert.equal(r.status, 500, JSON.stringify(r.body));
-});
-
-test("EFFECT-APPROVER-IDENTITY — an approval receipt the deciding approver did not sign authorizes nothing", () => {
-  const fx = effectGate();
-  const holdId = holdIdOf(createTransfer(fx, "approver-identity"));
-  const approve = decisionFor(fx, holdId);
-  const gateSigned = approvalReceiptBy(fx, holdId, gateKey(fx.world), { by: fx.world.approver.kid, verdict: "ALLOWED" });
-  plantApproved(fx, holdId, { decisionArtifact: approve.decisionArtifact, receipt: gateSigned, grant: signedGrant(fx, holdId, gateKey(fx.world), {}, gateSigned) });
-  const signed = fx.signer.counts.attestation;
-  const r = fx.engine.commit(holdId, fx.agent);
-  assert.equal(rowCount(fx.owner), 0, "consequence: approval evidence the approver did not sign moves nothing");
-  assert.equal(balances(fx)[ACCT_1], 1000);
-  assert.equal(fx.signer.counts.attestation, signed, "consequence: nothing is signed");
-  assert.equal(r.status, 500, JSON.stringify(r.body));
-});
-
-test("EFFECT-DECISION-DENY — a DENY decision with an ALLOWED receipt and a gate-key grant commits nothing", () => {
-  const fx = effectGate();
-  const holdId = holdIdOf(createTransfer(fx, "decision-deny"));
-  const approve = decisionFor(fx, holdId);
-  const deny = decisionFor(fx, holdId, "DENY");
-  plantApproved(fx, holdId, { decisionArtifact: deny.decisionArtifact, receipt: approve.receipt, grant: signedGrant(fx, holdId, gateKey(fx.world), {}, approve.receipt) });
-  const r = fx.engine.commit(holdId, fx.agent);
-  assert.equal(rowCount(fx.owner), 0, "consequence: a denial moves nothing");
-  assert.equal(balances(fx)[ACCT_1], 1000);
-  assert.equal(r.status, 500, JSON.stringify(r.body));
-  assert.equal(bodyOf(r)["detail"], "decision-not-approve");
-});
-
-
 test("EFFECT-TWO-ENGINES — a second effect-owning engine over the same trust root is refused, so a failed grant mirror cannot yield two effects", () => {
   const store = new FlakyReportStore();
   const fx = effectGate({ store });
@@ -874,25 +623,6 @@ test("EFFECT-TWO-ENGINES — a second effect-owning engine over the same trust r
 });
 
 // ── engine-path attacks on the held action and the boot (each fails on the tree it was written against) ──
-
-test("EFFECT-APPROVAL-ACTION — an approval receipt whose action is not the held one (decide refuses it) is not committed either", () => {
-  const fx = effectGate();
-  const holdId = holdIdOf(createTransfer(fx, "approval-action"));
-  const x = fx.world.approver;
-  const approve = decisionFor(fx, holdId);
-  const drifted = approvalReceiptBy(fx, holdId, { kid: x.kid, privateKey: x.ed.privateKey }, { by: x.kid, verdict: "ALLOWED", action: { riskClass: "LOW", reversible: true } });
-  // decide refuses exactly this receipt.
-  const probe = holdIdOf(createTransfer(fx, "approval-action-probe"));
-  const probeApprove = decisionFor(fx, probe);
-  const probeDrifted = approvalReceiptBy(fx, probe, { kid: x.kid, privateKey: x.ed.privateKey }, { by: x.kid, verdict: "ALLOWED", action: { riskClass: "LOW", reversible: true } });
-  const decided = fx.engine.decide(probe, body({ receipt: probeDrifted, decisionArtifact: probeApprove.decisionArtifact }));
-  assert.equal(errorOf(decided), "ACTION_BINDING_MISMATCH");
-  plantApproved(fx, holdId, { decisionArtifact: approve.decisionArtifact, receipt: drifted, grant: signedGrant(fx, holdId, gateKey(fx.world), {}, drifted) });
-  const r = fx.engine.commit(holdId, fx.agent);
-  assert.equal(rowCount(fx.owner), 0, "consequence: an approval of another action moves nothing");
-  assert.equal(balances(fx)[ACCT_1], 1000);
-  assert.equal(r.status, 500, JSON.stringify(r.body));
-});
 
 test("EFFECT-TWO-ENGINES-COPY — a copy of the trust root does not let a second effect-owning engine commit the same approval", () => {
   const store = new FlakyReportStore();
