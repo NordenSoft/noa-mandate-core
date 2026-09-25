@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyEvidence, loadSchemas } from "../src/verify-evidence.js";
 import { assertReceiptRole, RECEIPT_ROLE_VERDICTS, MANDATORY_RECEIPT_ROLES, type ReceiptRole } from "../src/receipt-roles.js";
-import { buildResolvedKeyring, buildReceiptKeyring } from "../src/trust.js";
+import { asRootKeyEntryMap, asStringKeyring, buildResolvedKeyring, buildReceiptKeyring, signingKeyMap } from "../src/trust.js";
 import type { EvidenceBundle } from "../src/types.js";
 import { b } from "./helpers/bytes.js";
 
@@ -287,4 +287,57 @@ test("BYTES-IN: a flipping getter cannot install a key different from the one ch
   src.keys[0]!.publicKey = "DDDD";
   assert.deepEqual(snap["gate-2"]?.roles, ["hold-signer"], "the keyring aliased the caller's array");
   assert.equal(snap["gate-2"]?.publicKey, "CCCC", "the keyring re-read the caller's object after returning it");
+});
+
+test("BYTES-IN: a kid named after an Object.prototype member is an ordinary entry, never a prototype write or an inherited hit", () => {
+  // A kid is a document-chosen string used as a map key. On a plain `{}` a manifest kid of
+  // `__proto__` REPLACES the map's prototype (the entry vanishes and every absent kid starts
+  // answering with its fields), and an absent kid such as `constructor` resolves to an inherited
+  // function. The byte parser refuses those names as document KEYS, but the published builders take
+  // live objects, and a kid in a manifest's `keys[]` array is a VALUE the parser never refuses.
+  const INHERITED = ["constructor", "toString", "hasOwnProperty", "valueOf", "publicKey"];
+  const manifestKey = (kid: string) => ({ kid, type: "GATE", roles: ["hold-signer"], publicKey: `pk-${kid}`, validFrom: null, revokedAt: null });
+  const manifest = { keys: [manifestKey("__proto__"), manifestKey("constructor"), manifestKey("gate-1")] };
+  const delegation = { delegatedKid: "hasOwnProperty", delegatedPublicKey: "MMMM", permissions: ["key-manifest-sign"], validFrom: null };
+
+  const receipt = buildReceiptKeyring(manifest as never).keys;
+  const resolved = buildResolvedKeyring(asRootKeyEntryMap(b({ "root-a": "RRRR" })), delegation as never, manifest as never);
+  for (const [name, ring] of [["buildReceiptKeyring", receipt], ["buildResolvedKeyring", resolved]] as const) {
+    assert.equal(Object.getPrototypeOf(ring), null, `${name}: a kid-keyed map must not inherit from Object.prototype`);
+    assert.ok(Object.hasOwn(ring, "__proto__"), `${name}: the "__proto__" kid became a prototype write instead of an entry`);
+    assert.equal(ring["__proto__"]?.publicKey, "pk-__proto__", `${name}: the "__proto__" kid lost its key`);
+    assert.equal(ring["constructor"]?.publicKey, "pk-constructor", `${name}: the "constructor" kid lost its key`);
+    assert.equal(ring["gate-1"]?.publicKey, "pk-gate-1", name);
+    for (const kid of ["toString", "valueOf", "publicKey", "retiredAt"]) {
+      assert.equal((ring as Record<string, unknown>)[kid], undefined, `${name}: absent kid ${JSON.stringify(kid)} resolved to an inherited value`);
+    }
+  }
+  assert.deepEqual(Object.keys(receipt), ["__proto__", "constructor", "gate-1"]);
+  assert.equal(resolved["hasOwnProperty"]?.type, "DELEGATED", "the delegated kid lost its key");
+  assert.equal(resolved["root-a"]?.publicKey, "RRRR", "the root key was not carried");
+
+  // The settlement reconciler's bare kid -> key map is projected from the resolved keyring, so it
+  // carries the same kids and must hold them the same way.
+  const signing = signingKeyMap(resolved);
+  assert.equal(Object.getPrototypeOf(signing), null, "signingKeyMap: a kid-keyed map must not inherit from Object.prototype");
+  assert.equal(signing["__proto__"], "pk-__proto__", "signingKeyMap: the \"__proto__\" kid was dropped");
+  assert.equal(signing["constructor"], "pk-constructor", "signingKeyMap: the \"constructor\" kid lost its key");
+  for (const kid of ["toString", "valueOf", "publicKey"]) {
+    assert.equal((signing as Record<string, unknown>)[kid], undefined, `signingKeyMap: absent kid ${JSON.stringify(kid)} resolved to an inherited value`);
+  }
+  assert.deepEqual(Object.keys(signing).sort(), ["__proto__", "constructor", "gate-1", "hasOwnProperty", "root-a"]);
+
+  // The document entry points, including their fail-closed empty results, answer the same way.
+  const rings: Array<[string, Record<string, unknown>]> = [
+    ["asRootKeyEntryMap", asRootKeyEntryMap(b({ "root-a": "RRRR" }))],
+    ["asRootKeyEntryMap(unparseable)", asRootKeyEntryMap(new Uint8Array([0xff]))],
+    ["asStringKeyring", asStringKeyring(b({ "cp-1": "CCCC" }))],
+    ["asStringKeyring(unparseable)", asStringKeyring(new Uint8Array([0xff]))],
+    ["buildResolvedKeyring(no delegation)", buildResolvedKeyring({}, null as never, manifest as never)],
+  ];
+  for (const [name, ring] of rings) {
+    assert.equal(Object.getPrototypeOf(ring), null, `${name}: a kid-keyed map must not inherit from Object.prototype`);
+    for (const kid of INHERITED) assert.equal(ring[kid], undefined, `${name}: absent kid ${JSON.stringify(kid)} resolved to an inherited value`);
+  }
+  assert.equal(({} as Record<string, unknown>)["publicKey"], undefined, "no builder may write through to Object.prototype");
 });

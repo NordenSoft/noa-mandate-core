@@ -327,8 +327,9 @@ function keyRetired(
 /**
  * The same trust root with its retired-kid projection emptied: every retained public key stays, so a
  * signature by a retired key can be AUTHENTICATED, and nothing else changes. It grants no authority
- * on its own — each caller evaluates retirement separately after authentication (historical:
- * `WITNESS_KEY_RETIRED`; current use: `KEY_RETIRED`), so a retired key is never revived as current.
+ * on its own — the historical path evaluates retirement separately after authentication
+ * (`WITNESS_KEY_RETIRED`), so a retired key is never revived as current. The current-use path needs
+ * no projection: `verifyCheckpointParsed` itself authenticates before it answers "retired".
  */
 function retainedPublicMaterial(v: ParsedVerificationKeyring): ParsedVerificationKeyring {
   const retained = objectCreateNull<Mutable<ParsedVerificationKeyring>>();
@@ -808,16 +809,14 @@ function verifyParsedChain(receipts: unknown, o: InertVerifyOptions): VerifyResu
     if (cpVerify === "bad spec" || cpVerify === "malformed checkpoint") {
       return fail("TAMPERED", `checkpoint invalid: ${cpVerify}`, chainId, list.length);
     }
-    // A retired checkpoint key is judged exactly like a retired receipt key (4c-ter): authenticate
-    // the checkpoint against the retained public material first. `verifyCheckpointParsed` answers
-    // "retired signing key" BEFORE it checks the signature, so that answer alone says nothing about
-    // whether these bytes were signed by that key. Only an authentic checkpoint can become
-    // KEY_RETIRED; a forged one falls through to the TAMPERED refusal below.
-    let checkpointKeyRetired = false;
-    if (cpVerify === "retired signing key") {
-      cpVerify = verifyCheckpointParsed(cp, retainedPublicMaterial(verification!));
-      checkpointKeyRetired = cpVerify === "ok";
-    }
+    // A retired checkpoint key is judged exactly like a retired receipt key (4c-ter).
+    // `verifyCheckpointParsed` authenticates the checkpoint against the retired key's retained public
+    // material BEFORE it answers "retired signing key", so that answer means "authentic, by a
+    // retired key" and is carried forward as an authenticated checkpoint. A forged or altered one is
+    // "bad checkpoint signature" and falls through to the TAMPERED refusal below. Only an authentic
+    // checkpoint can become KEY_RETIRED.
+    const checkpointKeyRetired = cpVerify === "retired signing key";
+    if (checkpointKeyRetired) cpVerify = "ok";
     // The checkpoint signature is held to the SAME trust root as receipts: with a keyring, a
     // checkpoint that is not authenticated (bad signature OR a kid not in the keyring) is
     // TAMPERED — never silently honored. Otherwise an attacker could mint their own key, drop
@@ -1426,7 +1425,10 @@ function verifyCheckpointParsed(cp: Checkpoint, verification?: ParsedVerificatio
   if (typeof sig.kid !== "string" || sig.kid.length === 0 || typeof sig.value !== "string" || sig.value.length === 0) {
     return "malformed checkpoint";
   }
-  if (verification?.retiredKids[sig.kid] === true) return "retired signing key";
+  // A lifecycle keyring retains a retired key's public material, so a checkpoint naming a retired
+  // kid is AUTHENTICATED before it is labelled, as a receipt is in `verifyParsedChain` step 4c: a
+  // forged or altered checkpoint is "bad checkpoint signature", and only an authentic one is
+  // "retired signing key". Every caller reads that answer as "authentic, but by a retired key".
   const pub = verification?.keyring[sig.kid];
   if (!pub) return "unverified";
   let msg: Buffer;
@@ -1437,5 +1439,6 @@ function verifyCheckpointParsed(cp: Checkpoint, verification?: ParsedVerificatio
     return "malformed checkpoint";
   }
   const ok = verifyEd25519(pub, msg, sig.value);
-  return ok ? "ok" : "bad checkpoint signature";
+  if (!ok) return "bad checkpoint signature";
+  return verification?.retiredKids[sig.kid] === true ? "retired signing key" : "ok";
 }

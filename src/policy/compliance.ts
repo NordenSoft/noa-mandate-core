@@ -230,16 +230,19 @@ export function verifyReceiptCompliance(
       if ("sha256:" + sha256Hex(hashInput) !== snap.chain.hash) {
         return { ok: false, reason: "carrier receipt hash mismatch — not authentic" };
       }
+      const pub = keyring[snap.sig.kid];
+      if (!pub) return { ok: false, reason: `carrier receipt signing key "${snap.sig.kid}" not in keyring` };
+      if (!verifyEd25519(pub, signingMessage(RECEIPT_SIG_DOMAIN, hashInput), snap.sig.value)) {
+        return { ok: false, reason: "carrier receipt signature not authenticated" };
+      }
+      // Retirement is judged only after authentication: a lifecycle keyring retains a retired key's
+      // public material, so a forged carrier naming a retired kid has already been refused above as
+      // not authenticated, and what reaches here is an authentic signature by a retired key.
       if (verification.retiredKids[snap.sig.kid] === true) {
         return {
           ok: false,
           reason: `carrier receipt signing key ${jsonStringify(snap.sig.kid)} is retired; signer-chosen receipt time is not an independent witness`,
         };
-      }
-      const pub = keyring[snap.sig.kid];
-      if (!pub) return { ok: false, reason: `carrier receipt signing key "${snap.sig.kid}" not in keyring` };
-      if (!verifyEd25519(pub, signingMessage(RECEIPT_SIG_DOMAIN, hashInput), snap.sig.value)) {
-        return { ok: false, reason: "carrier receipt signature not authenticated" };
       }
       // IDENTITY BINDING: the signature is now AUTHENTICATED, so — exactly like verify.ts
       // 4c-bis — when an identityManifest is supplied, require the carrier's (agent.id, sig.kid) pairing to

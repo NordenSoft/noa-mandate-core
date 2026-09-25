@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generateKeyPair } from "../../src/keys.js";
+import { generateKeyPair, signEd25519 } from "../../src/keys.js";
+import { signingMessage, RECEIPT_SIG_DOMAIN } from "../../src/signing.js";
+import { receiptHashInput } from "../../src/canonicalize.js";
 import { buildReceipt, type BuildInput } from "../../src/builder.js";
 import { verifyChain } from "../../src/verify.js";
 import { complianceCommit, verifyReceiptCompliance } from "../../src/policy/compliance.js";
@@ -84,6 +86,29 @@ test("P0-14: compliance carrier authentication refuses a lifecycle-retired signe
   const attack = verifyReceiptCompliance(b(retiredCarrier), b(POLICY), b(inputs), { keyring: lifecycle });
   assert.equal(attack.ok, false, "compliance verifier accepted a carrier signed by a lifecycle-retired key");
   assert.match(attack.reason ?? "", /retired/i);
+});
+
+test("retired kid: carrier authentication reports a forged signature as a signature failure, not a retirement", () => {
+  // The carrier's key is retired, and a retired key's public material is retained, so the signature
+  // can be checked before the refusal is named. A signature the retired key never made is an
+  // integrity failure; only an authentic one is a retirement.
+  const inputs = { action: "payment.refund", amountMinor: 4200 };
+  const carrier = receiptWith(inputs, "EXECUTED");
+  const attacker = generateKeyPair("compliance-label-attacker");
+  const lifecycle = b({
+    spec: "noa.signing-key-lifecycle/0.1",
+    keys: { [kp.kid]: { publicKey: kp.publicKey, retiredAt: "2026-08-01T08:36:12.643Z" } },
+  });
+  const forged = {
+    ...carrier,
+    sig: { ...carrier.sig, value: signEd25519(attacker.privateKey, signingMessage(RECEIPT_SIG_DOMAIN, receiptHashInput(carrier))) },
+  };
+  const attack = verifyReceiptCompliance(b(forged), b(POLICY), b(inputs), { keyring: lifecycle });
+  assert.equal(attack.ok, false);
+  assert.equal(attack.reason, "carrier receipt signature not authenticated", `a forged carrier naming a retired kid was labelled ${JSON.stringify(attack.reason)}`);
+  const authentic = verifyReceiptCompliance(b(carrier), b(POLICY), b(inputs), { keyring: lifecycle });
+  assert.equal(authentic.ok, false);
+  assert.match(authentic.reason ?? "", /is retired/);
 });
 
 test("B4: on-receipt compliance proof — DENY reproduces too", () => {

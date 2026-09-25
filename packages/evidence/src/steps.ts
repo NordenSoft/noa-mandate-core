@@ -23,7 +23,7 @@ import { encodeDocument } from "./bytes.js";
 
 // PRISTINE DECISIONS (review #6, C1). Every membership/search below is a verdict input; none of them
 // may dispatch through a globally-mutable prototype slot an ingested getter can rewrite.
-const { arrayIncludes, arrayJoin, arrayMap, arraySlice, arraySort, setAdd, setHas, setToArray } = intrinsics;
+const { arrayIncludes, arrayJoin, arrayMap, arraySlice, arraySort, objectCreateNull, setAdd, setHas, setToArray } = intrinsics;
 const pristineDateParse = intrinsics.dateParse;
 
 /** The empty permitted-artifact set for an outcome the union table does not name (inert, shared). */
@@ -46,6 +46,7 @@ import { checkEnrolment, checkNonDispatchWitnessed, checkSettlementRequired, typ
 import {
   buildResolvedKeyring,
   buildReceiptKeyring,
+  signingKeyMap,
   type DelegationDoc,
   type ManifestDoc,
 } from "./trust.js";
@@ -1015,11 +1016,7 @@ function checkSettlement(ctx: Ctx, S: StepName): StepResult | null {
   // The reconciler's verifyActionDigest resolves the grant signer through this keyring; the R-16 cap
   // (not reached on the BOUNDS_UNCHECKABLE path) keys on the same material. Build the bare
   // kid->pubkey map both accept, from the manifest-resolved keyring — signing entries only.
-  const stringKeyring: Record<string, string> = {};
-  for (const [kid, entry] of Object.entries(ctx.resolvedKeyring ?? {})) {
-    const pk = (entry as { publicKey?: unknown } | undefined)?.publicKey;
-    if (typeof pk === "string") stringKeyring[kid] = pk;
-  }
+  const stringKeyring = signingKeyMap(ctx.resolvedKeyring);
 
   // R2's supplied/absent distinction is decided at THIS layer, because the reconciler returns one
   // code (SETTLEMENT_BOUNDS_UNCHECKABLE) for both "no preimage" and "wrong preimage". The receipt's
@@ -1472,8 +1469,15 @@ export function step18_temporalAuthorization(ctx: Ctx): StepResult {
     const rk = asStr(getPath(r, "sig.kid"));
     if (rk) setAdd(usedKids, rk);
   }
+  // The checkpoint's kid is a key-state question only when that key made the checkpoint signature.
+  // Step 17 authenticated it against the external checkpoint keyring when it could; when it could
+  // not (the untrusted-anchor path), the kid is only a name the checkpoint carries, so it is judged
+  // here only if the signature verifies under that kid's manifest key. A forged checkpoint naming a
+  // revoked or not-yet-active manifest key stays an untrusted anchor instead of a key-state refusal.
   const cpKid = asStr(getPath(b.checkpoint, "sig.kid"));
-  if (cpKid) setAdd(usedKids, cpKid);
+  if (cpKid && (ctx.checkpointReconciled === true || checkpointSignedByManifestKey(b.checkpoint, cpKid, ctx.resolvedKeyring?.[cpKid]))) {
+    setAdd(usedKids, cpKid);
+  }
 
   for (const kid of setToArray(usedKids)) {
     const entry = ctx.resolvedKeyring?.[kid];
@@ -1484,6 +1488,14 @@ export function step18_temporalAuthorization(ctx: Ctx): StepResult {
     if (err) return fail(S, "E_TEMPORAL_AUTH", err);
   }
   return ok(S);
+}
+
+/** True only when `checkpoint` verifies under the manifest key registered for `kid`. */
+function checkpointSignedByManifestKey(checkpoint: unknown, kid: string, entry: { publicKey?: unknown } | undefined): boolean {
+  if (!entry || typeof entry.publicKey !== "string") return false;
+  const keyring = objectCreateNull<Record<string, string>>();
+  keyring[kid] = entry.publicKey;
+  return verifyCheckpoint(encodeDocument(checkpoint), encodeDocument(keyring)) === "ok";
 }
 
 /**

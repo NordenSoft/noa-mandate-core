@@ -282,7 +282,9 @@ across rosters.
 
 `reserve` re-runs the audience, epoch and roster-expiry checks, but this has a limit. `GET` and
 `wait` already hand the signed grant to the agent that owns the hold, so the reserve checks stop only
-a wrapper that asks before it acts. A single-use commit at the effect owner is separate work.
+a wrapper that asks before it acts. For an effect-owned action the grant is never handed out and the
+single use is consumed at the gate's effect owner, which runs the same checks at commit
+([gate-effect-owner.md](gate-effect-owner.md)).
 
 `POST /v1/holds` returns the sealed display (`encryptedDisplay`) next to the hold envelope whose
 `displayCiphertextHash` binds it. The display is ciphertext, readable only by the approver and audit

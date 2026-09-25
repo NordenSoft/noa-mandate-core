@@ -161,6 +161,26 @@ test("P0-14: approval verification accepts multiple current keys and refuses a l
   assert.match(attack.reason, /retired/i);
 });
 
+test("retired approver key: a forged signature is reported as an invalid signature, not a retirement", () => {
+  // The kernel resolver checks the approval's signature against the retired key's retained public
+  // material before naming the refusal, so a signature the retired key never made is an integrity
+  // failure and only an authentic one is a retirement.
+  const { allowed, approverKp, deferred } = makeApprovedFixture("v-lifecycle-forged");
+  const retiredLifecycle = {
+    spec: "noa.signing-key-lifecycle/0.1",
+    keys: { [approverKp.kid]: { publicKey: approverKp.publicKey, retiredAt: "2026-08-01T08:36:12.643Z" } },
+  };
+  // Same content and kid, a signature made by another key over another receipt.
+  const forged = { ...allowed, sig: { ...allowed.sig, value: deferred.sig.value } };
+  const attack = verifyApprovalReceipt(forged, { approverKeyring: retiredLifecycle, expectedChain: deferred.scope.chain });
+  assert.equal(attack.ok, false);
+  assert.match(attack.reason, /invalid signature/, `a forged approval naming a retired kid was labelled ${JSON.stringify(attack.reason)}`);
+  assert.doesNotMatch(attack.reason, /retired/i);
+  const authentic = verifyApprovalReceipt(allowed, { approverKeyring: retiredLifecycle, expectedChain: deferred.scope.chain });
+  assert.equal(authentic.ok, false);
+  assert.match(authentic.reason, /retired/i);
+});
+
 test("verifyApprovalReceipt: fails closed on an UNTRUSTED signer (kid not in the approver keyring) — the core forgery defense", () => {
   const { allowed } = makeApprovedFixture("v-untrusted");
   const strangerKp = generateKeyPair("stranger");

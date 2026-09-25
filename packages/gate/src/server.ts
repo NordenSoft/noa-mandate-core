@@ -17,6 +17,7 @@ import { parseBearer, hashSecret } from "./auth.js";
 import { RateLimiter } from "./ratelimit.js";
 import type { GateTrust } from "./trust.js";
 import type { ExecutionSigner } from "./exec-signer.js";
+import type { EffectOwner } from "./effect-owner.js";
 
 export interface CreateGateOptions {
   trust: GateTrust;
@@ -28,6 +29,8 @@ export interface CreateGateOptions {
   executionSigner?: ExecutionSigner;
   /** Explicit acknowledgement that the grant key stays on this heap (see GateEngineDeps). */
   unsafeInProcessGrantKey?: true;
+  /** In-process effect owners for effect-owned actions (see GateEngineDeps, docs/gate-effect-owner.md). */
+  effectOwners?: readonly EffectOwner[];
   log?: (event: string, fields: Record<string, unknown>) => void;
 }
 
@@ -53,6 +56,7 @@ export function createGate(opts: CreateGateOptions): Gate {
     ...(opts.sealDisplay ? { sealDisplay: opts.sealDisplay } : {}),
     ...(opts.executionSigner ? { executionSigner: opts.executionSigner } : {}),
     ...(opts.unsafeInProcessGrantKey ? { unsafeInProcessGrantKey: opts.unsafeInProcessGrantKey } : {}),
+    ...(opts.effectOwners ? { effectOwners: opts.effectOwners } : {}),
     ...(opts.log ? { log: opts.log } : {}),
   });
   const limiter = new RateLimiter({ burst: config.rateLimitBurst, refillPerMin: config.rateLimitRefillPerMin, now: config.now });
@@ -219,6 +223,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, engine: GateEng
   }
   if (method === "POST" && /^\/v1\/holds\/[^/]+\/cancel$/.test(path)) {
     return respond(res, engine.cancelLocalStateLost(seg(path, 3), agent));
+  }
+  // Effect-owned commit (docs/gate-effect-owner.md). Owner-scoped like cancel, and like cancel it
+  // reads no body: the hold names everything the commit needs.
+  if (method === "POST" && /^\/v1\/holds\/[^/]+\/commit$/.test(path)) {
+    return respond(res, engine.commit(seg(path, 3), agent));
   }
   if (method === "GET" && /^\/v1\/holds\/[^/]+$/.test(path)) {
     return respond(res, engine.getHold(seg(path, 3), agent));

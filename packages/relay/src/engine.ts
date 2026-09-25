@@ -861,13 +861,16 @@ export class RelayEngine {
     // Resolve the SIGNER by the receipt's kid. Unknown kid ⇒ forged-key ⇒ 422 (never accepted).
     const signer = this.store.getDeviceByKid(receipt.sig.kid);
     if (!signer) return err(422, "UNKNOWN_SIGNER_KID");
-    if (signer.revokedAt !== null) return err(403, "DEVICE_REVOKED");
-    if (signer.id !== device.id) return err(403, "DEVICE_MISMATCH");
 
-    // Transport-level signature check against the REGISTERED PUBLIC key.
+    // Transport-level signature check against the REGISTERED PUBLIC key, BEFORE the signer's state
+    // is named: DEVICE_REVOKED and DEVICE_MISMATCH describe the device that signed, which is only
+    // known once the signature authenticates. A receipt its named device never signed is
+    // UNVERIFIED_SIGNATURE whatever that device's state. Labels only: every one of these refuses.
     if (!verifyReceiptSignature(receipt, signer.publicKeyHex)) {
       return err(422, "UNVERIFIED_SIGNATURE");
     }
+    if (signer.revokedAt !== null) return err(403, "DEVICE_REVOKED");
+    if (signer.id !== device.id) return err(403, "DEVICE_MISMATCH");
 
     // Exact-action binding: the decision must be for THIS hold (canonical + paramsHash).
     const ra = isRecord(receipt.action) ? receipt.action : undefined;

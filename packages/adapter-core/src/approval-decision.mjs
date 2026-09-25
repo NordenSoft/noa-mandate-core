@@ -169,7 +169,10 @@ export function verifyApprovalReceipt(allowedReceipt, { approverKeyring, identit
       return { ok: false, reason: "approval receipt hash does not match its content (tampered)" };
     }
 
-    const resolved = resolveVerificationKey(canonicalize(approverKeyring), sig.kid);
+    const message = bufferConcat([bufferFrom(RECEIPT_SIG_DOMAIN + ":", "utf8"), sha256Digest(hashInput)]);
+    // The message and signature go to the resolver too: a RETIRED approver kid is refused as retired
+    // only when this signature is authentic, and a forgery naming it is an invalid signature.
+    const resolved = resolveVerificationKey(canonicalize(approverKeyring), sig.kid, message, sig.value);
     if (!resolved.ok) {
       if (resolved.reason.endsWith("not in keyring")) {
         return { ok: false, reason: `signing key ${jsonStringify(sig.kid)} is not in the trusted approver keyring` };
@@ -177,7 +180,6 @@ export function verifyApprovalReceipt(allowedReceipt, { approverKeyring, identit
       return { ok: false, reason: resolved.reason };
     }
     const pub = resolved.publicKey;
-    const message = bufferConcat([bufferFrom(RECEIPT_SIG_DOMAIN + ":", "utf8"), sha256Digest(hashInput)]);
     let sigOk = false;
     try {
       sigOk = verifyEd25519(pub, message, sig.value);

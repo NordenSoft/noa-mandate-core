@@ -72,7 +72,22 @@ export {
 export { buildHoldEnvelope, type BuildHoldEnvelopeInput } from "./envelope.js";
 export { issueGrant, buildConsumption, buildUncertainty } from "./grants.js";
 export { buildHoldResolution } from "./resolution.js";
-export { getProjection, type DisplayProjection } from "./projections.js";
+export { getProjection, isEffectOwned, type DisplayProjection } from "./projections.js";
+// Effect-owned commit (docs/gate-effect-owner.md): the in-process reference owner and its types.
+export {
+  createInMemoryLedgerEffectOwner,
+  assertEffectOwnerTrust,
+  buildEffectAttestation,
+  type EffectOwner,
+  type EffectSealer,
+  type VerifiedAuthority,
+  type EffectOutcome,
+  type EffectCommitInput,
+  type EffectAttestation,
+  type EffectRefusalCode,
+  type LedgerRefusalCode,
+  type LedgerRow,
+} from "./effect-owner.js";
 export {
   guard,
   InProcessGateClient,

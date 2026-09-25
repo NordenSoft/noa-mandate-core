@@ -230,10 +230,13 @@ export function verifyOutcomeReceipt(outcomeReceipt, opts = {}) {
       return { ok: false, reason: "missing or malformed verification data" };
     }
 
-    const resolved = resolveVerificationKey(canonicalize(verification), sig.kid);
+    const message = signingBytes(unsigned);
+    // The message and signature go to the resolver too: a RETIRED outcome kid is refused as retired
+    // only when this signature is authentic, and a forgery naming it is an invalid signature.
+    const resolved = resolveVerificationKey(canonicalize(verification), sig.kid, message, sig.value);
     if (!resolved.ok) return { ok: false, reason: resolved.reason };
     const pub = resolved.publicKey;
-    if (!verifyEd25519(pub, signingBytes(unsigned), sig.value)) return { ok: false, reason: "signature mismatch" };
+    if (!verifyEd25519(pub, message, sig.value)) return { ok: false, reason: "signature mismatch" };
     if (expectedDecisionReceipt) {
       if (
         unsigned.decision.id !== expectedDecisionReceipt.id ||

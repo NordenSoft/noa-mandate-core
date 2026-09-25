@@ -62,6 +62,9 @@ const POLICY = join(THIS_DIR, "publish-artifact-policy.json");
 const PUBLIC_REPOS = join(THIS_DIR, "../boundary-public-repos.json");
 const POLICY_REPO_PATH = "scripts/lib/publish-artifact-policy.json";
 const POLICY_SCHEMA = "noa.publish-artifact-policy/2";
+// The one public source repository npm provenance must name. The policy file carries the same
+// value; both must agree, exactly as for the homepage and license members.
+const PUBLIC_SOURCE_REPOSITORY_URL = "https://github.com/NordenSoft/noa-mandate-core.git";
 const CONTROLLER_REPO_FILES = Object.freeze([
   Object.freeze({ mode: "100644", path: "scripts/boundary-public-repos.json" }),
   Object.freeze({ mode: "100644", path: "scripts/lib/npm-homedir-override.cjs" }),
@@ -474,21 +477,48 @@ function resolveLocalDependency(packagePath, specifier) {
   return target === "" ? "." : target;
 }
 
-export function planReleaseManifests(packages) {
+/**
+ * The exact `repository` member every public artifact carries. npm trusted publishing and
+ * provenance require `repository.url` to match the source repository exactly, so the value comes
+ * from the independent policy, never from the package being staged. Subpackages also name their
+ * directory inside that repository.
+ */
+export function expectedRepositoryMetadata(packagePath, repositoryUrl) {
+  if (typeof repositoryUrl !== "string" || repositoryUrl === "") {
+    fail("public source repository URL is absent from the publish-artifact policy");
+  }
+  return packagePath === "."
+    ? { type: "git", url: repositoryUrl }
+    : { type: "git", url: repositoryUrl, directory: packagePath };
+}
+
+function sameRepositoryMetadata(actual, expected) {
+  if (actual === null || typeof actual !== "object" || Array.isArray(actual)) return false;
+  const actualKeys = Object.keys(actual).sort(bytewiseCompare);
+  const expectedKeys = Object.keys(expected).sort(bytewiseCompare);
+  return actualKeys.length === expectedKeys.length &&
+    actualKeys.every((key, index) => key === expectedKeys[index] && actual[key] === expected[key]);
+}
+
+export function planReleaseManifests(packages, policy) {
+  const repositoryUrl = policy?.manifestPolicy?.repositoryUrl;
   const byPath = new Map(packages.map((entry) => [entry.packagePath, entry]));
   const planned = [];
   for (const entry of packages) {
     const releaseManifest = structuredClone(entry.manifest);
     const transformations = [];
-    if (Object.prototype.hasOwnProperty.call(releaseManifest, "repository")) {
-      delete releaseManifest.repository;
+    const expectedRepository = expectedRepositoryMetadata(entry.packagePath, repositoryUrl);
+    if (!Object.prototype.hasOwnProperty.call(releaseManifest, "repository")) {
+      releaseManifest.repository = expectedRepository;
       transformations.push({
         field: "repository",
-        from: "SOURCE_OMITTED_FROM_PUBLIC_ARTIFACT",
+        from: "SOURCE_ABSENT",
         name: "repository",
         targetPath: entry.packagePath,
-        to: "SOURCE_ABSENT",
+        to: JSON.stringify(expectedRepository),
       });
+    } else if (!sameRepositoryMetadata(releaseManifest.repository, expectedRepository)) {
+      fail(`${entry.packagePath} repository metadata differs from the public source policy value`);
     }
     for (const field of DEPENDENCY_FIELDS) {
       const dependencies = releaseManifest[field];
@@ -557,13 +587,14 @@ export function loadPublishArtifactPolicy(policyPath = POLICY) {
   }
   requireExactKeys(
     policy.manifestPolicy,
-    ["enginesNode", "homepage", "license", "provenanceRequired"],
+    ["enginesNode", "homepage", "license", "provenanceRequired", "repositoryUrl"],
     "publish-artifact manifest policy",
   );
   if (policy.manifestPolicy.enginesNode !== ">=20" ||
       policy.manifestPolicy.homepage !== "https://noatrust.com" ||
       policy.manifestPolicy.license !== "Apache-2.0" ||
-      policy.manifestPolicy.provenanceRequired !== true) {
+      policy.manifestPolicy.provenanceRequired !== true ||
+      policy.manifestPolicy.repositoryUrl !== PUBLIC_SOURCE_REPOSITORY_URL) {
     fail("publish-artifact manifest policy does not match the canonical public-package contract");
   }
   const prefixes = new Set();
@@ -631,8 +662,14 @@ export function validatePublicPackageMetadata(packages, policy, gitSource) {
     if (manifest.homepage !== policy.manifestPolicy.homepage) {
       fail(`${entry.name} homepage is not the public-package policy value`);
     }
-    if (Object.prototype.hasOwnProperty.call(manifest, "repository")) {
-      fail(`${entry.name} public manifest must omit repository metadata until an approved public source exists`);
+    if (!Object.prototype.hasOwnProperty.call(manifest, "repository")) {
+      fail(`${entry.name} public manifest lacks the public source repository metadata`);
+    }
+    if (!sameRepositoryMetadata(
+      manifest.repository,
+      expectedRepositoryMetadata(entry.packagePath, policy.manifestPolicy.repositoryUrl),
+    )) {
+      fail(`${entry.name} repository metadata is not the exact public source policy value`);
     }
     if (canonicalJson(manifest.publishConfig) !== canonicalJson(expectedPublishConfig)) {
       fail(`${entry.name} publishConfig does not require public access and provenance`);
@@ -1640,8 +1677,8 @@ function verifyPackedManifest(parsed, expected) {
   if (manifest.name !== expected.name || manifest.version !== expected.version) {
     fail(`tarball identity mismatch for ${expected.filename}`);
   }
-  if (Object.prototype.hasOwnProperty.call(manifest, "repository")) {
-    fail(`tarball ${expected.filename} retains source repository metadata`);
+  if (!sameRepositoryMetadata(manifest.repository, expected.releaseManifest.repository)) {
+    fail(`tarball ${expected.filename} repository metadata is not the planned public source`);
   }
   for (const field of DEPENDENCY_FIELDS) {
     for (const [name, specifier] of Object.entries(manifest[field] ?? {})) {
@@ -1964,7 +2001,7 @@ function verifyGitBinding(manifest, gitSource, policy) {
   if (canonicalJson(manifest.source) !== canonicalJson(expectedSource)) {
     fail("candidate manifest source identity does not match the requested immutable Git tree");
   }
-  const planned = planReleaseManifests(derivePackageInventory(gitSource));
+  const planned = planReleaseManifests(derivePackageInventory(gitSource), policy);
   enforcePolicyPackageSet(planned, policy, gitSource);
   if (planned.length !== manifest.packages.length) {
     fail("candidate artifact count does not match the immutable Git package inventory");
@@ -2443,7 +2480,7 @@ export function stagePublishArtifacts({
     const policy = loadPublishArtifactPolicy(controller.policy);
     const driverDigest = sha256Hex(readFileSync(controller.driver));
     const inventory = derivePackageInventory(gitSource);
-    const plannedPackages = planReleaseManifests(inventory);
+    const plannedPackages = planReleaseManifests(inventory, policy);
     enforcePolicyPackageSet(plannedPackages, policy, gitSource);
     const linterSourceRoot = join(workRoot, "exact-git-source");
     materializeGitSource(gitSource, linterSourceRoot);

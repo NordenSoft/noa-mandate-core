@@ -233,6 +233,18 @@ export interface HoldRecord {
   expiresAt: number;
   decidedAt: number | null;
   createdAt: number;
+  /**
+   * The `bootId` of the trust root that froze this hold. `decide()` and `commit()` refuse a hold from
+   * another boot (410 HOLD_FROM_DEAD_BOOT): a persistent gate key keeps a pre-restart envelope
+   * verifiable, and without this check a hold frozen before a restart could still be approved or
+   * committed after it.
+   */
+  bootId: string;
+  /**
+   * EFFECT-OWNED holds only: the canonical params text the adapter hashed into `paramsHash`, kept so
+   * the effect owner can re-derive the hash at commit. `null` for every other hold. Never in a view.
+   */
+  canonicalParams: string | null;
 }
 
 /** An agent (per-agent API key, F29). Only the key HASH is stored. */

@@ -98,3 +98,33 @@ test("after revokeSelf, the signer-revoke check in decide() rejects — 403 DEVI
   assert.equal(res.status, 403);
   assert.equal(bodyOf<{ error: string }>(res).error, "DEVICE_REVOKED");
 });
+
+test("decide() authenticates the receipt before naming the signer's state: a forgery is UNVERIFIED_SIGNATURE, never DEVICE_REVOKED or DEVICE_MISMATCH", () => {
+  // DEVICE_REVOKED and DEVICE_MISMATCH describe the REGISTERED device whose kid the receipt names.
+  // That is true of a receipt the device signed; for a signature it never made, the answer is that
+  // the receipt is not authentic.
+  const h = makeHarness();
+  const { agent } = makeAgent(h);
+  const d = makeDevice(h, agent, "approver-1", 7);
+  const other = makeDevice(h, agent, "approver-2", 9);
+  const forger = generateKeyPair("approver-1", new Uint8Array(32).fill(13));
+  const created = h.engine.createHold(agent, "idem-forged", { action: ACTION });
+  const { holdId } = bodyOf<{ holdId: string }>(created);
+  const receiptBy = (kid: string, privateKey: string) => signDecisionReceipt({
+    kid,
+    privateKey,
+    canonical: ACTION.canonical,
+    paramsHash: ACTION.paramsHash,
+    verdict: "ALLOWED",
+  });
+  const errorOf = (res: { status: number; body: unknown }) => `${res.status} ${bodyOf<{ error: string }>(res).error}`;
+
+  // Another registered device's kid: authentic -> DEVICE_MISMATCH; forged -> UNVERIFIED_SIGNATURE.
+  assert.equal(errorOf(h.engine.decide(d.device, holdId, { receipt: receiptBy(other.kid, other.privateKey) })), "403 DEVICE_MISMATCH");
+  assert.equal(errorOf(h.engine.decide(d.device, holdId, { receipt: receiptBy(other.kid, forger.privateKey) })), "422 UNVERIFIED_SIGNATURE");
+
+  // A revoked signer: authentic -> DEVICE_REVOKED; forged -> UNVERIFIED_SIGNATURE.
+  assert.equal(h.engine.revokeSelf(d.device).status, 204);
+  assert.equal(errorOf(h.engine.decide(d.device, holdId, { receipt: receiptBy(d.kid, d.privateKey) })), "403 DEVICE_REVOKED");
+  assert.equal(errorOf(h.engine.decide(d.device, holdId, { receipt: receiptBy(d.kid, forger.privateKey) })), "422 UNVERIFIED_SIGNATURE");
+});

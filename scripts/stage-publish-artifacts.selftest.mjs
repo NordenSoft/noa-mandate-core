@@ -76,12 +76,15 @@ const DOCKER_CANDIDATES = [
 const TEST_ROOT = mkdtempSync(join(tmpdir(), "noa-publish-artifact-selftest-"));
 let checks = 0;
 const FIXTURE_NOTICE_TITLE = "NOA Fixture — public package metadata fixture";
+const FIXTURE_REPOSITORY_URL = "https://github.com/NordenSoft/noa-mandate-core.git";
 const FIXTURE_MANIFEST_POLICY = Object.freeze({
   enginesNode: ">=20",
   homepage: "https://noatrust.com",
   license: "Apache-2.0",
   provenanceRequired: true,
+  repositoryUrl: FIXTURE_REPOSITORY_URL,
 });
+const FIXTURE_PLANNING_POLICY = Object.freeze({ manifestPolicy: FIXTURE_MANIFEST_POLICY });
 const EXPECTED_PUBLISH_SURFACE_SCRIPT = "node scripts/lib/stage-publish-artifacts.mjs --verify";
 const EXPECTED_PUBLISH_SURFACE_SELFTEST_SCRIPT = "node scripts/lint-published-surface.mjs --selftest";
 const EXPECTED_PREPUBLISH_REFUSAL = String.raw`node -e "process.stderr.write('RELEASE_FROZEN: direct mutable-directory publication is disabled. Only a separately governed controller may verify and publish immutable tarball bytes; this hook grants no release authority.\n'); process.exit(1)"`;
@@ -218,6 +221,7 @@ function fixtureManifest(overrides = {}) {
     license: "Apache-2.0",
     main: "dist/src/index.js",
     publishConfig: { access: "public", provenance: true },
+    repository: { type: "git", url: FIXTURE_REPOSITORY_URL },
     ...overrides,
   };
 }
@@ -722,7 +726,7 @@ try {
     );
     const validate = (overrides, noticeTitle) => {
       const source = sourceFor(overrides, noticeTitle);
-      validatePublicPackageMetadata(planReleaseManifests(derivePackageInventory(source)), policy, source);
+      validatePublicPackageMetadata(planReleaseManifests(derivePackageInventory(source), policy), policy, source);
     };
     assert.doesNotThrow(() => validate({}));
     for (const [overrides, noticeTitle, pattern] of [
@@ -737,7 +741,110 @@ try {
     ]) {
       expectValidation(() => validate(overrides, noticeTitle), pattern);
     }
-    assert.doesNotThrow(() => validate({ repository: { type: "git", url: "https://example.invalid/private.git" } }));
+    expectValidation(
+      () => validate({ repository: { type: "git", url: "https://example.invalid/private.git" } }),
+      /repository metadata differs from the public source policy value/u,
+    );
+  });
+
+  check("public-package metadata requires the exact public source repository", () => {
+    const policy = {
+      allowedBuildOutputPrefixes: ["dist/src/"],
+      manifestPolicy: { ...FIXTURE_MANIFEST_POLICY },
+      packages: [
+        {
+          name: "noa-fixture",
+          noticeTitle: FIXTURE_NOTICE_TITLE,
+          packagePath: ".",
+          pathCount: 1,
+          pathSetSha256: "0".repeat(64),
+        },
+        {
+          name: "noa-fixture-sub",
+          noticeTitle: FIXTURE_NOTICE_TITLE,
+          packagePath: "packages/sub",
+          pathCount: 1,
+          pathSetSha256: "0".repeat(64),
+        },
+      ],
+      schema: "noa.publish-artifact-policy/2",
+    };
+    const carriers = [
+      ["LICENSE", "Apache-2.0 fixture license.\n"],
+      ["NOTICE", `${FIXTURE_NOTICE_TITLE}\n`],
+      ["README.md", "A modest fixture.\n"],
+      ["packages/sub/LICENSE", "Apache-2.0 fixture license.\n"],
+      ["packages/sub/NOTICE", `${FIXTURE_NOTICE_TITLE}\n`],
+      ["packages/sub/README.md", "A modest fixture.\n"],
+    ];
+    const rootRepository = { type: "git", url: FIXTURE_REPOSITORY_URL };
+    const subRepository = { type: "git", url: FIXTURE_REPOSITORY_URL, directory: "packages/sub" };
+    const sourceFor = (rootOverrides, subOverrides) => fakeGitSource({
+      "package.json": fixtureManifest(rootOverrides),
+      "packages/sub/package.json": fixtureManifest({ name: "noa-fixture-sub", repository: subRepository, ...subOverrides }),
+    }, carriers);
+    const plan = (source) => planReleaseManifests(derivePackageInventory(source), policy);
+    const refuses = (label, fn, pattern) => assert.throws(
+      fn,
+      (error) => error instanceof ValidationFailure && pattern.test(error.message),
+      `${label} was not refused with ${pattern}`,
+    );
+
+    // Correct: the exact policy value is accepted and the source bytes stay untouched.
+    const exact = sourceFor({}, {});
+    const exactPlan = plan(exact);
+    assert.doesNotThrow(() => validatePublicPackageMetadata(exactPlan, policy, exact));
+    for (const entry of exactPlan) {
+      assert.deepEqual(entry.transformations, [], `${entry.packagePath}: an exact repository was rewritten`);
+      assert.equal(entry.releaseManifestBytes.equals(entry.sourceManifestBytes), true);
+    }
+
+    // Absent at the source: staging WRITES the policy value (never deletes it) and records it.
+    const absent = sourceFor({ repository: undefined }, { repository: undefined });
+    const absentPlan = plan(absent);
+    assert.doesNotThrow(() => validatePublicPackageMetadata(absentPlan, policy, absent));
+    for (const [entry, expected] of [[absentPlan[0], rootRepository], [absentPlan[1], subRepository]]) {
+      assert.deepEqual(entry.releaseManifest.repository, expected);
+      assert.deepEqual(entry.transformations, [{
+        field: "repository",
+        from: "SOURCE_ABSENT",
+        name: "repository",
+        targetPath: entry.packagePath,
+        to: JSON.stringify(expected),
+      }]);
+      assert.deepEqual(JSON.parse(entry.releaseManifestBytes.toString("utf8")).repository, expected);
+    }
+
+    // Wrong at the source: planning refuses instead of silently rewriting a foreign coordinate.
+    for (const [label, rootOverrides, subOverrides] of [
+      ["wrong root URL", { repository: { type: "git", url: "https://example.invalid/other-source.git" } }, {}],
+      ["git+https root spelling", { repository: { type: "git", url: `git+${FIXTURE_REPOSITORY_URL}` } }, {}],
+      ["string shorthand", { repository: "github:NordenSoft/noa-mandate-core" }, {}],
+      ["extra repository member", { repository: { ...rootRepository, directory: "." } }, {}],
+      ["subpackage without directory", {}, { repository: rootRepository }],
+      ["subpackage wrong directory", {}, { repository: { ...subRepository, directory: "packages/other" } }],
+    ]) {
+      refuses(
+        label,
+        () => plan(sourceFor(rootOverrides, subOverrides)),
+        /repository metadata differs from the public source policy value/u,
+      );
+    }
+
+    // Validation refuses a release manifest that is missing or carries a wrong repository even when
+    // a defective planner produced it.
+    const mutated = (mutate) => {
+      const copy = exactPlan.map((entry) => ({ ...entry, releaseManifest: structuredClone(entry.releaseManifest) }));
+      mutate(copy);
+      return copy;
+    };
+    for (const [label, mutate, pattern] of [
+      ["missing", (copy) => { delete copy[0].releaseManifest.repository; }, /lacks the public source repository metadata/u],
+      ["wrong URL", (copy) => { copy[0].releaseManifest.repository.url = "https://example.invalid/other-source.git"; }, /not the exact public source policy value/u],
+      ["missing subpackage directory", (copy) => { delete copy[1].releaseManifest.repository.directory; }, /not the exact public source policy value/u],
+    ]) {
+      refuses(label, () => validatePublicPackageMetadata(mutated(mutate), policy, exact), pattern);
+    }
   });
 
   check("publish-artifact policy rejects provider visibility and private classification fields", () => {
@@ -758,10 +865,13 @@ try {
         dependencies: { "noa-root": "file:../.." },
       },
     });
-    const planned = planReleaseManifests(derivePackageInventory(source));
+    const planned = planReleaseManifests(derivePackageInventory(source), FIXTURE_PLANNING_POLICY);
     const a = planned.find((entry) => entry.name === "noa-a");
     assert.equal(a.releaseManifest.dependencies["noa-root"], "^2.3.4");
-    assert.equal(a.transformations.length, 1);
+    assert.deepEqual(
+      a.transformations.filter((transformation) => transformation.field === "dependencies"),
+      [{ field: "dependencies", from: "file:../..", name: "noa-root", targetPath: ".", to: "^2.3.4" }],
+    );
   });
 
   check("release manifest planning rejects path escape and mismatched dependency identity", () => {
@@ -772,7 +882,7 @@ try {
       },
     });
     expectValidation(
-      () => planReleaseManifests(derivePackageInventory(escaped)),
+      () => planReleaseManifests(derivePackageInventory(escaped), FIXTURE_PLANNING_POLICY),
       /escapes repository/u,
     );
     const mismatched = fakeGitSource({
@@ -783,18 +893,43 @@ try {
       "packages/b/package.json": { name: "noa-b", version: "1.0.0" },
     });
     expectValidation(
-      () => planReleaseManifests(derivePackageInventory(mismatched)),
+      () => planReleaseManifests(derivePackageInventory(mismatched), FIXTURE_PLANNING_POLICY),
       /named noa-b/u,
     );
   });
 
-  check("exact fixture source strips private repository metadata from the release manifest", () => {
+  check("release manifest planning refuses a private source repository and a policy without one", () => {
     const source = fakeGitSource({ "package.json": fixtureManifest({ repository: { type: "git", url: "https://example.invalid/private.git" } }) });
-    const planned = planReleaseManifests(derivePackageInventory(source));
-    assert.equal(planned.length, 1);
-    assert.equal(Object.prototype.hasOwnProperty.call(planned[0].releaseManifest, "repository"), false);
-    assert.equal(planned[0].transformations[0].field, "repository");
-    assert.equal(planned[0].releaseManifestBytes.equals(planned[0].sourceManifestBytes), false);
+    expectValidation(
+      () => planReleaseManifests(derivePackageInventory(source), FIXTURE_PLANNING_POLICY),
+      /repository metadata differs from the public source policy value/u,
+    );
+    const exact = fakeGitSource({ "package.json": fixtureManifest() });
+    for (const policy of [undefined, {}, { manifestPolicy: { ...FIXTURE_MANIFEST_POLICY, repositoryUrl: "" } }]) {
+      expectValidation(
+        () => planReleaseManifests(derivePackageInventory(exact), policy),
+        /public source repository URL is absent/u,
+      );
+    }
+  });
+
+  check("publish-artifact policy pins the exact public source repository URL", () => {
+    const base = JSON.parse(readFileSync(join(HERE, "lib", "publish-artifact-policy.json"), "utf8"));
+    assert.equal(base.manifestPolicy.repositoryUrl, FIXTURE_REPOSITORY_URL);
+    for (const [label, repositoryUrl] of [
+      ["absent", undefined],
+      ["git+https spelling", `git+${FIXTURE_REPOSITORY_URL}`],
+      ["another repository", "https://example.invalid/other-source.git"],
+    ]) {
+      const path = join(TEST_ROOT, `policy-repository-${label.replace(/[^a-z]+/gu, "-")}.json`);
+      const manifestPolicy = { ...base.manifestPolicy, repositoryUrl };
+      writeFileSync(path, `${JSON.stringify({ ...base, manifestPolicy })}\n`);
+      assert.throws(
+        () => loadPublishArtifactPolicy(path),
+        (error) => error instanceof ValidationFailure,
+        `${label} repository URL was accepted by the policy loader`,
+      );
+    }
   });
 
   check("exact Git controller materialization enforces every authority and its Git mode", () => {

@@ -935,6 +935,26 @@
       "exception": "EX-TEST-FIXTURES"
     },
     {
+      "id": "evidence-manifestkey-0",
+      "package": "evidence",
+      "file": "packages/evidence/test/immutable-ingest-boundary.test.ts",
+      "scope": "manifestKey",
+      "ordinal": 0,
+      "line": 299,
+      "kind": "construct",
+      "class": "test",
+      "input": "test-local manifest keys whose kids are Object.prototype member names (__proto__, constructor) beside an ordinary kid",
+      "output": "KeyEntry (test fixture)",
+      "validFrom": "explicit",
+      "revokedAt": "explicit",
+      "missingValue": "tests pin absent/legacy states on purpose",
+      "malformedValue": "tests pin malformed states on purpose",
+      "timestampParser": "test-local constants (null)",
+      "consumer": "buildReceiptKeyring + buildResolvedKeyring, under test — the arm proving a prototype-member kid is an ordinary entry of a null-prototype map, never a prototype write or an inherited hit",
+      "proofs": [],
+      "exception": "EX-TEST-FIXTURES"
+    },
+    {
       "id": "gate-createalphatrust-keymanifest-keys-0",
       "package": "gate",
       "file": "packages/gate/src/trust.ts",
@@ -1449,6 +1469,86 @@
       "exception": "EX-TEST-FIXTURES"
     },
     {
+      "id": "gate-effect-owner-roster-approvers-0",
+      "package": "gate",
+      "file": "packages/gate/test/effect-owner.test.ts",
+      "scope": "roster>approvers",
+      "ordinal": 0,
+      "line": 274,
+      "kind": "construct",
+      "class": "test",
+      "input": "test-local key material",
+      "output": "roster approver declaration (test fixture)",
+      "validFrom": "explicit",
+      "revokedAt": "explicit",
+      "missingValue": "tests pin absent/legacy states on purpose",
+      "malformedValue": "tests pin malformed states on purpose",
+      "timestampParser": "test-local constants",
+      "consumer": "parseGateRoster / createPinnedTrust / the effect owner's commit-time verification under test",
+      "proofs": [],
+      "exception": "EX-TEST-FIXTURES"
+    },
+    {
+      "id": "gate-effect-owner-roster2-approvers-0",
+      "package": "gate",
+      "file": "packages/gate/test/effect-owner.test.ts",
+      "scope": "roster2>approvers",
+      "ordinal": 0,
+      "line": 307,
+      "kind": "construct",
+      "class": "test",
+      "input": "test-local key material",
+      "output": "roster approver declaration (test fixture)",
+      "validFrom": "explicit",
+      "revokedAt": "explicit",
+      "missingValue": "tests pin absent/legacy states on purpose",
+      "malformedValue": "tests pin malformed states on purpose",
+      "timestampParser": "test-local constants",
+      "consumer": "parseGateRoster / createPinnedTrust / the effect owner's commit-time verification under test",
+      "proofs": [],
+      "exception": "EX-TEST-FIXTURES"
+    },
+    {
+      "id": "gate-effect-owner-roster2-approvers-1",
+      "package": "gate",
+      "file": "packages/gate/test/effect-owner.test.ts",
+      "scope": "roster2>approvers",
+      "ordinal": 1,
+      "line": 308,
+      "kind": "construct",
+      "class": "test",
+      "input": "test-local key material",
+      "output": "roster approver declaration (test fixture)",
+      "validFrom": "explicit",
+      "revokedAt": "explicit",
+      "missingValue": "tests pin absent/legacy states on purpose",
+      "malformedValue": "tests pin malformed states on purpose",
+      "timestampParser": "test-local constants",
+      "consumer": "parseGateRoster / createPinnedTrust / the effect owner's commit-time verification under test",
+      "proofs": [],
+      "exception": "EX-TEST-FIXTURES"
+    },
+    {
+      "id": "gate-effect-owner-nonrecipient-approvers-0",
+      "package": "gate",
+      "file": "packages/gate/test/effect-owner.test.ts",
+      "scope": "nonRecipientApproval>other>approvers",
+      "ordinal": 0,
+      "line": 583,
+      "kind": "construct",
+      "class": "test",
+      "input": "test-local key material",
+      "output": "roster approver declaration (test fixture)",
+      "validFrom": "explicit",
+      "revokedAt": "explicit",
+      "missingValue": "tests pin absent/legacy states on purpose",
+      "malformedValue": "tests pin malformed states on purpose",
+      "timestampParser": "test-local constants",
+      "consumer": "parseGateRoster / createPinnedTrust / the effect owner's commit-time verification under test",
+      "proofs": [],
+      "exception": "EX-TEST-FIXTURES"
+    },
+    {
       "id": "gate-pinned-roster-doc-approvers-0",
       "package": "gate",
       "file": "packages/gate/test/pinned-roster.test.ts",
@@ -1670,6 +1770,18 @@
       ]
     },
     {
+      "id": "gate-effect-owner-consumer",
+      "file": "packages/gate/src/effect-owner.ts",
+      "anchor": "      keyring: trust.keyring,",
+      "role": "consume",
+      "output": "verifyArtifact ctx (commit-time re-verification of the hold envelope, the execution grant, the approver decision and the returned consumption; decision authorizationTime = the grant's signed issuedAt). The same owner passes the trust root's receiptKeyring wholesale to verifyChain for the deferred, approval and executed receipts; no field is selected or synthesised.",
+      "validFrom": "enforced-downstream",
+      "revokedAt": "enforced-downstream",
+      "proofs": [
+        "RES-PAR-GATE-EFFECT-OWNER"
+      ]
+    },
+    {
       "id": "verify-activation-enforcement",
       "file": "packages/approval-artifacts/src/verify.ts",
       "anchor": "// ACTIVATION (validFrom) — the mirror of revocation",
@@ -1827,7 +1939,8 @@
     "packages/evidence/test/settlement-observer.test.ts": "evidence tests/tools: hands shipped fixture trust documents to verifyEvidence as bytes to measure the reported settlement-observer relationship. It reads a relationship the reconciler derived; it declares no key material, constructs no KeyEntry and resolves nothing itself.",
     "packages/evidence/test/cause-inventory.test.ts": "evidence tests/tools: enumerates verifier refusal causes from src/steps.ts and src/enrolment.ts, then hands each shipped fixture's tenantRoot/checkpointKeyring to verifyEvidence as bytes to record which cause it produces. The trust documents are passed through verbatim from the corpus; it declares no key material, constructs no KeyEntry and resolves nothing itself.",
     "packages/gate/src/cli.ts": "reference gate CLI: reads roster fields only to print the roster-check report and the pinned boot banner; constructs no KeyEntry — the pinned keyring is built by createPinnedTrust (trust.ts, censused above)",
-    "packages/gate/test/pinned-cli.test.ts": "gate tests: spawn the pinned CLI with rosters built by test/helpers/pinned.ts; construct no KeyEntry"
+    "packages/gate/test/pinned-cli.test.ts": "gate tests: spawn the pinned CLI with rosters built by test/helpers/pinned.ts; construct no KeyEntry",
+    "packages/gate/test/effect-commit.test.ts": "gate tests: read the pinned trust root's keyring and receiptKeyring wholesale to verify a commit's signed consumption and receipt chain; construct no KeyEntry (the roster fixtures are test/helpers/pinned.ts, censused above)"
   },
   "proofs": {
     "RES-PAR-GATE-KEYRING": {
@@ -1885,6 +1998,10 @@
     "GATE-LOCK-STALE-MUTEX": {
       "file": "packages/gate/test/pinned-lock-interleave.test.ts",
       "marker": "[PROOF:GATE-LOCK-STALE-MUTEX]"
+    },
+    "RES-PAR-GATE-EFFECT-OWNER": {
+      "file": "packages/gate/test/effect-owner.test.ts",
+      "marker": "[PROOF:RES-PAR-GATE-EFFECT-OWNER]"
     }
   },
   "exceptions": {

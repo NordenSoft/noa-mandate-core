@@ -108,10 +108,10 @@ const lines = (...value) => `${value.join("\n")}\n`;
 const PATCHES = Object.freeze([
   {
     packageName: "@noble/ciphers",
-    version: "2.3.0",
+    version: "2.4.0",
     relativePath: "_arx.js",
-    beforeSha256: "bcd2c8e9d3a9252022c74185340d69d724d2c2eed191f5599a2cec5005507d93",
-    afterSha256: "85f1508f3566bbb9b3304c30e42c93b47fd8bb8535e07453f69883f5fb421105",
+    beforeSha256: "ead142ba410404c0698bb80e0d6f77780799bb77a9e3b098cf0f9fca1c486e37",
+    afterSha256: "fcaa1c9dccc2f72aa9eb8fa2afd35db267e2ed45a6a08965650d4bde8844353a",
     replacements: [
       {
         before: lines(
@@ -163,7 +163,7 @@ const PATCHES = Object.freeze([
   },
   {
     packageName: "@noble/ciphers",
-    version: "2.3.0",
+    version: "2.4.0",
     relativePath: "chacha.js",
     beforeSha256: "5f1c00575e227b75163f4bac50b79442dec50ee3047c46c18887808ba8af0a69",
     afterSha256: "a4f95bc4258457f7704859c0c87e99151b0b4a4d21fd64cc923774cefdbf48b5",
@@ -206,7 +206,7 @@ const PATCHES = Object.freeze([
   },
   {
     packageName: "@noble/curves",
-    version: "2.3.0",
+    version: "2.4.0",
     relativePath: "abstract/montgomery.js",
     beforeSha256: "cdafa8816dad5a24475ec51952c5f71fdd5d1b46880ab982694c4f8ff605fc46",
     afterSha256: "0bd13de0498f73178e1286bbfaadc404c2fa90624abd669fa938a277d36d0600",
@@ -242,7 +242,7 @@ const PATCHES = Object.freeze([
   },
   {
     packageName: "@noble/curves",
-    version: "2.3.0",
+    version: "2.4.0",
     relativePath: "abstract/curve.js",
     beforeSha256: "dbaeee3b41ff47efb76b78e14170fe4dda7c7ecdc387c402f16c5118e0bac356",
     afterSha256: "99e61dab536e78d3926de0f7053f6108c81e2909b170b2eea5071d901fc29827",
@@ -313,10 +313,10 @@ const PATCHES = Object.freeze([
   },
   {
     packageName: "@noble/curves",
-    version: "2.3.0",
+    version: "2.4.0",
     relativePath: "abstract/edwards.js",
-    beforeSha256: "c97067225e3626227cdd944b1efd6375cdd6e847812beb7fcdef7e23488edb00",
-    afterSha256: "5e53148d5682860e20fa4158f59f3d3fc714f5c3ec3b045a3c66e26dcc41fb84",
+    beforeSha256: "f24a9c221a549a8fff259eb8f245ab0dc17679b13c532c3970d91acc4df9fffd",
+    afterSha256: "0cb32ee856c90117c06e01b7bd9238f5997569fde81ceb47787c5ff5d116c0a7",
     replacements: [
       {
         before: "            const { p, f } = wnaf.mulSecret(this, scalar, cofactor, normalize);",
@@ -344,7 +344,7 @@ const PATCHES = Object.freeze([
   },
   {
     packageName: "@noble/hashes",
-    version: "2.3.0",
+    version: "2.4.0",
     relativePath: "sha2.js",
     beforeSha256: "471746bba6ec4c6238ca41358d1d3b40b6ff31cf3363f0b4d550c649c1a8e83b",
     afterSha256: "cd379e847906f394a9843f9a47fd2015e4a54772c7850e0d1364a45a1d5a6d7b",
@@ -581,7 +581,7 @@ const PATCHES = Object.freeze([
   },
   {
     packageName: "@noble/hashes",
-    version: "2.3.0",
+    version: "2.4.0",
     relativePath: "hkdf.js",
     beforeSha256: "ccb942a8008f974018965eeb1e33b8f4739bf767c6f95f2ceb06f5873a302f67",
     afterSha256: "cde45967efb5501a430e37cc9f448d599af1606ccaf44f7bc529d96e41976d40",
@@ -648,9 +648,9 @@ export const HARDENED_ARTIFACT_PATHS = Object.freeze(
  * extracted-artifact half. Adding, removing, or changing any bundled dependency file is a refusal.
  */
 export const HARDENED_PACKAGE_TREES = Object.freeze([
-  Object.freeze({ packageName: "@noble/ciphers", version: "2.3.0", files: 33, sha256: "4c23ace768352be3c371d5e8524008454ba8a3ecf62c73b7d0de9ab86617bda5" }),
-  Object.freeze({ packageName: "@noble/curves", version: "2.3.0", files: 72, sha256: "2240ae0d81d8565df07d6fa8996ad73803e5efa45186f27295e2faa517712609" }),
-  Object.freeze({ packageName: "@noble/hashes", version: "2.3.0", files: 60, sha256: "b61471402c6a0675d64edd476c097dfaec0e95fe60f7bc95a3b765a9a1d6bcdb" }),
+  Object.freeze({ packageName: "@noble/ciphers", version: "2.4.0", files: 33, sha256: "8ea3f6664565fed4de4e81324c7cab8f518403ec8045d8d3cd4049b011b0bec3" }),
+  Object.freeze({ packageName: "@noble/curves", version: "2.4.0", files: 72, sha256: "d2c55a58d88e1cd7665aabf4a27cd4fea422ac8fd1403241706a4f560a45bb87" }),
+  Object.freeze({ packageName: "@noble/hashes", version: "2.4.0", files: 60, sha256: "d25a595c6b419311c6c16a0c9dcabd6587f8597072603916b5056b3ebfebcf71" }),
 ]);
 
 const sha256 = (value) => reflectApply(
