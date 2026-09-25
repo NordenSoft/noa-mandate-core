@@ -223,6 +223,7 @@ The first failure wins. Every code exits 1 before the gate listens, printing
 
 | Stage | Check | Codes |
 | --- | --- | --- |
+| — | A supervisor-supplied boot (`loadPinnedTrust` inputs `bootId` and `bootStartedAt`; the reference CLI supplies neither) | `BOOT_ID_INVALID`: `bootId` is not exactly 32 lowercase hex characters; then `BOOT_START_INVALID`: one of the two is missing, or `bootStartedAt` is not the canonical UTC spelling `YYYY-MM-DDTHH:MM:SS.sssZ` or lies more than five seconds ahead of this process's clock. Checked before any file is read. |
 | 0 | Platform | `PINNED_PLATFORM_UNSUPPORTED` (no POSIX uids) |
 | 1 | Environment | `CONFIG_PINNED_INCOMPLETE`, `CONFIG_SOURCE_CONFLICT` |
 | 2 | Gate uid, then roster file | `PINNED_ROOT_GATE`; `ROSTER_FILE_MISSING`, `ROSTER_FILE_UNSAFE`. The detail starts with one of `path-form`, `symlink-ancestor`, `symlink`, `not-regular`, `nlink`, `size`, `mode`, `owner`, `ancestor`, `short-read`, `unreadable`. |
@@ -295,12 +296,24 @@ recipients.
 - `noa-gate` or `noa-gate serve` starts the gate. In pinned mode the banner reports:
   - `trustMode`, `rosterDigest`, `rosterVersion`, `rosterHighWater`, `rosterExpiresAt`,
     `rosterCustody`;
-  - `epoch`, `gateKid`, `gatePublicKey`, `executionSignerKid`, `grantKeyCustody`;
-  - `activeApproverKid`, `quorum`, `bootId`, `displaySealer: "hpke"`.
+  - `epoch`, `gateKid`, `gatePublicKey`, `gatePin`, `executionSignerKid`, `grantKeyCustody`;
+  - `activeApproverKid`, `quorum`, `bootId`, `bootIdSource`, `bootStartedAt`, `bootStartSource`,
+    `displaySealer: "hpke"`.
+
+  `gatePin` is the `noa.gate-pin/1` fingerprint of the tenant, gate kid and gate key
+  ([gate-pin-spec.md](gate-pin-spec.md)): the string a person compares with the one an approver device
+  shows before pinning this gate. It is a display, never an authority input. `bootIdSource` and
+  `bootStartSource` are `SELF` when this process minted its `bootId` and took its own clock as the
+  boot's start (always, for the reference CLI), and `SUPERVISOR` when an embedder's supervisor supplied
+  both through `loadPinnedTrust`/`createPinnedTrust` so that every worker of one boot shares them. A
+  supplied `bootId` is exactly 32 lowercase hex characters and is never derived from anything on the
+  state volume; `bootStartedAt` becomes the boot's start that a hold's gate-signed freeze time is
+  compared with. Under a supplied `bootId` an effect owner must record the grant's consumption in the
+  engine's store (`docs/gate-effect-owner.md`).
 - `noa-gate keygen --key-file <path> --kid <kid>` creates the gate key; see above.
 - `noa-gate roster-check <roster> [--key-file <path>]` validates a roster under the same environment
   rules `serve` applies, so a second identity source is `CONFIG_SOURCE_CONFLICT` here too. It prints
-  the digest and a summary. With `--key-file` it also checks the key file and the high-water state,
+  the digest and a summary, including the roster gate's `gatePin`. With `--key-file` it also checks the key file and the high-water state,
   reading them without taking the lock. It never writes and never listens. Run it as the gate's OS
   user, because the owner rule is evaluated against the caller's uid.
 - Any other subcommand exits 2 with `UNKNOWN_SUBCOMMAND` and starts nothing. Every subcommand refuses

@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { openEncryptedDisplay } from "noa-signer";
 import { refHash } from "noa-approval-artifacts";
 import { getProjection } from "../src/projections.js";
+import { gatePinFingerprint } from "../src/gate-pin.js";
 import { sampleCommandParams } from "./helpers.js";
 import { AUDIT_KID, freshDir, newWorld, rosterDoc, writeRoster, x25519Pair, type RosterWorld } from "./helpers/pinned.js";
 import type { HoldEnvelope } from "../src/types.js";
@@ -160,6 +161,9 @@ test("K15 — pinned serve seals with real HPKE: the roster's approver AND audit
   try {
     assert.equal(gate.banner["trustMode"], "PINNED");
     assert.equal(gate.banner["displaySealer"], "hpke");
+    assert.equal(gate.banner["bootIdSource"], "SELF", "the reference CLI mints its own bootId");
+    assert.equal(gate.banner["bootStartSource"], "SELF", "and takes its own clock as the boot's start");
+    assert.equal(typeof gate.banner["bootStartedAt"], "string");
     assert.equal(gate.banner["rosterCustody"], process.geteuid?.() === 0 ? "ROOT-GATE (unsafe)" : "SAME-UID (unsafe)");
     const apiKey = gate.banner["agentApiKey"] as string;
     const created = await post(gate.base, apiKey, "/v1/holds", HOLD_BODY, { "idempotency-key": "cli-k15" });
@@ -277,6 +281,12 @@ test("keygen is the only minting path: 0600, idempotent, never overwrites, refus
   const gate = await startGate(s.env);
   try {
     assert.equal(report["rosterDigest"], gate.banner["rosterDigest"], "roster-check prints the digest serve prints");
+    // The Gate-pin fingerprint a person compares on a device: the same on both, and the fingerprint of
+    // the roster's tenant, gate kid and gate key (docs/gate-pin-spec.md).
+    const pin = gatePinFingerprint({ tenant: gate.banner["tenant"], gateKid: gate.banner["gateKid"], publicKey: gate.banner["gatePublicKey"] });
+    assert.ok(pin.ok, JSON.stringify(pin));
+    assert.equal(gate.banner["gatePin"], pin.fingerprint, "serve prints the gatePin of its tenant, kid and key");
+    assert.equal(report["gatePin"], gate.banner["gatePin"], "roster-check prints the gatePin serve prints");
   } finally {
     await gate.stop();
   }

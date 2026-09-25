@@ -200,7 +200,10 @@ export interface GateTrust {
 
   /** REQUIRED gate liveness (G3), stable for this process, re-derived on restart. */
   bootId: string;
+  /** The boot's start instant. A hold whose gate-signed freeze time precedes it is not this boot's. */
   uptimeResetAt: string;
+  /** Who supplied `bootId` and `uptimeResetAt`: this process (absent or SELF) or its supervisor. */
+  bootIdSource?: BootIdSource;
 }
 
 /**
@@ -421,8 +424,10 @@ export function createAlphaTrust(input: CreateTrustInput): GateTrust {
     keyManifestHash,
     keyManifest,
     keyDelegation,
-    keyring,
-    receiptKeyring,
+    // Null-prototype, like the pinned trust root's: a kid that is not enrolled (`constructor`,
+    // `toString`, `__proto__`) resolves to nothing rather than to an inherited member.
+    keyring: nullProto(keyring),
+    receiptKeyring: { spec: receiptKeyring.spec, keys: nullProto(receiptKeyring.keys) },
     bootId: newId(),
     uptimeResetAt: iso(t0),
   };
@@ -471,9 +476,81 @@ export interface CreatePinnedTrustInput {
    */
   gateKey: GateKeyPair;
   stateStatus: RosterStateStatus;
+  /**
+   * A boot identifier supplied by a supervisor (32 lowercase hex characters, 128 bits), so every
+   * worker of one boot shares it. Absent: this process mints its own. It is never derived from
+   * anything on the state volume. Any other value is refused (BOOT_ID_INVALID).
+   */
+  bootId?: string;
+  /**
+   * The instant the supervisor's boot started, supplied together with `bootId` and required with it:
+   * the canonical UTC spelling `YYYY-MM-DDTHH:MM:SS.sssZ`, not later than this process's clock plus
+   * `MAX_BOOT_START_SKEW_MS`. It is the trust root's boot start (`uptimeResetAt`) instead of this
+   * process's own clock. Any other value is refused (BOOT_START_INVALID).
+   */
+  bootStartedAt?: string;
   now?: () => number;
   ids?: () => string;
   nonces?: () => string;
+}
+
+/** Where a boot identifier came from: minted by this process, or supplied by its supervisor. */
+export type BootIdSource = "SELF" | "SUPERVISOR";
+
+/** A supervisor-supplied boot identifier: exactly 32 lowercase hex characters. */
+export function isBootId(v: unknown): v is string {
+  return typeof v === "string" && v.length === 32 && isLowerHex(v);
+}
+
+/** How far a supervisor's boot start may lie ahead of this process's clock (one host, one clock). */
+export const MAX_BOOT_START_SKEW_MS = 5 * 1000;
+
+/** PRISTINE TIME: boot instants are compared through captured builtins, like every expiry check. */
+const bootDateParse = Date.parse;
+const bootIsoOf = (ms: number): string => new Date(ms).toISOString();
+
+/** The canonical UTC spelling of an instant: `YYYY-MM-DDTHH:MM:SS.sssZ`, exactly as it re-encodes. */
+function isCanonicalInstant(v: unknown): v is string {
+  if (typeof v !== "string" || v.length !== 24) return false;
+  const ms = bootDateParse(v);
+  return ms === ms && bootIsoOf(ms) === v;
+}
+
+/**
+ * The ONE check of a supervisor's boot inputs, shared by `createPinnedTrust` and `loadPinnedTrust`.
+ * Neither supplied: the process mints its own. Otherwise both are required, in this order: the
+ * `bootId` format (BOOT_ID_INVALID), then the pairing, the spelling and the skew of `bootStartedAt`
+ * (BOOT_START_INVALID). Returns null when the inputs are acceptable.
+ */
+export function supervisorBootProblem(
+  bootId: unknown,
+  bootStartedAt: unknown,
+  nowMs: number,
+): { code: "BOOT_ID_INVALID" | "BOOT_START_INVALID"; detail: string } | null {
+  if (bootId === undefined && bootStartedAt === undefined) return null;
+  if (bootId !== undefined && !isBootId(bootId)) {
+    return { code: "BOOT_ID_INVALID", detail: "a supervisor-supplied bootId must be exactly 32 lowercase hex characters" };
+  }
+  if (bootId === undefined || bootStartedAt === undefined) {
+    return { code: "BOOT_START_INVALID", detail: "a supervisor supplies bootId and bootStartedAt together, or neither" };
+  }
+  if (!isCanonicalInstant(bootStartedAt)) {
+    return { code: "BOOT_START_INVALID", detail: "bootStartedAt must be the canonical UTC spelling YYYY-MM-DDTHH:MM:SS.sssZ" };
+  }
+  if (bootDateParse(bootStartedAt) > nowMs + MAX_BOOT_START_SKEW_MS) {
+    return { code: "BOOT_START_INVALID", detail: "bootStartedAt lies in the future of this process's clock beyond the allowed skew" };
+  }
+  return null;
+}
+
+/**
+ * THE ONE BOOT-START RULE, shared by decide and the effect owner: is a hold whose gate-signed freeze
+ * time is `frozenAt` from before this boot of the gate began? A missing or unparseable instant is
+ * treated as before (fail closed).
+ */
+export function frozenBeforeBoot(trust: Pick<GateTrust, "uptimeResetAt">, frozenAt: unknown): boolean {
+  const frozenAtMs = typeof frozenAt === "string" ? bootDateParse(frozenAt) : NaN;
+  return !(frozenAtMs >= bootDateParse(trust.uptimeResetAt));
 }
 
 function nullProto<T extends object>(src: T): T {
@@ -493,6 +570,8 @@ function nullProto<T extends object>(src: T): T {
  */
 export function createPinnedTrust(input: CreatePinnedTrustInput): GateTrust {
   const now = input.now ?? (() => Date.now());
+  const bootProblem = supervisorBootProblem(input.bootId, input.bootStartedAt, now());
+  if (bootProblem !== null) throw new Error(`${bootProblem.code}: ${bootProblem.detail}`);
   const newId = input.ids ?? (() => randomUUID());
   const newNonce = guardedNonceSource(input.nonces, "createPinnedTrust");
   const { roster } = input;
@@ -570,14 +649,17 @@ export function createPinnedTrust(input: CreatePinnedTrustInput): GateTrust {
     keyring: objectFreeze(keyring),
     receiptKeyring,
     pinned,
-    bootId: newId(),
-    uptimeResetAt: iso(now()),
+    bootId: input.bootId ?? newId(),
+    uptimeResetAt: input.bootStartedAt ?? iso(now()),
+    bootIdSource: input.bootId !== undefined ? "SUPERVISOR" : "SELF",
   };
 }
 
 // ── boot: stages 0-11 ────────────────────────────────────────────────────────────────────────────
 
 export type PinnedBootCode =
+  | "BOOT_ID_INVALID"
+  | "BOOT_START_INVALID"
   | "PINNED_PLATFORM_UNSUPPORTED"
   | "CONFIG_PINNED_INCOMPLETE"
   | "CONFIG_SOURCE_CONFLICT"
@@ -696,6 +778,10 @@ export interface LoadPinnedTrustInput extends LoadPinnedRosterInput {
   stateOwnerEuid?: number;
   /** TEST SEAM: whether a lock holder's pid is alive. Defaults to a signal-0 probe. */
   isProcessAlive?: (pid: number) => boolean;
+  /** A supervisor-supplied boot identifier (see `CreatePinnedTrustInput.bootId`). Refused before any stage. */
+  bootId?: string;
+  /** The supervisor's boot start, required with `bootId` (see `CreatePinnedTrustInput.bootStartedAt`). */
+  bootStartedAt?: string;
   now?: () => number;
   ids?: () => string;
   nonces?: () => string;
@@ -709,6 +795,10 @@ export interface PinnedBoot {
   readonly activeApproverKid: string;
   readonly stateStatus: RosterStateStatus;
   readonly rosterCustody: RosterCustody;
+  /** Whether `trust.bootId` was minted by this process or supplied by its supervisor. */
+  readonly bootIdSource: BootIdSource;
+  /** Whether the boot start (`trust.uptimeResetAt`) is this process's clock or the supervisor's instant. */
+  readonly bootStartSource: BootIdSource;
   /**
    * Stage 11's write: record this roster as the high-water mark. Call it only after every other check
    * has passed and before listening. The state is RE-READ and RE-COMPARED under the lock taken at load,
@@ -889,6 +979,9 @@ export function loadPinnedRoster(input: LoadPinnedRosterInput): PinnedRoster | P
  * There is no retry and no fallback: a caller that receives a refusal must not start a gate.
  */
 export function loadPinnedTrust(input: LoadPinnedTrustInput): PinnedBoot | PinnedRefusal {
+  // A malformed supervisor boot stops the boot before any file is read or any lock is taken.
+  const bootProblem = supervisorBootProblem(input.bootId, input.bootStartedAt, input.nowMs);
+  if (bootProblem !== null) return bootRefusal(bootProblem.code, bootProblem.detail);
   const loaded = loadPinnedRoster(input);
   if (!loaded.ok) return loaded;
   const { roster } = loaded;
@@ -952,6 +1045,8 @@ export function loadPinnedTrust(input: LoadPinnedTrustInput): PinnedBoot | Pinne
     expiresAtMs: loaded.expiresAtMs,
     gateKey,
     stateStatus,
+    ...(input.bootId !== undefined ? { bootId: input.bootId } : {}),
+    ...(input.bootStartedAt !== undefined ? { bootStartedAt: input.bootStartedAt } : {}),
     ...(input.now ? { now: input.now } : {}),
     ...(input.ids ? { ids: input.ids } : {}),
     ...(input.nonces ? { nonces: input.nonces } : {}),
@@ -965,6 +1060,8 @@ export function loadPinnedTrust(input: LoadPinnedTrustInput): PinnedBoot | Pinne
     activeApproverKid: loaded.activeApproverKid,
     stateStatus,
     rosterCustody: loaded.rosterCustody,
+    bootIdSource: input.bootId !== undefined ? "SUPERVISOR" : "SELF",
+    bootStartSource: input.bootStartedAt !== undefined ? "SUPERVISOR" : "SELF",
     commitState(): PinnedRefusal | null {
       try {
         // Re-read and re-compare under the lock: a state written meanwhile by anything that ignores the

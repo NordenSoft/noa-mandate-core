@@ -113,12 +113,16 @@ claim is made.
 
 Every hold records the `bootId` of the trust root that froze it. A pinned gate keeps its key across a
 restart, so a pre-restart envelope stays verifiable; without a boot check a hold frozen before a
-restart could still be approved or committed after it. So `decide()` refuses a hold from another boot
-before it parses the body (`410 HOLD_FROM_DEAD_BOOT`; nothing is signed, and the hold later expires
-with a signed EXPIRED), in both trust modes and for every action; `commit()` refuses it at check 9,
-and the owner refuses it again at O0. The boot identifier is store state, not a signed value, so the
-owner also compares the gate-signed freeze time with the boot's start (O1b); a clock rollback, or a
-restart within the same millisecond, defeats that second check (NON-CLAIMS.md §S9).
+restart could still be approved or committed after it. The boot identifier is store state, not a
+signed value, and a supervisor may hand one identifier to a later boot, so a hold is this boot's only
+when it records this boot's identifier AND its gate-signed freeze time is not earlier than this boot's
+start (`frozenBeforeBoot`, one rule). `decide()` applies both before it parses the body (`410
+HOLD_FROM_DEAD_BOOT`; nothing is signed, and the hold later expires with a signed EXPIRED), in both
+trust modes and for every action; `commit()` refuses a foreign identifier at check 9, and the owner
+applies both again (O0 and O1b). A supervisor that supplies `bootId` supplies the boot's start with it
+(`bootStartedAt`); otherwise the boot's start is this process's clock at boot. A clock rollback, a
+restart within the same millisecond, or a supervisor that reuses both its identifier and its start
+instant defeats the freeze-time comparison (NON-CLAIMS.md §S9).
 `reserve()` does not check the boot for command holds: the agent already holds those grants.
 
 ## Constructing an owner
@@ -139,14 +143,77 @@ only after every owner bound. The engine accepts any object that implements the 
 owner's code is trusted, its callers are not. The reference command line wires no
 ledger: a ledger that resets on restart would mislead an operator.
 
+## Building another owner: the exported checks and the conformance runner
+
+An embedder that builds its own owner — for example one whose ledger lives in a durable store — runs
+the reference owner's checks, not a copy of them:
+
+- `verifyEffectAuthority(trust, registered, input, nowIso)`: the entry snapshot (the caller's input read
+  once), the hold's boot, O1 and O1b, in that order, first failure wins. It returns the frozen input
+  snapshot, the verified parses and the three uniqueness keys, or a refusal
+  (`COMMIT_AUTHORITY_INVALID` with O1's token, or `HOLD_FROM_DEAD_BOOT`). The trust root's keyring is
+  consumed at the one verification context behind it.
+- `deriveLedgerCommit(authority, ledger, at)`: O3 to O5, pure — the expiry clamp, the params hash
+  re-derived from the snapshot's canonical text, this owner's ledger, two distinct accounts. It reads
+  only the verified authority, never the input again, and returns the transfer, its exact integer
+  amount and the bindings the row records.
+- `verifyEffectAttestation(trust, raw, verified, nowIso, alreadyRecorded)`: O8, pure — the check of what
+  the sealer returned, bound to this commit's instant, with `alreadyRecorded` answering from the owner's
+  record whether an EXECUTED receipt id was already recorded. It returns the first problem (or none)
+  and the verified parses the row keeps.
+- `prepareEffectVerification()` loads what these checks verify with; an owner calls it at construction.
+- The owner keeps O0 (the whole-commit re-entry refusal: in-process state here; a durable owner must
+  provide an equivalent guard at transaction level, so that nothing a callback does inside one commit
+  obtains a second row), O2 (uniqueness over its own record, checked again just before the write), O6
+  and O7 (its accounts and balances) and O9 (the write).
+- An owner that records the grant's consumption itself, in the same step as its row, declares
+  `recordsGrantConsumption: true` and its `store`. The engine refuses it at construction unless that is
+  the engine's own store (`EFFECT_OWNER_STORE_MISMATCH`), and then does not mirror the consumption.
+  `EFFECT_STORE_UNAVAILABLE` is an owner refusal that wrote nothing: `503`, retryable.
+- Under a supervisor-supplied `bootId`, which several processes may share, the engine accepts only an
+  owner that records the consumption in its store (`EFFECT_OWNER_SUPERVISOR_BOOT_UNSAFE` otherwise).
+- `runEffectOwnerConformance(label, factory, storeFactory)` (`packages/gate/test/effect-owner-conformance.ts`
+  in this repository) registers the reference owner's owner-level tests — its construction rules, the
+  tests that call the owner directly and those that reach it through the engine's commit route —
+  against the owners `factory` builds. The optional `storeFactory`, paired with `factory`, builds every
+  store the runner uses (a new in-memory store when it is omitted), and the runner builds each owner
+  over the store of the engine that runs it: an owner that records the grant's consumption then meets
+  the construction rules instead of `EFFECT_OWNER_STORE_MISMATCH`. `test/effect-owner.test.ts` runs it
+  over the in-memory owner and over the same owner recording the consumption in its paired store. One
+  owner-level test is exported rather than registered: `effectOwnerKeyringProof(factory, storeFactory)`,
+  the proof bound to the keyring consume site, whose marker must sit on a test registered directly in a
+  test file (`test/effect-owner.test.ts` registers it for the in-memory owner; another owner's test
+  file registers it the same way). Passing both shows the owner meets those tests; it does not show the
+  owner is correct (NON-CLAIMS.md §S9).
+- `runSettleHoldStoreContract(label, open)` (`packages/gate/test/store-settle-contract.ts`) registers the
+  store-level contract of `settleHold` — a win writes the hold and its grant together, a loss writes
+  nothing, of two connections that both read PENDING exactly one wins — over two connections `open`
+  returns; the in-memory store and two detached views of one state run it here.
+
+## One transition out of PENDING
+
+Every way a hold leaves PENDING — `decide`, expiry (by a read, a long-poll or the sweep) and the
+local-state-lost cancel — builds the settled record apart from the stored one and hands it to the
+store's `settleHold(next, grant)`, which writes the hold and, for an approval, its grant in one step
+only while the stored hold is still PENDING. A caller that loses persists nothing and returns nothing
+it signed: `decide` and the cancel answer `409 HOLD_ALREADY_RESOLVED`, an expiry re-reads the hold and
+shows what the store holds, and the sweep counts only the holds it expired. The in-memory store
+performs the compare and the writes in one synchronous block; a durable store expresses them as one
+transaction whose compare is `UPDATE … WHERE id = $id AND status = 'PENDING'`. Every hold view,
+including the `201` of `createHold`, carries the gate-signed deferred receipt the envelope binds, so a
+party that sees only the HTTP API can build and check the approval that chains onto it.
+
 ## What the knockout registry measures
 
 The controls above are armed in `scripts/lint-control-knockout.mjs` (suite `npm run test:effect` in
 `packages/gate`); each arm's detecting test asserts the consequence — a row, a balance, a signature,
-the grant record, the signed bytes a view hands out, a hold — before any refusal code. Two arms remove
-a PAIR, because either member alone refuses the same attack: the deferred binding with the receipt
-chain's linkage, and the envelope's tenant check with the decision's tenant binding. These checks have
-no arm, each for the reason given:
+the grant record, the signed bytes a view hands out, a hold — before any refusal code. Some arms remove
+two or three checks together, because each alone refuses the same attack: the deferred binding with
+the receipt chain's linkage and the approval action, the envelope's tenant check with the decision's
+tenant binding, and the pre-write re-check with the whole-commit re-entry refusal. The detecting tests
+of the owner's arms are in the conformance runner, whose store pairing is armed too: without it the
+construction test over the owner that records the consumption fails. These checks have no arm, each
+for the reason given:
 
 - engine steps 5 and 6: a hold that is not APPROVED, or lacks its artifacts, has no approval the owner
   can verify (its decision and APPROVE legs refuse it);

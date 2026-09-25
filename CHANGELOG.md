@@ -6,8 +6,40 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-25
+
+What changed for verifier users since 0.8.0, in short (the entries below give the detail):
+
+- **A later key retirement no longer rewrites history.** Retiring a signing key after a receipt was
+  honestly signed with it no longer turns that receipt `TAMPERED`: an authentic signature by a
+  retired key is reported as `KEY_RETIRED` (CLI exit `9`), and `verifyHistoricalChain` /
+  `--purpose historical` report integrity, completeness and as-of attribution separately. The same
+  retirement corpus is checked against the TypeScript, Python, Go, Rust and C# verifiers.
+- **Authenticate first, label second.** A key's state (retired, revoked, unknown) is named only after
+  the signature has authenticated under that key; bytes that do not authenticate report the plain
+  integrity failure. This applies to receipt chains, checkpoints, COSE envelopes and the evidence
+  and approval-artifact verifiers.
+- **Strict Ed25519 keys and signatures everywhere.** Every verifier refuses non-canonical,
+  small-order and mixed-order public keys at key load, requires a canonical, non-small-order `R` and
+  a canonical `S`, and evaluates one verification equation, so the five verifiers agree on every key
+  and signature in the shared corpus.
+- **Timestamp checks.** The RFC 3161 checks in the companion `noa-tsa-anchor` package (released
+  separately; not part of this package) validate the signed accuracy across the whole trust interval
+  and bound their parsing work.
+- **Staged, provenance-bound releases.** `noa-receipt` versions are staged on npm by one release
+  workflow from a checked, signed commit on `main`, with a provenance attestation, and become public
+  only when a package maintainer approves the stage (see the Security entry below and
+  `NON-CLAIMS.md` §R1).
+
 ### Added
 
+- `noa.gate-pin/1` specifies the Gate-pin fingerprint (`docs/gate-pin-spec.md`, ADR-R-013, PROPOSED):
+  a display string a person compares before pinning a Gate on a device, `NOAGP1-` and five groups of
+  four lowercase hex characters of SHA-256 over the JCS of the tenant, the Gate kid and the Gate's
+  canonical Ed25519 SPKI key, with the conversion from a raw base64url key, refusal codes and their
+  order. `conformance/gate-pin/vectors.json` carries 12 accepting and 66 refusing vectors. The
+  reference gate (`noa-gate`, not part of this package) implements it; the entry records documents
+  this repository carries.
 - `noa.ledger.transfer/1` publishes the wire form of a reference ledger transfer
   (`src/ledger-transfer.ts`; normative specification `docs/ledger-transfer-spec.md`; ADR-R-010,
   PROPOSED). New exports: `projectLedgerTransfer` (bytes-in: validates the six string members
@@ -121,6 +153,17 @@ All notable changes to `noa-receipt` are documented here. The format follows
   `INVALID` (`E_TEMPORAL_AUTH`) and is now the untrusted-anchor result every other unauthenticated
   checkpoint already gets (`VALID_SEGMENT_ONLY` for a positive outcome, `INCONCLUSIVE` for a negative
   one).
+- Refusal labels only: `receiptFromCose` names the retirement of the key that signed an envelope only
+  after both signatures authenticate. An authentic envelope from a retired key around a
+  receipt whose own signature does not verify, whose own key is not in the keyring, whose
+  `chain.hash` is not its own, or whose payload is not JSON, not canonical JCS or not a NOA receipt is
+  now refused for that failure instead of `signing key "…" is retired`; the first three also report
+  `nativeKid` and `agentClaim: "FAILED"` (they reported `null` and `NOT_EVALUATED`). An authentic
+  receipt inside such an envelope keeps the retirement answer and now reports its `nativeKid` and the
+  agent claim its own checks establish (`UNBOUND` without a manifest, `VERIFIED` or `UNAUTHORIZED`
+  with one, `FAILED` when its own key is retired too) where it reported `NOT_EVALUATED`. On
+  every one of these inputs `ok` stays `false`, `envelopeClaim` stays `"FAILED"` and `envelopeKid`
+  stays `null`; nothing refused before is accepted now, and nothing else changes.
 - The evidence verifier's kid-keyed maps (`asRootKeyEntryMap`, `asStringKeyring`,
   `buildResolvedKeyring`, `buildReceiptKeyring` and the settlement step's signing-key map) are built on
   a null prototype, so a kid named after an `Object.prototype` member is an ordinary entry and an
@@ -128,6 +171,12 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Changed
 
+- `NON-CLAIMS.md` §S9 gains NC-S9.12 to NC-S9.15 for the reference gate's effect-owner hooks
+  (ADR-R-013): passing the owner conformance runner is not correctness (the re-entry guard, the
+  owner's record and its store stay its own), a supervisor-supplied boot (identifier and start) is
+  taken as given, and the Gate-pin fingerprint is a display. The one transition out of PENDING is atomic
+  in the in-memory store (`settleHold`, `packages/gate/src/store.ts:165-172`), and another store has to
+  pass `runSettleHoldStoreContract` (`packages/gate/test/store-settle-contract.ts:56`).
 - `NON-CLAIMS.md` gains §S9, the claim boundary of the reference gate's new effect-owned commit for
   `noa.ledger.transfer` (`docs/gate-effect-owner.md`, ADR-R-012, PROPOSED): the effect and its record
   die together, a compromised gate process holds the keys and the ledger (and what the owner cannot
@@ -1275,6 +1324,8 @@ scoped `@noa/receipt`).
   impersonation in a multi-key keyring.
 
 [Unreleased]: https://github.com/NordenSoft/noa-mandate-core/commits/main
+[0.9.0]: https://www.npmjs.com/package/noa-receipt/v/0.9.0
+[0.8.0]: https://www.npmjs.com/package/noa-receipt/v/0.8.0
 [0.7.0]: https://www.npmjs.com/package/noa-receipt/v/0.7.0
 [0.6.2]: https://www.npmjs.com/package/noa-receipt/v/0.6.2
 [0.6.1]: https://www.npmjs.com/package/noa-receipt/v/0.6.1

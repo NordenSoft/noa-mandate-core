@@ -1471,10 +1471,10 @@
     {
       "id": "gate-effect-owner-roster-approvers-0",
       "package": "gate",
-      "file": "packages/gate/test/effect-owner.test.ts",
-      "scope": "roster>approvers",
+      "file": "packages/gate/test/effect-owner-conformance.ts",
+      "scope": "effectOwnerKeyringProof>roster>approvers",
       "ordinal": 0,
-      "line": 274,
+      "line": 95,
       "kind": "construct",
       "class": "test",
       "input": "test-local key material",
@@ -1491,10 +1491,10 @@
     {
       "id": "gate-effect-owner-roster2-approvers-0",
       "package": "gate",
-      "file": "packages/gate/test/effect-owner.test.ts",
-      "scope": "roster2>approvers",
+      "file": "packages/gate/test/effect-owner-conformance.ts",
+      "scope": "effectOwnerKeyringProof>roster2>approvers",
       "ordinal": 0,
-      "line": 307,
+      "line": 128,
       "kind": "construct",
       "class": "test",
       "input": "test-local key material",
@@ -1511,10 +1511,10 @@
     {
       "id": "gate-effect-owner-roster2-approvers-1",
       "package": "gate",
-      "file": "packages/gate/test/effect-owner.test.ts",
-      "scope": "roster2>approvers",
+      "file": "packages/gate/test/effect-owner-conformance.ts",
+      "scope": "effectOwnerKeyringProof>roster2>approvers",
       "ordinal": 1,
-      "line": 308,
+      "line": 129,
       "kind": "construct",
       "class": "test",
       "input": "test-local key material",
@@ -1531,10 +1531,10 @@
     {
       "id": "gate-effect-owner-nonrecipient-approvers-0",
       "package": "gate",
-      "file": "packages/gate/test/effect-owner.test.ts",
-      "scope": "nonRecipientApproval>other>approvers",
+      "file": "packages/gate/test/effect-owner-conformance.ts",
+      "scope": "runEffectOwnerConformance>nonRecipientApproval>other>approvers",
       "ordinal": 0,
-      "line": 583,
+      "line": 483,
       "kind": "construct",
       "class": "test",
       "input": "test-local key material",
@@ -1772,9 +1772,9 @@
     {
       "id": "gate-effect-owner-consumer",
       "file": "packages/gate/src/effect-owner.ts",
-      "anchor": "      keyring: trust.keyring,",
+      "anchor": "    keyring: trust.keyring,",
       "role": "consume",
-      "output": "verifyArtifact ctx (commit-time re-verification of the hold envelope, the execution grant, the approver decision and the returned consumption; decision authorizationTime = the grant's signed issuedAt). The same owner passes the trust root's receiptKeyring wholesale to verifyChain for the deferred, approval and executed receipts; no field is selected or synthesised.",
+      "output": "verifyArtifact ctx (the one module-level verification context behind verifyEffectAuthority and the post-sign attestation check: commit-time re-verification of the hold envelope, the execution grant, the approver decision and the returned consumption; decision authorizationTime = the grant's signed issuedAt). The same module passes the trust root's receiptKeyring wholesale to verifyChain for the deferred, approval and executed receipts; no field is selected or synthesised.",
       "validFrom": "enforced-downstream",
       "revokedAt": "enforced-downstream",
       "proofs": [
@@ -1940,7 +1940,8 @@
     "packages/evidence/test/cause-inventory.test.ts": "evidence tests/tools: enumerates verifier refusal causes from src/steps.ts and src/enrolment.ts, then hands each shipped fixture's tenantRoot/checkpointKeyring to verifyEvidence as bytes to record which cause it produces. The trust documents are passed through verbatim from the corpus; it declares no key material, constructs no KeyEntry and resolves nothing itself.",
     "packages/gate/src/cli.ts": "reference gate CLI: reads roster fields only to print the roster-check report and the pinned boot banner; constructs no KeyEntry — the pinned keyring is built by createPinnedTrust (trust.ts, censused above)",
     "packages/gate/test/pinned-cli.test.ts": "gate tests: spawn the pinned CLI with rosters built by test/helpers/pinned.ts; construct no KeyEntry",
-    "packages/gate/test/effect-commit.test.ts": "gate tests: read the pinned trust root's keyring and receiptKeyring wholesale to verify a commit's signed consumption and receipt chain; construct no KeyEntry (the roster fixtures are test/helpers/pinned.ts, censused above)"
+    "packages/gate/test/effect-commit.test.ts": "gate tests: read the pinned trust root's keyring and receiptKeyring wholesale to verify a commit's signed consumption and receipt chain; construct no KeyEntry (the roster fixtures are test/helpers/pinned.ts, censused above)",
+    "packages/gate/test/alpha-keyring-prototype.test.ts": "gate tests: read the alpha trust root's keyring and receiptKeyring only to assert that they are null-prototype maps whose unenrolled kids resolve to nothing; construct no KeyEntry and resolve no keyring"
   },
   "proofs": {
     "RES-PAR-GATE-KEYRING": {
@@ -2002,6 +2003,10 @@
     "RES-PAR-GATE-EFFECT-OWNER": {
       "file": "packages/gate/test/effect-owner.test.ts",
       "marker": "[PROOF:RES-PAR-GATE-EFFECT-OWNER]"
+    },
+    "SETTLE-ONCE": {
+      "file": "packages/gate/test/hold-settle.test.ts",
+      "marker": "[PROOF:SETTLE-ONCE]"
     }
   },
   "exceptions": {

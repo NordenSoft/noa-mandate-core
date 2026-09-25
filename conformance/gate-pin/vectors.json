@@ -1,0 +1,909 @@
+{
+  "spec": "noa.gate-pin/1",
+  "generatedFrom": "scripts/gen-gate-pin-vectors.mjs; every ACCEPT value is also recomputed independently (node:crypto SHA-256 over a hand-built JCS) by packages/gate/test/gate-pin.test.ts",
+  "refusalCodes": [
+    "GATE_PIN_INPUT_INVALID",
+    "GATE_PIN_TENANT_INVALID",
+    "GATE_PIN_KID_INVALID",
+    "GATE_PIN_KEY_INVALID",
+    "GATE_PIN_RAW_KEY_INVALID"
+  ],
+  "note": "Synthetic identifiers only (tenant-example-N, gate-example-N, and an all-zero example UUID in the console-style tenant); the Ed25519 keys are freshly generated public keys with no use outside this corpus, and the refused keys come from conformance/vectors/strict-ed25519. A fingerprint vector's input is the object passed to the fingerprint function (an absent member is omitted); a raw-key vector's input carries publicKeyRaw instead of publicKey and is checked in the same order, its key step being the raw conversion (docs/gate-pin-spec.md §3.1, §5). ACCEPT vectors pin canonical (the JCS text), digest and fingerprint; REJECT vectors pin reasonCode; `beats` names the second rule a precedence vector's input violates, which reasonCode must win over; `equivalentTo` names the vector whose fingerprint a raw-key vector must equal. The fingerprint is a display string, never an authority input (docs/gate-pin-spec.md).",
+  "vectors": [
+    {
+      "id": "accept-basic",
+      "kind": "fingerprint",
+      "expect": "ACCEPT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
+      },
+      "canonical": "{\"gateKid\":\"gate-example-1\",\"publicKey\":\"MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=\",\"spec\":\"noa.gate-pin/1\",\"tenant\":\"tenant-example-1\"}",
+      "digest": "sha256:14e0bc8c4248d8c9766ec17e64a6998a5b37c076ca6b8d5e382d16731ff864a0",
+      "fingerprint": "NOAGP1-14e0-bc8c-4248-d8c9-766e"
+    },
+    {
+      "id": "accept-kid-binds",
+      "kind": "fingerprint",
+      "expect": "ACCEPT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-2",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
+      },
+      "canonical": "{\"gateKid\":\"gate-example-2\",\"publicKey\":\"MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=\",\"spec\":\"noa.gate-pin/1\",\"tenant\":\"tenant-example-1\"}",
+      "digest": "sha256:9494d81d066bdf3c87d513d4ed917c2210e2d5b5e6199b774bc4defaab0f57cf",
+      "fingerprint": "NOAGP1-9494-d81d-066b-df3c-87d5",
+      "note": "differs from accept-basic only in gateKid"
+    },
+    {
+      "id": "accept-tenant-binds",
+      "kind": "fingerprint",
+      "expect": "ACCEPT",
+      "input": {
+        "tenant": "tenant-example-2",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
+      },
+      "canonical": "{\"gateKid\":\"gate-example-1\",\"publicKey\":\"MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=\",\"spec\":\"noa.gate-pin/1\",\"tenant\":\"tenant-example-2\"}",
+      "digest": "sha256:122851e528cc5800517a136f4c7be80e7663f9c25eed8f7859154a8b0404a4c2",
+      "fingerprint": "NOAGP1-1228-51e5-28cc-5800-517a",
+      "note": "differs from accept-basic only in tenant"
+    },
+    {
+      "id": "accept-key-binds",
+      "kind": "fingerprint",
+      "expect": "ACCEPT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAA16p81ty4/ZpW8KOlrti05kpuaM0Wb8YVIAMi+MCCq4="
+      },
+      "canonical": "{\"gateKid\":\"gate-example-1\",\"publicKey\":\"MCowBQYDK2VwAyEAA16p81ty4/ZpW8KOlrti05kpuaM0Wb8YVIAMi+MCCq4=\",\"spec\":\"noa.gate-pin/1\",\"tenant\":\"tenant-example-1\"}",
+      "digest": "sha256:75bb97c27f3f513c201e345dd28f33afa10d383dfa6e0953e8e659f758653fb1",
+      "fingerprint": "NOAGP1-75bb-97c2-7f3f-513c-201e",
+      "note": "differs from accept-basic only in publicKey"
+    },
+    {
+      "id": "accept-console-tenant",
+      "kind": "fingerprint",
+      "expect": "ACCEPT",
+      "input": {
+        "tenant": "org_00000000-0000-0000-0000-000000000000",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
+      },
+      "canonical": "{\"gateKid\":\"gate-example-1\",\"publicKey\":\"MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=\",\"spec\":\"noa.gate-pin/1\",\"tenant\":\"org_00000000-0000-0000-0000-000000000000\"}",
+      "digest": "sha256:012e9907b7efa36a21782db344a20d17266dc1c5af290eb1bb581f1f0ea62c5d",
+      "fingerprint": "NOAGP1-012e-9907-b7ef-a36a-2178",
+      "note": "a console-style tenant identifier"
+    },
+    {
+      "id": "accept-tenant-json-escapes",
+      "kind": "fingerprint",
+      "expect": "ACCEPT",
+      "input": {
+        "tenant": "t\"en\\ant",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
+      },
+      "canonical": "{\"gateKid\":\"gate-example-1\",\"publicKey\":\"MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=\",\"spec\":\"noa.gate-pin/1\",\"tenant\":\"t\\\"en\\\\ant\"}",
+      "digest": "sha256:54ff067ee35774cbd7ec6a5ece59e5c141f157c229f2b1e97456b0306af6b342",
+      "fingerprint": "NOAGP1-54ff-067e-e357-74cb-d7ec",
+      "note": "JCS escapes the quotation mark and the reverse solidus in the tenant"
+    },
+    {
+      "id": "accept-tenant-one-char",
+      "kind": "fingerprint",
+      "expect": "ACCEPT",
+      "input": {
+        "tenant": "x",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
+      },
+      "canonical": "{\"gateKid\":\"gate-example-1\",\"publicKey\":\"MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=\",\"spec\":\"noa.gate-pin/1\",\"tenant\":\"x\"}",
+      "digest": "sha256:1c5f7a8fd8ad5086d22ee31855d7f615e8a9aad693aa858bf8471cacae356171",
+      "fingerprint": "NOAGP1-1c5f-7a8f-d8ad-5086-d22e",
+      "note": "the shortest tenant: one character"
+    },
+    {
+      "id": "accept-tenant-edges",
+      "kind": "fingerprint",
+      "expect": "ACCEPT",
+      "input": {
+        "tenant": "!~",
+        "gateKid": "g",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
+      },
+      "canonical": "{\"gateKid\":\"g\",\"publicKey\":\"MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=\",\"spec\":\"noa.gate-pin/1\",\"tenant\":\"!~\"}",
+      "digest": "sha256:b6dfd22c3c14c5b117f9a434e110363759502386e7704fb6f40e55da370a7c59",
+      "fingerprint": "NOAGP1-b6df-d22c-3c14-c5b1-17f9",
+      "note": "the first and last printable ASCII characters; a one-character kid"
+    },
+    {
+      "id": "accept-lengths-max",
+      "kind": "fingerprint",
+      "expect": "ACCEPT",
+      "input": {
+        "tenant": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+        "gateKid": "gaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+        "publicKey": "MCowBQYDK2VwAyEAA16p81ty4/ZpW8KOlrti05kpuaM0Wb8YVIAMi+MCCq4="
+      },
+      "canonical": "{\"gateKid\":\"gaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1\",\"publicKey\":\"MCowBQYDK2VwAyEAA16p81ty4/ZpW8KOlrti05kpuaM0Wb8YVIAMi+MCCq4=\",\"spec\":\"noa.gate-pin/1\",\"tenant\":\"tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt\"}",
+      "digest": "sha256:bf7b78a3a68faf93da9d26f2fae39c0f8e22574d37606c7a68fdee2e1dd1c373",
+      "fingerprint": "NOAGP1-bf7b-78a3-a68f-af93-da9d",
+      "note": "the longest tenant (256) and kid (64)"
+    },
+    {
+      "id": "accept-extra-member-ignored",
+      "kind": "fingerprint",
+      "expect": "ACCEPT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "environment": "production"
+      },
+      "canonical": "{\"gateKid\":\"gate-example-1\",\"publicKey\":\"MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=\",\"spec\":\"noa.gate-pin/1\",\"tenant\":\"tenant-example-1\"}",
+      "digest": "sha256:14e0bc8c4248d8c9766ec17e64a6998a5b37c076ca6b8d5e382d16731ff864a0",
+      "fingerprint": "NOAGP1-14e0-bc8c-4248-d8c9-766e",
+      "note": "members other than the three are ignored: the fingerprint equals accept-basic"
+    },
+    {
+      "id": "accept-raw-key",
+      "kind": "raw-key",
+      "expect": "ACCEPT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKeyRaw": "Ebt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPqw"
+      },
+      "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+      "canonical": "{\"gateKid\":\"gate-example-1\",\"publicKey\":\"MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=\",\"spec\":\"noa.gate-pin/1\",\"tenant\":\"tenant-example-1\"}",
+      "digest": "sha256:14e0bc8c4248d8c9766ec17e64a6998a5b37c076ca6b8d5e382d16731ff864a0",
+      "fingerprint": "NOAGP1-14e0-bc8c-4248-d8c9-766e",
+      "equivalentTo": "accept-basic"
+    },
+    {
+      "id": "accept-raw-key-2",
+      "kind": "raw-key",
+      "expect": "ACCEPT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKeyRaw": "A16p81ty4_ZpW8KOlrti05kpuaM0Wb8YVIAMi-MCCq4"
+      },
+      "publicKey": "MCowBQYDK2VwAyEAA16p81ty4/ZpW8KOlrti05kpuaM0Wb8YVIAMi+MCCq4=",
+      "canonical": "{\"gateKid\":\"gate-example-1\",\"publicKey\":\"MCowBQYDK2VwAyEAA16p81ty4/ZpW8KOlrti05kpuaM0Wb8YVIAMi+MCCq4=\",\"spec\":\"noa.gate-pin/1\",\"tenant\":\"tenant-example-1\"}",
+      "digest": "sha256:75bb97c27f3f513c201e345dd28f33afa10d383dfa6e0953e8e659f758653fb1",
+      "fingerprint": "NOAGP1-75bb-97c2-7f3f-513c-201e",
+      "equivalentTo": "accept-key-binds"
+    },
+    {
+      "id": "reject-input-null",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": null,
+      "reasonCode": "GATE_PIN_INPUT_INVALID"
+    },
+    {
+      "id": "reject-input-string",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": "tenant-example-1",
+      "reasonCode": "GATE_PIN_INPUT_INVALID"
+    },
+    {
+      "id": "reject-tenant-absent",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID"
+    },
+    {
+      "id": "reject-tenant-null",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "tenant": null
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID"
+    },
+    {
+      "id": "reject-tenant-number",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "tenant": 1
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID"
+    },
+    {
+      "id": "reject-tenant-empty",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "tenant": ""
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID"
+    },
+    {
+      "id": "reject-tenant-space",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "tenant": "tenant example"
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID"
+    },
+    {
+      "id": "reject-tenant-too-long",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "tenant": "ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt"
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID"
+    },
+    {
+      "id": "reject-tenant-non-ascii",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "tenant": "tenánt"
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID"
+    },
+    {
+      "id": "reject-tenant-control",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "tenant": "ten\tant"
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID"
+    },
+    {
+      "id": "reject-tenant-del",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "tenant": "tenant"
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID"
+    },
+    {
+      "id": "reject-kid-absent",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "reject-kid-null",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "gateKid": null
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "reject-kid-number",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "gateKid": 1
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "reject-kid-empty",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "gateKid": ""
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "reject-kid-upper",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "gateKid": "Gate-example-1"
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "reject-kid-digit-first",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "gateKid": "1gate"
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "reject-kid-hyphen-last",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "gateKid": "gate-"
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "reject-kid-underscore",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "gateKid": "gate_example"
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "reject-kid-too-long",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "gateKid": "gaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "reject-key-absent",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1"
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-null",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": null
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-number",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": 1
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-empty",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": ""
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-unpadded-base64",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw"
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-base64url-spelling",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPqw"
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-raw-not-spki",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "Ebt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPqw"
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-trailing-bytes",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqwA"
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-non-canonical-bits",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqx="
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-extra-padding",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=="
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-inner-space",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4 AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-inner-newline",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4\nAjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-x25519-spki",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VuAyEAAbdG2n5Lurl54jKMPGuyJc36icRcyjEz++UdsDqxU1s="
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-low-order",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-mixed-order",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAcdzclbjztOK/MhheQB8rJkjeSwsQ+BRXaX2Lb2yp3JE="
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-off-curve",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-key-non-canonical-y",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEA7v///////////////////////////////////////38="
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "order-tenant-absent-beats-gateKid-malformed",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "gateKid": "Gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID",
+      "beats": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "order-tenant-malformed-beats-gateKid-absent",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant example",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID",
+      "beats": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "order-tenant-null-beats-gateKid-malformed",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "gateKid": "Gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "tenant": null
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID",
+      "beats": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "order-tenant-malformed-beats-gateKid-null",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant example",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "gateKid": null
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID",
+      "beats": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "order-tenant-number-beats-gateKid-malformed",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "gateKid": "Gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "tenant": 1
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID",
+      "beats": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "order-tenant-malformed-beats-gateKid-number",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant example",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "gateKid": 1
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID",
+      "beats": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "order-tenant-malformed-beats-gateKid-malformed",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "gateKid": "Gate-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAEbt4AjTMouGHdJqL/XyuTmiHpHkJ1Gh5eGqaBnwIPqw=",
+        "tenant": "tenant example"
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID",
+      "beats": "GATE_PIN_KID_INVALID"
+    },
+    {
+      "id": "order-gateKid-absent-beats-publicKey-malformed",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "publicKey": "Ebt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPqw"
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID",
+      "beats": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "order-gateKid-malformed-beats-publicKey-absent",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "Gate-example-1"
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID",
+      "beats": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "order-gateKid-null-beats-publicKey-malformed",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "publicKey": "Ebt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPqw",
+        "gateKid": null
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID",
+      "beats": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "order-gateKid-malformed-beats-publicKey-null",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "Gate-example-1",
+        "publicKey": null
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID",
+      "beats": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "order-gateKid-number-beats-publicKey-malformed",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "publicKey": "Ebt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPqw",
+        "gateKid": 1
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID",
+      "beats": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "order-gateKid-malformed-beats-publicKey-number",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "Gate-example-1",
+        "publicKey": 1
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID",
+      "beats": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "order-gateKid-malformed-beats-publicKey-malformed",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "publicKey": "Ebt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPqw",
+        "gateKid": "Gate-example-1"
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID",
+      "beats": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "order-input-array-beats-tenant-absent",
+      "kind": "fingerprint",
+      "expect": "REJECT",
+      "input": [],
+      "reasonCode": "GATE_PIN_INPUT_INVALID",
+      "beats": "GATE_PIN_TENANT_INVALID",
+      "note": "an array is not an object (RFC 8259): the input step refuses it before the tenant step, which would refuse its absent tenant"
+    },
+    {
+      "id": "reject-raw-absent",
+      "kind": "raw-key",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKeyRaw": null
+      },
+      "reasonCode": "GATE_PIN_RAW_KEY_INVALID"
+    },
+    {
+      "id": "reject-raw-42",
+      "kind": "raw-key",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKeyRaw": "Ebt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPq"
+      },
+      "reasonCode": "GATE_PIN_RAW_KEY_INVALID"
+    },
+    {
+      "id": "reject-raw-44",
+      "kind": "raw-key",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKeyRaw": "Ebt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPqwA"
+      },
+      "reasonCode": "GATE_PIN_RAW_KEY_INVALID"
+    },
+    {
+      "id": "reject-raw-padded",
+      "kind": "raw-key",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKeyRaw": "Ebt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPqw="
+      },
+      "reasonCode": "GATE_PIN_RAW_KEY_INVALID"
+    },
+    {
+      "id": "reject-raw-plus",
+      "kind": "raw-key",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKeyRaw": "+bt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPqw"
+      },
+      "reasonCode": "GATE_PIN_RAW_KEY_INVALID"
+    },
+    {
+      "id": "reject-raw-slash",
+      "kind": "raw-key",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKeyRaw": "/bt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPqw"
+      },
+      "reasonCode": "GATE_PIN_RAW_KEY_INVALID"
+    },
+    {
+      "id": "reject-raw-non-canonical",
+      "kind": "raw-key",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKeyRaw": "Ebt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPqx"
+      },
+      "reasonCode": "GATE_PIN_RAW_KEY_INVALID"
+    },
+    {
+      "id": "reject-raw-low-order",
+      "kind": "raw-key",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKeyRaw": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "reject-raw-mixed-order",
+      "kind": "raw-key",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKeyRaw": "cdzclbjztOK_MhheQB8rJkjeSwsQ-BRXaX2Lb2yp3JE"
+      },
+      "reasonCode": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "order-raw-spelling-beats-key",
+      "kind": "raw-key",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "gate-example-1",
+        "publicKeyRaw": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB"
+      },
+      "reasonCode": "GATE_PIN_RAW_KEY_INVALID",
+      "beats": "GATE_PIN_KEY_INVALID"
+    },
+    {
+      "id": "order-raw-kid-malformed-beats-raw-malformed",
+      "kind": "raw-key",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "Gate-example-1",
+        "publicKeyRaw": "Ebt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPq"
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID",
+      "beats": "GATE_PIN_RAW_KEY_INVALID"
+    },
+    {
+      "id": "order-raw-kid-absent-beats-raw-malformed",
+      "kind": "raw-key",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "publicKeyRaw": "Ebt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPq"
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID",
+      "beats": "GATE_PIN_RAW_KEY_INVALID"
+    },
+    {
+      "id": "order-raw-kid-malformed-beats-raw-absent",
+      "kind": "raw-key",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant-example-1",
+        "gateKid": "Gate-example-1"
+      },
+      "reasonCode": "GATE_PIN_KID_INVALID",
+      "beats": "GATE_PIN_RAW_KEY_INVALID"
+    },
+    {
+      "id": "order-raw-tenant-malformed-beats-raw-malformed",
+      "kind": "raw-key",
+      "expect": "REJECT",
+      "input": {
+        "tenant": "tenant example",
+        "gateKid": "gate-example-1",
+        "publicKeyRaw": "Ebt4AjTMouGHdJqL_XyuTmiHpHkJ1Gh5eGqaBnwIPq"
+      },
+      "reasonCode": "GATE_PIN_TENANT_INVALID"
+    }
+  ]
+}

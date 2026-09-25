@@ -32,7 +32,7 @@ const { hasOwn } = intrinsics;
 import { verifyChain } from "noa-receipt";
 import type { GateConfig } from "./config.js";
 import type { Store } from "./store.js";
-import type { GateTrust } from "./trust.js";
+import { frozenBeforeBoot, type GateTrust } from "./trust.js";
 import { hashSecret } from "./auth.js";
 import { buildDeferredReceipt, buildTimeoutReceipt, buildAttemptReceipt, type ReceiptActionInput } from "./receipts.js";
 import { buildHoldEnvelope } from "./envelope.js";
@@ -329,6 +329,17 @@ export class GateEngine {
       }
       if (owner.bootId !== this.trust.bootId) {
         throw new Error("EFFECT_OWNER_TRUST_MISMATCH: the effect owner verifies against a different trust root than this engine");
+      }
+      // An owner that records the grant's consumption itself must record it where this engine reads
+      // grants, or the engine (which then skips its own mirror) would show a consumed grant as UNUSED.
+      if (owner.recordsGrantConsumption === true && owner.store !== this.store) {
+        throw new Error("EFFECT_OWNER_STORE_MISMATCH: an effect owner that records the grant's consumption must use this engine's store");
+      }
+      // A supervisor-supplied boot identifier may be shared by several processes. An owner that keeps
+      // its record in this process (the one-engine guard is per process too) could then commit one
+      // grant once per process: only an owner that records the consumption in the shared store may run.
+      if (this.trust.bootIdSource === "SUPERVISOR" && owner.recordsGrantConsumption !== true) {
+        throw new Error("EFFECT_OWNER_SUPERVISOR_BOOT_UNSAFE: under a supervisor-supplied bootId an effect owner must record the grant's consumption in the engine's store");
       }
       owners[owner.canonical] = owner;
     }
@@ -758,7 +769,7 @@ export class GateEngine {
     const existing = this.store.getHoldByIdem(agent.id, idempotencyKey);
     if (existing) {
       if (existing.requestHash === requestHash) {
-        return { status: 200, body: { holdId: existing.id, status: existing.status, expiresAt: this.iso(existing.expiresAt), holdEnvelope: existing.holdEnvelope, encryptedDisplay: existing.encryptedDisplay, idempotent: true } };
+        return { status: 200, body: { holdId: existing.id, status: existing.status, expiresAt: this.iso(existing.expiresAt), holdEnvelope: existing.holdEnvelope, deferredReceipt: existing.deferredReceipt, encryptedDisplay: existing.encryptedDisplay, idempotent: true } };
       }
       return err(409, "IDEMPOTENCY_CONFLICT", { detail: "same Idempotency-Key with a different body" });
     }
@@ -941,18 +952,32 @@ export class GateEngine {
     // The SEALED display travels with the envelope that binds it (`displayCiphertextHash`, F2): the
     // relay refuses a hold whose display does not hash to that value, so a gate that never handed the
     // sealed object out could seal nothing anyone would ever see. It is ciphertext to the approver and
-    // audit recipients only; the plaintext never leaves the gate.
-    return { status: 201, body: { holdId, status: "PENDING", expiresAt, holdEnvelope, encryptedDisplay } };
+    // audit recipients only; the plaintext never leaves the gate. The gate-signed DEFERRED receipt
+    // travels with them: every approval receipt chains onto it, so a party that sees only this API
+    // (a relay, a bridge, the approver's device) cannot build or check an approval without it.
+    return { status: 201, body: { holdId, status: "PENDING", expiresAt, holdEnvelope, deferredReceipt, encryptedDisplay } };
   }
 
-  /** Lazily flip an overdue PENDING hold to EXPIRED, minting the D19 timeout receipt + Hold
-   *  Resolution. Backstop to the periodic sweep. */
+  /**
+   * Lazily flip an overdue PENDING hold to EXPIRED, minting the D19 timeout receipt + Hold Resolution.
+   * Backstop to the periodic sweep. Returns the hold AS THE STORE NOW HOLDS IT — callers use the
+   * returned record, never the one they passed in.
+   */
   private lazyExpire(hold: HoldRecord, atMs = this.now()): HoldRecord {
-    if (hold.status !== "PENDING" || atMs < hold.expiresAt) return hold;
+    return this.settleExpiry(hold, atMs).hold;
+  }
+
+  /**
+   * The expiry transition through `settleHold`. `settled` is true only when THIS call expired the
+   * hold. On a lost race (another process decided or expired it first) what this call signed is
+   * dropped, never returned, and the hold is re-read.
+   */
+  private settleExpiry(hold: HoldRecord, atMs: number): { hold: HoldRecord; settled: boolean } {
+    if (hold.status !== "PENDING" || atMs < hold.expiresAt) return { hold, settled: false };
     // A hold this trust root does not own is left exactly as it is: no timeout receipt, no resolution,
     // no state change. Every caller — sweep, read, wait, cancel — relies on this. (An expired roster
     // still RECORDS a timeout for its own holds: expiry stops authority, not recording.)
-    if (this.envelopeAudienceRefusal(hold) !== null) return hold;
+    if (this.envelopeAudienceRefusal(hold) !== null) return { hold, settled: false };
     const expiredAt = this.iso(atMs);
     const timeoutReceipt = buildTimeoutReceipt({
       id: this.trust.newId(),
@@ -980,33 +1005,37 @@ export class GateEngine {
       keyManifestHash: this.trust.keyManifestHash,
       signer: this.execSigner,
     });
-    hold.status = "EXPIRED";
-    hold.reasonCode = "APPROVAL_TIMEOUT";
-    hold.decidedAt = atMs;
-    hold.verdictReceipt = timeoutReceipt;
-    hold.holdResolution = holdResolution;
-    this.store.putHold(hold);
+    const next: HoldRecord = {
+      ...hold,
+      status: "EXPIRED",
+      reasonCode: "APPROVAL_TIMEOUT",
+      decidedAt: atMs,
+      verdictReceipt: timeoutReceipt,
+      holdResolution,
+    };
+    if (!this.store.settleHold(next, null)) {
+      this.log("hold.settle_lost", { holdId: hold.id, attempted: "EXPIRED" });
+      return { hold: this.store.getHold(hold.id) ?? hold, settled: false };
+    }
     this.log("hold.expired", { holdId: hold.id });
-    this.wake(hold);
-    return hold;
+    this.wake(next);
+    return { hold: next, settled: true };
   }
 
+  /** Expire every overdue PENDING hold. Counts only the holds THIS sweep expired. */
   sweepExpired(): number {
     let n = 0;
     const atMs = this.now();
     for (const h of this.store.listHolds({ status: "PENDING" })) {
-      const before = h.status;
-      this.lazyExpire(h, atMs);
-      if (h.status !== before) n++;
+      if (this.settleExpiry(h, atMs).settled) n++;
     }
     return n;
   }
 
   getHold(id: string, agent: AgentRecord): EngineResult {
-    const hold = this.store.getHold(id);
-    if (!this.ownsHold(hold, agent, "getHold")) return err(404, "UNKNOWN_HOLD");
-    this.lazyExpire(hold);
-    return { status: 200, body: this.holdView(hold) };
+    const stored = this.store.getHold(id);
+    if (!this.ownsHold(stored, agent, "getHold")) return err(404, "UNKNOWN_HOLD");
+    return { status: 200, body: this.holdView(this.lazyExpire(stored)) };
   }
 
   /**
@@ -1015,12 +1044,12 @@ export class GateEngine {
    * gate-signed Hold Resolution (status CANCELLED, reasonCode LOCAL_STATE_LOST).
    */
   cancelLocalStateLost(holdId: string, agent: AgentRecord): EngineResult {
-    const hold = this.store.getHold(holdId);
-    if (!this.ownsHold(hold, agent, "cancel")) return err(404, "UNKNOWN_HOLD");
+    const stored = this.store.getHold(holdId);
+    if (!this.ownsHold(stored, agent, "cancel")) return err(404, "UNKNOWN_HOLD");
     const receivedAtMs = this.now();
-    const cancelBinding = this.envelopeAudienceRefusal(hold);
+    const cancelBinding = this.envelopeAudienceRefusal(stored);
     if (cancelBinding !== null) return cancelBinding;
-    this.lazyExpire(hold, receivedAtMs);
+    const hold = this.lazyExpire(stored, receivedAtMs);
     if (hold.status !== "PENDING") return err(409, "HOLD_ALREADY_RESOLVED", { status: hold.status });
     const receivedAt = this.iso(receivedAtMs);
     // Sign first, mutate after — same reason as `lazyExpire`.
@@ -1036,14 +1065,20 @@ export class GateEngine {
       keyManifestHash: this.trust.keyManifestHash,
       signer: this.execSigner,
     });
-    hold.status = "CANCELLED_LOCAL_STATE_LOST";
-    hold.reasonCode = "LOCAL_STATE_LOST";
-    hold.decidedAt = receivedAtMs;
-    hold.holdResolution = cancelResolution;
-    this.store.putHold(hold);
+    const next: HoldRecord = {
+      ...hold,
+      status: "CANCELLED_LOCAL_STATE_LOST",
+      reasonCode: "LOCAL_STATE_LOST",
+      decidedAt: receivedAtMs,
+      holdResolution: cancelResolution,
+    };
+    if (!this.store.settleHold(next, null)) {
+      this.log("hold.settle_lost", { holdId, attempted: "CANCELLED_LOCAL_STATE_LOST" });
+      return err(409, "HOLD_ALREADY_RESOLVED", { status: this.store.getHold(holdId)?.status ?? hold.status });
+    }
     this.log("hold.cancelled_local_state_lost", { holdId });
-    this.wake(hold);
-    return { status: 200, body: this.holdView(hold) };
+    this.wake(next);
+    return { status: 200, body: this.holdView(next) };
   }
 
   /**
@@ -1051,15 +1086,15 @@ export class GateEngine {
    * directly in alpha/tests). The gate RE-VERIFIES everything (D18) and only then resolves + grants.
    */
   decide(holdId: string, body: Uint8Array): EngineResult {
-    const hold = this.store.getHold(holdId);
-    if (!hold) return err(404, "UNKNOWN_HOLD");
+    const stored = this.store.getHold(holdId);
+    if (!stored) return err(404, "UNKNOWN_HOLD");
     // Capture the request's trusted arrival time once. Expiry and revocation must be evaluated
     // against this exact snapshot; crossing the boundary during verification cannot split state.
     const receivedAtMs = this.now();
     // Is this hold answerable by this gate's trust root at all? BEFORE `lazyExpire`, which signs.
-    const bindingProblem = this.envelopeBindingRefusal(hold, receivedAtMs);
+    const bindingProblem = this.envelopeBindingRefusal(stored, receivedAtMs);
     if (bindingProblem !== null) return bindingProblem;
-    this.lazyExpire(hold, receivedAtMs);
+    const hold = this.lazyExpire(stored, receivedAtMs);
     if (hold.status !== "PENDING") {
       // D17 / Red Line 6 — late-or-duplicate decision is rejected, never silently dropped, never
       // overrides an already-resolved (incl. EXECUTED-downstream) action.
@@ -1077,6 +1112,12 @@ export class GateEngine {
     // expires with a signed EXPIRED like any unanswered hold.
     if (hold.bootId !== this.trust.bootId) {
       return err(410, "HOLD_FROM_DEAD_BOOT", { detail: "this hold was frozen by an earlier boot of the gate and can no longer be decided" });
+    }
+    // The boot identifier is store state, and a supervisor may hand one identifier to a later boot:
+    // the gate-signed freeze time must not precede this boot's start either (the owner's O1b rule, one
+    // implementation). Nothing is signed; the hold stays PENDING and expires like any unanswered hold.
+    if (frozenBeforeBoot(this.trust, hold.deferredReceipt.ts)) {
+      return err(410, "HOLD_FROM_DEAD_BOOT", { detail: "this hold was frozen before this boot of the gate began and can no longer be decided" });
     }
     const parsedBody = this.parseBody(body);
     if (!parsedBody.ok) return parsedBody.res;
@@ -1329,52 +1370,56 @@ export class GateEngine {
       signer: this.execSigner,
     });
 
-    // ── FROM HERE DOWN NOTHING CAN FAIL: pure record mutation. ────────────────────────────────────
-    hold.decisionReceipt = rDoc as unknown as Receipt;
-    hold.decisionArtifact = daDoc;
-    hold.decidedAt = receivedAtMs;
-    hold.verdictReceipt = rDoc as unknown as Receipt;
-    hold.status = approved ? "APPROVED" : "DENIED";
-    hold.reasonCode = reasonCode;
-    hold.holdResolution = holdResolution;
-    if (grant !== null && grantId !== null) {
-      const grantRec: GrantRecord = {
-        grant,
-        status: "UNUSED",
-        holdId: hold.id,
-        reservedAt: null,
-        reportedAt: null,
-        unknownHintAt: null,
-        claimedResult: null,
-        claimedBy: null,
-        claimedAt: null,
-        consumption: null,
-        uncertainty: null,
-        createdAt: receivedAtMs,
-      };
-      hold.grantId = grantId;
-      this.store.putGrant(grantRec);
+    // ── FROM HERE DOWN NOTHING CAN FAIL: the records are built, then settled in ONE step. ─────────
+    const grantRec: GrantRecord | null = grant === null || grantId === null ? null : {
+      grant,
+      status: "UNUSED",
+      holdId: hold.id,
+      reservedAt: null,
+      reportedAt: null,
+      unknownHintAt: null,
+      claimedResult: null,
+      claimedBy: null,
+      claimedAt: null,
+      consumption: null,
+      uncertainty: null,
+      createdAt: receivedAtMs,
+    };
+    const next: HoldRecord = {
+      ...hold,
+      decisionReceipt: rDoc as unknown as Receipt,
+      decisionArtifact: daDoc,
+      decidedAt: receivedAtMs,
+      verdictReceipt: rDoc as unknown as Receipt,
+      status: approved ? "APPROVED" : "DENIED",
+      reasonCode,
+      holdResolution,
+      grantId: grantRec === null ? hold.grantId : grantId,
+    };
+    // A LOST RACE persists and returns nothing this call signed — not the resolution, not the grant.
+    if (!this.store.settleHold(next, grantRec)) {
+      this.log("hold.settle_lost", { holdId, attempted: next.status });
+      return err(409, "HOLD_ALREADY_RESOLVED", { status: this.store.getHold(holdId)?.status ?? hold.status });
     }
-    this.store.putHold(hold);
-    this.log("hold.decided", { holdId, status: hold.status });
-    this.wake(hold);
-    return { status: 200, body: this.holdView(hold) };
+    this.log("hold.decided", { holdId, status: next.status });
+    this.wake(next);
+    return { status: 200, body: this.holdView(next) };
   }
 
   /** Long-poll: on a terminal state, return the full resolution view (incl. grant + verdict). */
   wait(id: string, timeoutMs: number, agent: AgentRecord): Promise<EngineResult> {
-    const hold = this.store.getHold(id);
+    const stored = this.store.getHold(id);
     // F29-authz — this route hands back the Execution Grant on APPROVED; it must be owner-only, or
     // a foreign agent could simply long-poll the victim's grant out of the gate.
-    if (!this.ownsHold(hold, agent, "wait")) return Promise.resolve(err(404, "UNKNOWN_HOLD"));
-    this.lazyExpire(hold);
+    if (!this.ownsHold(stored, agent, "wait")) return Promise.resolve(err(404, "UNKNOWN_HOLD"));
+    const hold = this.lazyExpire(stored);
     if (hold.status !== "PENDING") return Promise.resolve({ status: 200, body: this.holdView(hold) });
     return new Promise<EngineResult>((resolve) => {
       const timer = setTimeout(() => {
         this.removeWaiter(id, waiter);
         const cur = this.store.getHold(id);
-        if (cur) this.lazyExpire(cur);
-        resolve({ status: 200, body: cur ? this.holdView(cur) : err(404, "UNKNOWN_HOLD").body });
+        const shown = cur ? this.lazyExpire(cur) : undefined;
+        resolve({ status: 200, body: shown ? this.holdView(shown) : err(404, "UNKNOWN_HOLD").body });
       }, Math.max(0, timeoutMs));
       // ⚠ NOT `unref()`ed. Found by sweeping for the NEIGHBOUR of the identical defect in
       // `packages/relay/src/engine.ts` — same long-poll shape, same copied-from-the-sweeper unref.
@@ -1426,9 +1471,9 @@ export class GateEngine {
    */
   commit(holdId: string, agent: AgentRecord): EngineResult {
     const at = this.now();
-    const hold = this.store.getHold(holdId);
-    if (!this.ownsHold(hold, agent, "commit")) return commitErr(404, "UNKNOWN_HOLD", false);
-    this.lazyExpire(hold, at);
+    const stored = this.store.getHold(holdId);
+    if (!this.ownsHold(stored, agent, "commit")) return commitErr(404, "UNKNOWN_HOLD", false);
+    const hold = this.lazyExpire(stored, at);
     if (!isEffectOwned(hold.action.canonical)) {
       return commitErr(409, "ACTION_NOT_EFFECT_OWNED", false, { detail: "this action is executed by its wrapper after reserve, not committed by the gate" });
     }
@@ -1471,7 +1516,8 @@ export class GateEngine {
     const outcome = commitOwner.commit(input, (atMs, verified) =>
       buildEffectAttestation({ verified, atMs, receiptId: this.trust.newId(), gate: this.trust.gate, signer: this.execSigner }));
     if (outcome.kind === "NOT_COMMITTED") return this.notCommittedResponse(outcome);
-    if (outcome.kind === "EXECUTED" && !outcome.idempotent) {
+    // An owner that records the consumption itself did so in the same step as its row.
+    if (outcome.kind === "EXECUTED" && !outcome.idempotent && commitOwner.recordsGrantConsumption !== true) {
       this.mirrorGrantConsumed(grantRec.grant.grantId, outcome.row, at);
     }
     this.log("effect.committed", { holdId: hold.id, effectId: outcome.row.effectId, outcome: outcome.kind, idempotent: outcome.idempotent });
@@ -1516,6 +1562,8 @@ export class GateEngine {
         return commitErr(422, outcome.code, false, extra);
       case "EFFECT_ATTESTATION_INVALID":
         return commitErr(500, outcome.code, false, extra);
+      case "EFFECT_STORE_UNAVAILABLE":
+        return commitErr(503, outcome.code, true, extra);
     }
   }
 
@@ -1807,6 +1855,7 @@ export class GateEngine {
       expiresAt: this.iso(hold.expiresAt),
       decidedAt: hold.decidedAt !== null ? this.iso(hold.decidedAt) : null,
       holdEnvelope: hold.holdEnvelope,
+      deferredReceipt: hold.deferredReceipt,
       verdictReceipt: hold.verdictReceipt,
       decisionArtifact: hold.decisionArtifact,
       holdResolution: hold.holdResolution,
