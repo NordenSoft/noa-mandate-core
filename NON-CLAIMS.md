@@ -599,7 +599,7 @@ one ledger row per authority; the statements below qualify what that establishes
 
 The reference ledger lives in the gate process's memory with the holds and grants. A crash or restart
 loses the effect, the row and the authority state together. It is not a system of record, and the
-reference command line does not wire it. Atomicity and durability across processes, one authoritative
+reference command line does not wire it. Commit-or-nothing behaviour and durability across processes, one authoritative
 ledger that a cloned volume cannot fork, and a single boot identifier shared by all of a gate's
 processes are left to a later revision.
 

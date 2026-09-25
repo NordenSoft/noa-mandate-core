@@ -452,7 +452,7 @@ test("retired grant key: a forged grant signature is an integrity failure, and o
   const authorization = authorizationOf(ctx);
   const grantKey = generateKeyPair("grant-label-old");
   const attacker = generateKeyPair("grant-label-attacker");
-  const keys: Record<string, { publicKey: string; retiredAt: string | null }> = {};
+  const keys: Record<string, { publicKey: string; retiredAt: string | null }> = Object.create(null);
   for (const [kid, publicKey] of Object.entries(ctx.keyring as Record<string, string>)) keys[kid] = { publicKey, retiredAt: null };
   keys[grantKey.kid] = { publicKey: grantKey.publicKey, retiredAt: "2026-07-01T00:00:00.000Z" };
   const keyring = { spec: "noa.signing-key-lifecycle/0.1", keys };
