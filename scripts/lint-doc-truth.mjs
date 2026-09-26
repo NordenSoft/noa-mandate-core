@@ -51,6 +51,12 @@
  *      unrelated third party (an MVC library, maintainer `jsz1`). `npx noa verify …` therefore
  *      downloads and runs a stranger's package. The README said exactly that for months. Banned.
  *   8  LICENSE PARITY — a license badge must name the license in the root manifest.
+ *   9  ATOMIC CITATION — in `NON-CLAIMS.md` and `CHANGELOG.md` (`ATOMIC_CITATION_DOCUMENTS`), every line
+ *      citation in a sentence that says "atomic" must name exactly one block tagged `ATOMIC-BLOCK: <id>`
+ *      … `ATOMIC-BLOCK-END: <id>` in the source (`scripts/lib/atomic-citations.mjs`). A citation of the
+ *      effect owner's in-process commit went on naming lines that a refactor had moved: the
+ *      published-surface gate checks that an anchor resolves, not that it still points at the block.
+ *      This rule reads only the repository, no registry and no shell.
  *
  * WHAT IT DELIBERATELY DOES NOT DO. It does not judge prose, tone, structure or completeness, and it
  * does not require a document to make any particular claim. A rule that fires on a claim a document
@@ -89,10 +95,11 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, mkdtempSync, openSync, readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { atomicCitationFindings } from "./lib/atomic-citations.mjs";
 
 /** The repository root, derived from this file's own location — one expression, no second copy. */
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -117,6 +124,9 @@ const GATED_DOCUMENTS = [
   { file: "README.md", docName: "the README", requireQuickstart: true },
   { file: "SECURITY.md", docName: "SECURITY.md", requireQuickstart: false },
 ];
+
+/** The documents rule 9 (ATOMIC CITATION) reads: the published claim boundary and the release notes. */
+const ATOMIC_CITATION_DOCUMENTS = ["NON-CLAIMS.md", "CHANGELOG.md"];
 
 /* ── the judging core: pure, fact-injected, no I/O ────────────────────────────────────────────── */
 
@@ -674,6 +684,34 @@ const SECOND_DOCUMENT_CASES = [
   ],
 ];
 
+/**
+ * Rule 9 fixtures: one injected source tree, sentences that must be refused and sentences that must
+ * pass. `src/c.ts` holds two blocks so a citation can open one and close another.
+ */
+const ATOMIC_SOURCES = {
+  "src/a.ts": ["const x = 1;", "// ATOMIC-BLOCK: blk", "x();", "// ATOMIC-BLOCK-END: blk", "done();"].join("\n"),
+  "src/b.ts": ["// ATOMIC-BLOCK: one", "// ATOMIC-BLOCK-END: one", "// ATOMIC-BLOCK: two", "// ATOMIC-BLOCK-END: two"].join("\n"),
+  "src/c.ts": ["// ATOMIC-BLOCK: x", "// ATOMIC-BLOCK: y", "y();", "// ATOMIC-BLOCK-END: x"].join("\n"),
+};
+const ATOMIC_CITATION_CASES = [
+  // [must fail?, markdown, why]
+  [false, "The commit is atomic (`src/a.ts:2-4`).", "a citation of exactly the tagged block"],
+  [false, "Atomicity comes from one block (`src/a.ts:2-4`); nothing else is claimed.", "the -ity form, tagged block"],
+  [false, "The commit is atomic in this store (`src/a.ts`).", "a path without lines cannot drift and is not checked"],
+  [false, "The commit is quick (`src/a.ts:1-5`).", "a sentence without the term is not this rule's business"],
+  [false, "```\nThe commit is atomic (`src/a.ts:3-5`).\n```", "a fenced sample is not a claim"],
+  [true, "The commit is atomic (`src/a.ts:3-5`).", "the cited lines shifted by one: line 3 is no tag"],
+  [true, "The commit is atomic (`src/a.ts:2-5`).", "the end moved past the closing tag"],
+  [true, "The commit is atomic (`src/a.ts:2`).", "one line cannot open and close a block"],
+  [true, "The commit is atomic (`src/a.ts:4-9`).", "a range past the end of the file"],
+  [true, "The commit is atomic (`src/missing.ts:2-4`).", "a file that does not exist"],
+  [true, "The commit is atomic (`../src/a.ts:2-4`).", "a path that leaves the repository"],
+  [true, "The commit is atomic (`src/b.ts:1-4`).", "a range that opens one block and closes another"],
+  [true, "The commit is atomic (`src/c.ts:1-4`).", "a range that spans another tag"],
+  [true, "### NC-X — the commit is atomic (`src/a.ts:3-5`)", "a heading is a sentence too"],
+  [true, "- first entry.\n- The commit is atomic in one\n  step (`src/a.ts:1-3`).", "a wrapped list entry"],
+];
+
 function selftest() {
   let failed = 0;
   const show = (s) => JSON.stringify(s.split("\n")[0].slice(0, 52));
@@ -735,6 +773,19 @@ function selftest() {
     }
   }
 
+  console.log("\natomic-citation fixtures (rule 9, both directions, injected sources):");
+  const readFixture = (path) => (Object.hasOwn(ATOMIC_SOURCES, path) ? ATOMIC_SOURCES[path] : null);
+  for (const [mustFail, md, why] of ATOMIC_CITATION_CASES) {
+    const { problems } = atomicCitationFindings(md, readFixture, "fixture.md");
+    if (mustFail === (problems.length > 0)) {
+      console.log(`  ✔ ${mustFail ? "[atomic-citation]".padEnd(24) : "passed  ".padEnd(24)} ${show(md).padEnd(56)} ${why}`);
+    } else {
+      failed++;
+      console.log(`  ✖ ${mustFail ? "ESCAPED" : "BLOCKED"}  ${show(md).padEnd(56)} ${why}`);
+      for (const p of problems) console.log(`               ${p}`);
+    }
+  }
+
   if (failed > 0) {
     console.log(`\nSELFTEST FAILED — ${failed} fixture(s) behaved wrongly. The gate is NOT trustworthy`);
     console.log("and renders no verdict on any real document. A check that could not run and a check");
@@ -743,7 +794,8 @@ function selftest() {
   }
   console.log(
     `\nSELFTEST PASSED — ${MUST_FAIL.length} rejected, ${MUST_PASS.length} accepted, ` +
-      `${SECOND_DOCUMENT_CASES.length} second-document case(s) verified.`,
+      `${SECOND_DOCUMENT_CASES.length} second-document case(s) and ${ATOMIC_CITATION_CASES.length} ` +
+      "atomic-citation case(s) verified.",
   );
 }
 
@@ -930,6 +982,42 @@ for (const { file, docName, requireQuickstart } of GATED_DOCUMENTS) {
   );
 }
 
+// Rule 9 — ATOMIC CITATION, over the claim boundary and the release notes. Repository-only: a source is
+// read only when it is a regular file inside the repository (no symlink is followed).
+function readRepoSource(path) {
+  // One open without following a symlink, then fstat and read on that descriptor: no check-then-read race.
+  let fd;
+  try {
+    fd = openSync(join(ROOT, path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch {
+    return null;
+  }
+  try {
+    return fstatSync(fd).isFile() ? readFileSync(fd, "utf8") : null;
+  } finally {
+    closeSync(fd);
+  }
+}
+for (const file of ATOMIC_CITATION_DOCUMENTS) {
+  console.log(`\n── ${file} (atomic citations) ──`);
+  let md;
+  try {
+    md = readFileSync(join(ROOT, file), "utf8");
+  } catch (err) {
+    console.error(`GATE COULD NOT RUN for ${file}: ${err.message}`);
+    sawSetupFailure = true;
+    continue;
+  }
+  const { problems, checked } = atomicCitationFindings(md, readRepoSource, file);
+  for (const c of checked) console.log(`  cited   ${c.doc}:${c.line}  ${c.citation}`);
+  if (problems.length === 0) {
+    console.log(`OK — ${checked.length} line citation(s) in "atomic" sentences each name exactly their tagged block.`);
+    continue;
+  }
+  sawFindings = true;
+  for (const p of problems) console.log(`  ✖ [atomic-citation] ${p}`);
+}
+
 console.log("");
 if (sawSetupFailure) {
   console.log("GATE COULD NOT RUN on at least one document (see above). Exiting 2.");
@@ -939,5 +1027,5 @@ if (sawFindings) {
   console.log("At least one gated document failed (see ✖ lines above). Exiting 1.");
   process.exit(1);
 }
-console.log(`OK — every gated document (${GATED_DOCUMENTS.map((d) => d.file).join(", ")}) is clean.`);
+console.log(`OK — every gated document (${[...GATED_DOCUMENTS.map((d) => d.file), ...ATOMIC_CITATION_DOCUMENTS].join(", ")}) is clean.`);
 process.exit(0);

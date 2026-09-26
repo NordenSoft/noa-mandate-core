@@ -36,7 +36,8 @@ export function sha256Digest(data: string | Buffer): Buffer {
   const buf = typeof data === "string" ? Buffer.from(data, "utf8") : data;
   // This is a protocol-defined digest of a canonical artifact signing preimage, never a password
   // or human credential. Replacing SHA-256 with a password KDF would break wire compatibility.
-  // codeql[js/insufficient-password-hash]
+  // A CodeQL js/insufficient-password-hash alert here is dismissed on GitHub with a written reason
+  // (this repository's CodeQL setup applies no inline suppression comment).
   return createHash("sha256").update(buf).digest();
 }
 

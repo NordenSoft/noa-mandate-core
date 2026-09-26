@@ -187,7 +187,13 @@ export interface GuardResult {
 
 export interface GuardInput {
   client: GateClient;
-  action: { canonical: string; riskClass: string; reversible?: boolean };
+  /**
+   * `reversible` is typed `false`: the gate signs `false` for every action whose adapter derives no
+   * reversibility and refuses any other caller value (422 REVERSIBLE_NOT_CALLER_SUPPLIED), so a
+   * caller that claims `true` is stopped at compile time rather than by that refusal at run time.
+   * `false` stays accepted so existing callers compile unchanged.
+   */
+  action: { canonical: string; riskClass: string; reversible?: false };
   /** ENFORCED: the REAL params; the wrapper snapshots them immutably (D14). */
   params?: unknown;
   /**

@@ -210,6 +210,62 @@ function identifiersAccepted(ledger: string, account: string): boolean {
   return r.ok && r.value.ledger === ledger && r.value.fromAccount === account;
 }
 
+/** `checkLedgerDefinition`'s refusal of an `accounts` value that is not a plain object. Stable. */
+const ACCOUNTS_NOT_PLAIN = "the accounts are not a plain object (prototype Object.prototype or null) of account identifiers and balances";
+
+/** The outcome of `checkLedgerDefinition`. */
+export type LedgerDefinitionCheck =
+  | { ok: true; balances: Record<string, number>; total: number }
+  | { ok: false; detail: string };
+
+/**
+ * The rules a ledger definition meets before an owner holds a balance: the ledger and every account
+ * identifier pass the `noa.ledger.transfer/1` identifier rules, every balance is a non-negative safe
+ * integer, and the balances sum to at most `Number.MAX_SAFE_INTEGER` (a transfer conserves the total,
+ * so that bound rules out overflow for the owner's whole life). `accounts` must be a plain object
+ * (prototype `Object.prototype` or `null`); anything else is refused. Pure: each balance is read once, and
+ * the balances come back as a fresh null-prototype copy the caller owns. A refusal names the first
+ * rule that fails; `createInMemoryLedgerEffectOwner` refuses construction with
+ * `EFFECT_OWNER_LEDGER_INVALID` and that detail, and another owner does the same.
+ */
+export function checkLedgerDefinition(ledger: unknown, accounts: unknown): LedgerDefinitionCheck {
+  if (typeof ledger !== "string" || !identifiersAccepted(ledger, "a")) {
+    const named = typeof ledger === "string" ? JSON.stringify(ledger) : `of type ${typeof ledger}`;
+    return { ok: false, detail: `the ledger identifier ${named} fails the noa.ledger.transfer/1 identifier rules` };
+  }
+  // A plain object only: its prototype is Object.prototype or null. An array, a Map or a Set would pass
+  // an `Object.keys` walk as an empty ledger, and a primitive or a function has no balances to read.
+  let proto: unknown;
+  try {
+    proto = typeof accounts === "object" && accounts !== null ? Object.getPrototypeOf(accounts) : undefined;
+  } catch {
+    proto = undefined;
+  }
+  if (proto !== Object.prototype && proto !== null) {
+    return { ok: false, detail: ACCOUNTS_NOT_PLAIN };
+  }
+  const opening = accounts as Readonly<Record<string, unknown>>;
+  const balances = Object.create(null) as Record<string, number>;
+  const accountIds = Object.keys(opening);
+  let total = 0;
+  for (let i = 0; i < accountIds.length; i++) {
+    const id = accountIds[i] as string;
+    const balance: unknown = opening[id];
+    if (!identifiersAccepted(ledger, id)) {
+      return { ok: false, detail: `the account identifier ${JSON.stringify(id)} fails the noa.ledger.transfer/1 identifier rules` };
+    }
+    if (typeof balance !== "number" || !Number.isSafeInteger(balance) || balance < 0) {
+      return { ok: false, detail: `the balance of ${JSON.stringify(id)} is not a non-negative safe integer` };
+    }
+    total += balance;
+    if (total > Number.MAX_SAFE_INTEGER) {
+      return { ok: false, detail: "the balances sum past Number.MAX_SAFE_INTEGER" };
+    }
+    balances[id] = balance;
+  }
+  return { ok: true, balances, total };
+}
+
 /**
  * The validated 1..15-digit amount as an integer, by a digit walk over the string the kernel already
  * validated. Exact: 10^15 - 1 is below 2^53. Never `Number()` or `parseInt` of caller text.
@@ -709,10 +765,10 @@ export function verifyEffectAttestation(
  * Build an in-memory reference ledger and its effect owner. Balances are whole `XTS` units.
  *
  * Construction refuses, and nothing is built, when the trust root is not pinned
- * (EFFECT_OWNER_REQUIRES_PINNED_TRUST), when the ledger or an account identifier fails the
- * `noa.ledger.transfer/1` identifier rules, when a balance is not a non-negative safe integer, or
- * when the balances sum past `Number.MAX_SAFE_INTEGER` (EFFECT_OWNER_LEDGER_INVALID). A transfer
- * conserves the total, so that bound rules out overflow for the owner's whole life.
+ * (EFFECT_OWNER_REQUIRES_PINNED_TRUST), or when the ledger definition fails `checkLedgerDefinition`
+ * (EFFECT_OWNER_LEDGER_INVALID with its detail): an identifier that fails the `noa.ledger.transfer/1`
+ * identifier rules, a balance that is not a non-negative safe integer, or balances that sum past
+ * `Number.MAX_SAFE_INTEGER`.
  *
  * REFERENCE ONLY: the ledger resets with the process. It is not a system of record (NON-CLAIMS.md §S9).
  */
@@ -735,27 +791,9 @@ export function createInMemoryLedgerEffectOwner(o: {
   // The schemas are loaded now: a missing one stops the owner's construction, not its first commit.
   prepareEffectVerification();
 
-  if (typeof ledger !== "string" || !identifiersAccepted(ledger, "a")) {
-    throw ledgerInvalid(`the ledger identifier ${JSON.stringify(ledger)} fails the noa.ledger.transfer/1 identifier rules`);
-  }
-  const balances = Object.create(null) as Record<string, number>;
-  const accountIds = Object.keys(o.accounts);
-  let total = 0;
-  for (let i = 0; i < accountIds.length; i++) {
-    const id = accountIds[i] as string;
-    const balance: unknown = o.accounts[id];
-    if (!identifiersAccepted(ledger, id)) {
-      throw ledgerInvalid(`the account identifier ${JSON.stringify(id)} fails the noa.ledger.transfer/1 identifier rules`);
-    }
-    if (typeof balance !== "number" || !Number.isSafeInteger(balance) || balance < 0) {
-      throw ledgerInvalid(`the balance of ${JSON.stringify(id)} is not a non-negative safe integer`);
-    }
-    total += balance;
-    if (total > Number.MAX_SAFE_INTEGER) {
-      throw ledgerInvalid("the balances sum past Number.MAX_SAFE_INTEGER");
-    }
-    balances[id] = balance;
-  }
+  const definition = checkLedgerDefinition(ledger, o.accounts);
+  if (!definition.ok) throw ledgerInvalid(definition.detail);
+  const balances = definition.balances;
 
   const rows: LedgerRow[] = [];
   const rowsById = new Map<string, LedgerRow>();
@@ -881,10 +919,14 @@ export function createInMemoryLedgerEffectOwner(o: {
     }));
 
     // O9 — the effect and the consumption of its authority, in one step. Nothing below can throw.
+    // The block between the two ATOMIC-BLOCK tags is what NON-CLAIMS.md cites as atomic; the published
+    // citation names exactly these lines, and lint-doc-truth refuses it when they move.
+    // ATOMIC-BLOCK: o9-in-process-commit
     balances[transfer.fromAccount] = fromBalance - amount;
     balances[transfer.toAccount] = toBalance + amount;
     recordedReceiptIds.add(stringAt(sealed.attestation.executedReceipt as unknown as Record<string, unknown>, "id") ?? "");
     writeRow(row);
+    // ATOMIC-BLOCK-END: o9-in-process-commit
     return { kind: "EXECUTED", idempotent: false, row };
   }
 

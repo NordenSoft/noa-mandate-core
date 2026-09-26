@@ -25,8 +25,9 @@ synchronous step. Before the row exists the agent never holds a usable transfer 
 - **Hold creation.** In addition to every existing check:
   - a caller-supplied `action.reversible` member is refused whatever its value
     (`422 REVERSIBLE_NOT_CALLER_SUPPLIED`); the adapter derives `reversible: false` and that is the
-    value the gate signs. This applies only to adapters that derive reversibility; an adapter that
-    does not derive it keeps the caller-supplied flag;
+    value the gate signs. For an action whose adapter derives no reversibility (`noa.command.exec`)
+    the gate also signs `false` and refuses any caller value but `false`, so a caller's
+    reversibility claim is never signed;
   - with no owner configured the hold is refused (`503 EFFECT_OWNER_UNCONFIGURED`), so no human is
     asked to approve a transfer nothing can execute;
   - a transfer naming a ledger the configured owner does not commit is refused
@@ -130,9 +131,10 @@ instant defeats the freeze-time comparison (NON-CLAIMS.md §S9).
 `createInMemoryLedgerEffectOwner({trust, now, ledger, accounts})` builds the reference owner and its
 in-memory ledger (whole `XTS` units). It refuses, and builds nothing, when the trust root is not pinned
 (`EFFECT_OWNER_REQUIRES_PINNED_TRUST`: an alpha trust root keeps the approver's private key in the
-gate process), or when the ledger or an account identifier fails the `noa.ledger.transfer/1`
-identifier rules, a balance is not a non-negative safe integer, or the balances sum past
-`Number.MAX_SAFE_INTEGER` (`EFFECT_OWNER_LEDGER_INVALID`). Pass owners as `effectOwners` to
+gate process), or when the ledger definition fails `checkLedgerDefinition` (below): the ledger or an
+account identifier fails the `noa.ledger.transfer/1` identifier rules, a balance is not a non-negative
+safe integer, or the balances sum past `Number.MAX_SAFE_INTEGER` (`EFFECT_OWNER_LEDGER_INVALID` with
+the check's detail). Pass owners as `effectOwners` to
 `createGate` or `GateEngine`; the engine refuses an owner of another trust root
 (`EFFECT_OWNER_TRUST_MISMATCH`), two owners for one action (`EFFECT_OWNER_DUPLICATE`) and an owner
 for an action that is not effect-owned (`EFFECT_OWNER_CANONICAL_INVALID`). In one process, one engine
@@ -162,6 +164,13 @@ the reference owner's checks, not a copy of them:
   record whether an EXECUTED receipt id was already recorded. It returns the first problem (or none)
   and the verified parses the row keeps.
 - `prepareEffectVerification()` loads what these checks verify with; an owner calls it at construction.
+- `checkLedgerDefinition(ledger, accounts)`: the construction rules of a ledger definition, pure — the
+  ledger and every account identifier pass the `noa.ledger.transfer/1` identifier rules, every balance
+  is a non-negative safe integer, and the balances sum to at most `Number.MAX_SAFE_INTEGER`;
+  `accounts` must be a plain object (prototype `Object.prototype` or `null`). Each balance is read
+  once; it returns a fresh null-prototype copy of the balances and their total, or the first rule that
+  fails. The reference owner builds its ledger from it and refuses with
+  `EFFECT_OWNER_LEDGER_INVALID` and that detail; another owner does the same instead of keeping a copy.
 - The owner keeps O0 (the whole-commit re-entry refusal: in-process state here; a durable owner must
   provide an equivalent guard at transaction level, so that nothing a callback does inside one commit
   obtains a second row), O2 (uniqueness over its own record, checked again just before the write), O6
@@ -258,4 +267,6 @@ for the reason given:
   row per authority (O2, armed).
 
 The derivation of `reversible` alone is not armed either: while the member is refused, the derived
-`false` equals the default. The refusal alone and the pair together are armed.
+`false` equals the gate's signed default, `false`. The refusal alone is armed, and so is the refusal
+together with the derivation and the signed default handed back to the caller, under which the
+caller's `reversible: true` is signed.

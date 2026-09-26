@@ -151,9 +151,9 @@ function openVerified(pathname, label, flags, mode, { singleLink = false, exists
   let fd;
   try {
     // The descriptor-level O_NOFOLLOW / regular-file / owner / mode checks below are precisely the
-    // controls this generic query models as absent; callers legitimately point these flags at a
-    // caller-owned temporary directory in tests.
-    // codeql[js/insecure-temporary-file]
+    // controls CodeQL's js/insecure-temporary-file query models as absent; callers legitimately point
+    // these flags at a caller-owned temporary directory in tests. An alert here is dismissed on GitHub
+    // with a written reason (this repository's CodeQL setup applies no inline suppression comment).
     fd = openSync(pathname, flags, mode);
   } catch (err) {
     const code = thrownCode(err);

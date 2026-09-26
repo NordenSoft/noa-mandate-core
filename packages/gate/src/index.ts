@@ -99,6 +99,8 @@ export {
   deriveLedgerCommit,
   verifyEffectAttestation,
   prepareEffectVerification,
+  checkLedgerDefinition,
+  type LedgerDefinitionCheck,
   type EffectAttestationCheck,
   type EffectAuthority,
   type VerifiedEffectAuthority,

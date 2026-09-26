@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { guard, InProcessGateClient, type GateClient } from "../src/wrapper.js";
+import { guard, InProcessGateClient, type GateClient, type GuardInput } from "../src/wrapper.js";
 import { setupGate, signPhoneDecision, sampleCommandParams, body } from "./helpers.js";
 
 /** After guard() posts a hold and parks on wait(), find the PENDING hold on `chain` and approve it,
@@ -158,7 +158,7 @@ test("guard(): the executor is captured at entry — it cannot be swapped after 
 
   const input = {
     client,
-    action: { canonical: "noa.command.exec", riskClass: "HIGH" as const, reversible: false },
+    action: { canonical: "noa.command.exec", riskClass: "HIGH" as const, reversible: false as const },
     params: sampleCommandParams(),
     chain: "chain-swap",
     idempotencyKey: "idem-swap",
@@ -195,4 +195,19 @@ test("guard(): CONTROL — an unswapped executor still runs, so the assertion ab
   const result = await p;
   assert.equal(result.outcome, "EXECUTED", result.detail);
   assert.deepEqual(ran, ["APPROVED-COMMAND"]);
+});
+
+// ── GuardInput.action.reversible is typed `false` ────────────────────────────────────────────────
+// The gate signs `false` for an action whose adapter derives no reversibility and refuses any other
+// caller value, so the type stops a `true` claim before it reaches that refusal. The two directives
+// below fail `tsc` (and so the build this suite runs on) if either assignment ever compiles.
+test("GUARD-REVERSIBLE-TYPE — GuardInput accepts reversible:false and refuses reversible:true at compile time", () => {
+  const honest: GuardInput["action"] = { canonical: "noa.command.exec", riskClass: "HIGH", reversible: false };
+  // @ts-expect-error — reversible:true is not a GuardInput value
+  const claimed: GuardInput["action"] = { canonical: "noa.command.exec", riskClass: "HIGH", reversible: true };
+  const flag: boolean = claimed !== null;
+  // @ts-expect-error — nor is a boolean that may be true
+  const fromFlag: GuardInput["action"] = { canonical: "noa.command.exec", riskClass: "HIGH", reversible: flag };
+  assert.equal(honest.reversible, false);
+  assert.ok(fromFlag.canonical === honest.canonical);
 });

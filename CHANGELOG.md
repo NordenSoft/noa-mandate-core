@@ -6,6 +6,25 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `NON-CLAIMS.md` NC-S9.9: the reference gate no longer signs a caller's `action.reversible`. For an
+  action whose adapter derives no reversibility (`noa.command.exec`) it signs `false` and refuses any
+  other caller value (`422 REVERSIBLE_NOT_CALLER_SUPPLIED`); `false` there means the gate does not
+  vouch that the action can be undone.
+- `NON-CLAIMS.md` NC-S9.12: the reference gate's ledger-definition rules are exported as
+  `checkLedgerDefinition` (`docs/gate-effect-owner.md`), the one implementation its in-memory owner
+  builds its ledger from, and are listed among the checks another owner shares. Behaviour change for
+  `createInMemoryLedgerEffectOwner`: `accounts` must now be a plain object (prototype
+  `Object.prototype` or `null`). An array, a number, a bigint, a function, a `Map` or a `Set` used to
+  build an empty ledger, and `null` or `undefined` used to throw a `TypeError`; each is now refused with
+  `EFFECT_OWNER_LEDGER_INVALID`. A ledger identifier that is not a string is named by its type ("of
+  type number") instead of its JSON text, and a bigint ledger no longer throws a `TypeError`.
+- `NON-CLAIMS.md` and this changelog cite each "atomic" block by the lines between its
+  `ATOMIC-BLOCK` tags in the source, and `scripts/lint-doc-truth.mjs` (rule 9) refuses a citation
+  that no longer names exactly those lines. NC-S9.1's citation of the effect owner's in-process commit
+  had drifted and is corrected.
+
 ## [0.9.0] - 2026-09-25
 
 What changed for verifier users since 0.8.0, in short (the entries below give the detail):
@@ -175,8 +194,8 @@ What changed for verifier users since 0.8.0, in short (the entries below give th
   (ADR-R-013): passing the owner conformance runner is not correctness (the re-entry guard, the
   owner's record and its store stay its own), a supervisor-supplied boot (identifier and start) is
   taken as given, and the Gate-pin fingerprint is a display. The one transition out of PENDING is atomic
-  in the in-memory store (`settleHold`, `packages/gate/src/store.ts:165-172`), and another store has to
-  pass `runSettleHoldStoreContract` (`packages/gate/test/store-settle-contract.ts:56`).
+  in the in-memory store (`settleHold`, `packages/gate/src/store.ts:168-174`), and another store has to
+  pass `runSettleHoldStoreContract` (`packages/gate/test/store-settle-contract.ts`).
 - `NON-CLAIMS.md` gains §S9, the claim boundary of the reference gate's new effect-owned commit for
   `noa.ledger.transfer` (`docs/gate-effect-owner.md`, ADR-R-012, PROPOSED): the effect and its record
   die together, a compromised gate process holds the keys and the ledger (and what the owner cannot

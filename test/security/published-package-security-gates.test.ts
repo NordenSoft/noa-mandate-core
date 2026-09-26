@@ -63,11 +63,12 @@ function runGate(fixture: string): GateResult {
   } finally {
     closeSync(outputFd);
   }
-  // codeql[js/file-system-race] — `outputFile` is a path this test created under its own
+  // CodeQL js/file-system-race: `outputFile` is a path this test created under its own
   // `mkdtempSync` directory and handed to a child process it just awaited. No other writer exists,
   // and the alternative (a descriptor held across the spawn) would not survive the child's own open.
-  // Suppressed with the reason rather than restructured: a race needs a second party, and there is
-  // none. If that ever stops being true, this comment is the thing that is wrong.
+  // Its alert is dismissed on GitHub with a written reason rather than the code restructured (this
+  // repository's CodeQL setup applies no inline suppression comment): a race needs a second party,
+  // and there is none. If that ever stops being true, this comment is the thing that is wrong.
   const stdout = readFileSync(outputFile, "utf8");
   rmSync(outputFile, { force: true });
   if (run.error) throw run.error;

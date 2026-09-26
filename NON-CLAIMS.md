@@ -600,7 +600,7 @@ one ledger row per authority; the statements below qualify what that establishes
 The reference ledger lives in the gate process's memory with the holds and grants. A crash or restart
 loses the effect, the row and the authority state together. It is not a system of record, and the
 reference command line does not wire it. Within one gate process the commit is atomic
-(`packages/gate/src/effect-owner.ts:883-887`): the balance writes and the row that consumes the
+(`packages/gate/src/effect-owner.ts:924-929`): the balance writes and the row that consumes the
 authority are one synchronous block, and nothing after its first write can throw. The same step across
 processes, durability across processes, one authoritative ledger that a cloned volume cannot fork, and
 a single boot identifier shared by all of a gate's processes are left to a later revision.
@@ -655,8 +655,10 @@ The gate's clock decides every expiry and a clock rollback is not detected. The 
 
 ### NC-S9.9 — Only this action is effect-owned
 
-Every other action keeps the wrapper path of §S8.1: its grant is visible to the owning agent, and an
-adapter that does not derive reversibility keeps the caller-supplied `action.reversible`.
+Every other action keeps the wrapper path of §S8.1: its grant is visible to the owning agent. For an
+action whose adapter derives no reversibility the gate signs `action.reversible: false` and refuses a
+caller's other value; `false` there means the gate does not vouch that the action can be undone, not
+that it cannot be.
 Console-issued grants, two-person rules and every other effect are outside this revision.
 
 ### NC-S9.10 — One effect-owning engine per boot is enforced in one process only
@@ -678,12 +680,13 @@ by the gate.
 
 ### NC-S9.12 — Passing the owner conformance runner is not correctness
 
-An embedder's owner that runs `verifyEffectAuthority`, `deriveLedgerCommit` and
-`verifyEffectAttestation` shares the reference owner's signed-bytes and attestation checks, and one
-that passes `runEffectOwnerConformance` and `effectOwnerKeyringProof` meets the reference owner's
-tests. Neither shows that what stays the owner's own is correct: its re-entry guard (in-process state
-in the reference owner; a durable owner needs an equivalent guard at transaction level), its record
-(uniqueness, balances, the write and the grant's consumption in one step) and its store.
+An embedder's owner that runs `verifyEffectAuthority`, `deriveLedgerCommit`,
+`verifyEffectAttestation` and `checkLedgerDefinition` shares the reference owner's signed-bytes,
+attestation and ledger-definition checks, and one that passes `runEffectOwnerConformance` and
+`effectOwnerKeyringProof` meets the reference owner's tests. Neither shows that what stays the
+owner's own is correct: its re-entry guard (in-process state in the reference owner; a durable owner
+needs an equivalent guard at transaction level), its record (uniqueness, balances, the write and the
+grant's consumption in one step) and its store.
 
 ### NC-S9.13 — A supervisor-supplied boot is taken as given
 
@@ -694,12 +697,12 @@ With a reused identifier, decide and the effect owner both still refuse a hold w
 time precedes the supplied boot start; a supervisor that also reuses the start instant defeats that
 too (NC-S9.2).
 
-### NC-S9.14 — `settleHold` is atomic in the in-memory store (`packages/gate/src/store.ts:165-172`); another store has to pass the settle contract
+### NC-S9.14 — `settleHold` is atomic in the in-memory store (`packages/gate/src/store.ts:168-174`); another store has to pass the settle contract
 
 `settleHold` is atomic in the in-memory store because its compare of the stored status and its writes
-of the hold and the grant are one synchronous block (`packages/gate/src/store.ts:165-172`). For another
+of the hold and the grant are one synchronous block (`packages/gate/src/store.ts:168-174`). For another
 store an atomic `settleHold` is a contract requirement: the store has to pass
-`runSettleHoldStoreContract` (`packages/gate/test/store-settle-contract.ts:56`), whose race test lets
+`runSettleHoldStoreContract` (`packages/gate/test/store-settle-contract.ts`), whose race test lets
 exactly one of two connections that both read PENDING win, and a durable store expresses the step as
 one transaction whose compare is the stored status. The gate cannot tell a store that reads and then
 writes, and such a store restores the race it replaced; the contract's tests exercise the races they
