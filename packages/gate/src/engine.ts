@@ -1469,6 +1469,8 @@ export class GateEngine {
    *       re-derivation, ledger, accounts, funds, then signing from its verified parses and verifying
    *       what was signed. The audience and epoch parts of check 8, and check 9, are repeated
    *       there, so a direct caller of the owner meets them too; roster expiry is not (see the doc).
+   *       An owner that cannot tell whether its write committed: 503 EFFECT_OUTCOME_UNKNOWN (retryable,
+   *       as a commit of this same hold), with nothing mirrored.
    *   17  after a new EXECUTED row, the grant record is marked REPORTED with the consumption. If that
    *       fails the answer is still 200: the row is the record, and reserve/report refuse regardless.
    */
@@ -1519,6 +1521,12 @@ export class GateEngine {
     const outcome = commitOwner.commit(input, (atMs, verified) =>
       buildEffectAttestation({ verified, atMs, receiptId: this.trust.newId(), gate: this.trust.gate, signer: this.execSigner }));
     if (outcome.kind === "NOT_COMMITTED") return this.notCommittedResponse(outcome);
+    // UNKNOWN is neither a row nor its absence: nothing is mirrored, nothing is claimed. A retry of this
+    // hold meets REPLAY FIRST (step 4) when the owner holds the row, and commits once when it does not.
+    if (outcome.kind === "OUTCOME_UNKNOWN") {
+      this.log("effect.outcome_unknown", { holdId: hold.id, detail: outcome.detail });
+      return commitErr(503, outcome.code, true, { detail: outcome.detail });
+    }
     // An owner that records the consumption itself did so in the same step as its row.
     if (outcome.kind === "EXECUTED" && !outcome.idempotent && commitOwner.recordsGrantConsumption !== true) {
       this.mirrorGrantConsumed(grantRec.grant.grantId, outcome.row, at);

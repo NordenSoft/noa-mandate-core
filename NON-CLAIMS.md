@@ -600,7 +600,7 @@ one ledger row per authority; the statements below qualify what that establishes
 The reference ledger lives in the gate process's memory with the holds and grants. A crash or restart
 loses the effect, the row and the authority state together. It is not a system of record, and the
 reference command line does not wire it. Within one gate process the commit is atomic
-(`packages/gate/src/effect-owner.ts:924-929`): the balance writes and the row that consumes the
+(`packages/gate/src/effect-owner.ts:940-945`): the balance writes and the row that consumes the
 authority are one synchronous block, and nothing after its first write can throw. The same step across
 processes, durability across processes, one authoritative ledger that a cloned volume cannot fork, and
 a single boot identifier shared by all of a gate's processes are left to a later revision.
@@ -714,6 +714,24 @@ run and are no proof about a schedule they do not run.
 was offered the tenant, kid and key the Gate host printed; they do not show that the host is
 uncompromised, that the key is still the Gate's, or that the person compared them. Nothing accepts a
 key because of it.
+
+### NC-S9.16 — An unknown commit outcome is settled by a retry of the same hold, not by the gate
+
+An owner that cannot tell whether its write committed answers `OUTCOME_UNKNOWN`, and the gate answers
+`503 EFFECT_OUTCOME_UNKNOWN` (`docs/gate-effect-owner.md`, "An unknown outcome"). The answer says
+neither that the effect happened nor that it did not, and the gate records nothing for it: it mirrors
+no consumption and returns no execution attestation. The owner's attempt may already have signed an
+attestation before its result became unknown; absence of an attestation in this answer does not prove
+absence of signing or of an effect. The outcome is settled only when a commit of the same hold (the hold
+id recovered, if lost, by repeating `createHold` with the same `Idempotency-Key` and body) meets the
+recorded row or commits the lost write once. Until then it stays unknown; an owner may refuse every
+commit until its operator has decided, and the gate does not bound that time. A request under a new
+`Idempotency-Key` is a new hold that needs its own approval, and the gate cannot tell that it asks for
+the same transfer again. The reference in-memory owner never answers `OUTCOME_UNKNOWN`: nothing after
+its first write can fail (NC-S9.1). Whether another owner answers it wherever it cannot know, instead of
+`NOT_COMMITTED`, is that owner's code and is not verified by the gate (NC-S9.11); the conformance
+runner's three unknown-outcome tests show only that, when such an answer is given, a retry of the same
+hold yields exactly one row (executed or terminally refused).
 
 ## R1. Package release controller — what a released `noa-receipt` version does and does not establish
 

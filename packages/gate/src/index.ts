@@ -113,6 +113,7 @@ export {
   type EffectCommitInput,
   type EffectAttestation,
   type EffectRefusalCode,
+  type EffectUnknownCode,
   type LedgerRefusalCode,
   type LedgerRow,
 } from "./effect-owner.js";

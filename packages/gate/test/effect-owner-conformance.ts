@@ -476,7 +476,7 @@ export function runEffectOwnerConformance(label: string, factory: EffectOwnerFac
     fx.clock.advance(2 * HOUR);
     const replay = fx.owner!.commit(input, sealer.seal);
     assert.equal(codeOf(replay), "EXECUTED");
-    assert.equal(replay.kind !== "NOT_COMMITTED" && replay.idempotent, true);
+    assert.equal(replay.kind === "EXECUTED" && replay.idempotent, true);
     assert.equal(codeOf(fx.owner!.commit({ ...input, grant: second }, sealer.seal)), "EFFECT_AUTHORITY_CONSUMED");
     assert.equal(sealer.calls.length, 1);
   });
@@ -532,6 +532,95 @@ export function runEffectOwnerConformance(label: string, factory: EffectOwnerFac
     assert.equal(fx.owner!.inspect().balances[ACCT_1], 1000);
     assert.equal(codeOf(fx.owner!.commit(input, sealerFor(fx).seal)), "EXECUTED");
     assert.equal(balanceTotal(fx.owner!), total, "the total is conserved");
+  });
+
+  // ── an unknown outcome (docs/gate-effect-owner.md, "An unknown outcome") ──────────────────────────
+
+  /**
+   * The owner under test, except that the ANSWER of its first commit is replaced by OUTCOME_UNKNOWN.
+   * With `written` the owner's commit runs first and its outcome is kept there (the write happened and
+   * the answer was lost); without it the owner is never reached (the write was lost).
+   */
+  function unknownFirst(inner: EffectOwner, written: EffectOutcome[] | null): EffectOwner {
+    let first = true;
+    return {
+      canonical: inner.canonical,
+      ledger: inner.ledger,
+      bootId: inner.bootId,
+      get bound() {
+        return inner.bound;
+      },
+      bindEngine: (engine: object) => inner.bindEngine(engine),
+      admit: (canonicalParams: string) => inner.admit(canonicalParams),
+      find: (holdEnvelopeHash: string) => inner.find(holdEnvelopeHash),
+      commit(input, seal) {
+        if (!first) return inner.commit(input, seal);
+        first = false;
+        if (written !== null) written.push(inner.commit(input, seal));
+        return { kind: "OUTCOME_UNKNOWN", code: "EFFECT_OUTCOME_UNKNOWN", detail: "test: the owner cannot tell whether its write committed" };
+      },
+      inspect: () => inner.inspect(),
+      ...(inner.recordsGrantConsumption === true ? { recordsGrantConsumption: true as const } : {}),
+      ...(inner.store !== undefined ? { store: inner.store } : {}),
+    };
+  }
+  const unknownGate = (written: EffectOutcome[] | null): EffectGate =>
+    effectGate({ makeEngine: (deps) => new GateEngine({ ...deps, effectOwners: [unknownFirst((deps.effectOwners ?? [])[0] as EffectOwner, written)] }) });
+
+  test("EFFECT-OUTCOME-UNKNOWN-COMMITTED — a commit whose answer is lost after the owner wrote its row is answered 503 EFFECT_OUTCOME_UNKNOWN; the retry of the same hold answers that row, and a new Idempotency-Key moves nothing", () => {
+    const written: EffectOutcome[] = [];
+    const fx = unknownGate(written);
+    const holdId = approvedTransfer(fx, "unknown-committed");
+    const first = fx.engine.commit(holdId, fx.agent);
+    assert.equal(written[0]?.kind, "EXECUTED", "anti-vacuity: the owner under test wrote its row");
+    assert.ok(fx.owner!.inspect().rows[0]?.attestation, "an attestation may already have been signed before the outcome becomes unknown");
+    assert.deepEqual([first.status, errorOf(first), bodyOf(first)["retryable"]], [503, "EFFECT_OUTCOME_UNKNOWN", true], JSON.stringify(first.body));
+    assert.equal("executedReceipt" in bodyOf(first), false, "an unknown answer exposes no signed execution claim");
+    // The client that lost the hold id recovers it by repeating createHold with the same key and body.
+    const recovered = fx.engine.createHold(fx.agent, "idem-unknown-committed", transferRequest("unknown-committed"));
+    assert.deepEqual([recovered.status, bodyOf(recovered)["holdId"], bodyOf(recovered)["idempotent"]], [200, holdId, true]);
+    const changed = fx.engine.createHold(fx.agent, "idem-unknown-committed", transferRequest("unknown-committed", transfer({ amount: "101" })));
+    assert.deepEqual([changed.status, errorOf(changed)], [409, "IDEMPOTENCY_CONFLICT"], "same key with changed bytes is not reconciliation");
+    const retry = fx.engine.commit(holdId, fx.agent);
+    assert.equal(rowCount(fx.owner), 1, "consequence: the retry of the same hold writes no second row");
+    assert.equal(balances(fx)[ACCT_1], 900, "consequence: one approval, one debit");
+    assert.deepEqual([retry.status, bodyOf(retry)["outcome"], bodyOf(retry)["idempotent"], bodyOf(retry)["effectId"]], [200, "EXECUTED", true, fx.owner!.inspect().rows[0]?.effectId]);
+    // A new Idempotency-Key is a new request: a new hold that no human approved moves nothing.
+    const fresh = holdIdOf(fx.engine.createHold(fx.agent, "idem-unknown-committed-new", transferRequest("unknown-committed-new")));
+    const refused = fx.engine.commit(fresh, fx.agent);
+    assert.equal(balances(fx)[ACCT_1], 900, "consequence: a new request is not a retry and needs its own approval");
+    assert.deepEqual([refused.status, errorOf(refused)], [409, "HOLD_NOT_APPROVED"]);
+  });
+
+  test("EFFECT-OUTCOME-UNKNOWN-LOST — a commit answered EFFECT_OUTCOME_UNKNOWN whose write never happened is committed exactly once by the retry of the same hold", () => {
+    const fx = unknownGate(null);
+    const holdId = approvedTransfer(fx, "unknown-lost");
+    const first = fx.engine.commit(holdId, fx.agent);
+    assert.deepEqual([first.status, errorOf(first), bodyOf(first)["retryable"]], [503, "EFFECT_OUTCOME_UNKNOWN", true], JSON.stringify(first.body));
+    assert.equal(rowCount(fx.owner), 0, "the write was lost");
+    assert.deepEqual([grantOf(fx, holdId).status, grantOf(fx, holdId).reportedAt], ["UNUSED", null], "the engine records nothing for an unknown outcome");
+    const retry = fx.engine.commit(holdId, fx.agent);
+    const again = fx.engine.commit(holdId, fx.agent);
+    assert.equal(rowCount(fx.owner), 1, "consequence: the retry of the same hold commits exactly once");
+    assert.equal(balances(fx)[ACCT_1], 900, "consequence: one approval, one debit");
+    assert.deepEqual([retry.status, bodyOf(retry)["idempotent"], again.status, bodyOf(again)["idempotent"]], [200, false, 200, true]);
+  });
+
+  test("EFFECT-OUTCOME-UNKNOWN-REFUSED — a lost refusal answer reconciles to the same unsigned terminal row even after expiry", () => {
+    const written: EffectOutcome[] = [];
+    const fx = unknownGate(written);
+    const holdId = approvedTransfer(fx, "unknown-refused", transfer({ amount: "1001" }));
+    const first = fx.engine.commit(holdId, fx.agent);
+    assert.equal(written[0]?.kind, "REFUSED", "anti-vacuity: the owner persisted a terminal refusal");
+    assert.deepEqual([first.status, errorOf(first)], [503, "EFFECT_OUTCOME_UNKNOWN"]);
+    fx.clock.advance(2 * HOUR);
+    const retry = fx.engine.commit(holdId, fx.agent);
+    assert.deepEqual([retry.status, bodyOf(retry)["outcome"], errorOf(retry), bodyOf(retry)["idempotent"], bodyOf(retry)["retryable"]],
+      [409, "REFUSED", "LEDGER_INSUFFICIENT_FUNDS", true, false]);
+    assert.equal(rowCount(fx.owner), 1, "consequence: reconciliation writes no second terminal row");
+    assert.equal(balances(fx)[ACCT_1], 1000, "consequence: the refused transfer moves nothing");
+    assert.equal(fx.owner!.inspect().rows[0]?.attestation, null, "a refusal carries no execution attestation");
+    assert.equal(grantOf(fx, holdId).status, "UNUSED");
   });
 
   // ── the row ───────────────────────────────────────────────────────────────────────────────────────

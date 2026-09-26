@@ -1,11 +1,15 @@
 /**
  * The hooks a durable effect owner builds on (docs/gate-effect-owner.md): the owner's authority check,
  * ledger derivation and ledger-definition check exported as ONE implementation, an owner that records
- * the grant's consumption itself over the engine's own store, and a store outage that is retryable
- * and writes nothing.
+ * the grant's consumption itself over the engine's own store, a store outage that is retryable
+ * and writes nothing, and the commit route's answer to every owner outcome that carries no row
+ * (conformance/gate-commit-answers/vectors.json), including an outcome the owner cannot know.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { GateEngine } from "../src/engine.js";
 import { InMemoryStore, type Store } from "../src/store.js";
 import { getProjection } from "../src/projections.js";
@@ -19,6 +23,8 @@ import {
   type EffectAttestation,
   type EffectOwner,
   type EffectCommitInput,
+  type EffectOutcome,
+  type EffectRefusalCode,
   type VerifiedAuthority,
 } from "../src/effect-owner.js";
 import type { GateTrust } from "../src/trust.js";
@@ -240,4 +246,58 @@ test("EFFECT-STORE-UNAVAILABLE — an owner whose store is unreachable writes no
   assert.equal(r.status, 503);
   assert.equal((r.body as Record<string, unknown>)["error"], "EFFECT_STORE_UNAVAILABLE");
   assert.equal((r.body as Record<string, unknown>)["retryable"], true);
+});
+
+/** Every NOT_COMMITTED code, once: the compiler refuses this literal when the union gains or loses one. */
+const OWNER_REFUSAL_CODES: Record<EffectRefusalCode, true> = {
+  HOLD_FROM_DEAD_BOOT: true,
+  COMMIT_AUTHORITY_INVALID: true,
+  EFFECT_COMMIT_REENTRANT: true,
+  EFFECT_AUTHORITY_CONSUMED: true,
+  GRANT_EXPIRED: true,
+  PARAMS_SNAPSHOT_MISMATCH: true,
+  LEDGER_NOT_OWNED: true,
+  LEDGER_SAME_ACCOUNT: true,
+  EFFECT_SIGNER_UNAVAILABLE: true,
+  EFFECT_ATTESTATION_INVALID: true,
+  EFFECT_STORE_UNAVAILABLE: true,
+};
+
+interface CommitAnswerVector {
+  id: string;
+  owner: { kind: "NOT_COMMITTED" | "OUTCOME_UNKNOWN"; code: string };
+  expect: { status: number; error: string; retryable: boolean; written: "NOTHING" | "UNKNOWN"; bodyKeys: string[] };
+}
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
+
+test("EFFECT-COMMIT-ANSWERS — the commit route answers every owner outcome without a row exactly as conformance/gate-commit-answers/vectors.json says, and records nothing for it", () => {
+  const corpus = JSON.parse(readFileSync(join(REPO_ROOT, "conformance", "gate-commit-answers", "vectors.json"), "utf8")) as { vectors: CommitAnswerVector[] };
+  // Completeness: one vector per NOT_COMMITTED code and one for OUTCOME_UNKNOWN, nothing else.
+  const refusalCodes = corpus.vectors.filter((v) => v.owner.kind === "NOT_COMMITTED").map((v) => v.owner.code);
+  assert.deepEqual([...refusalCodes].sort(), Object.keys(OWNER_REFUSAL_CODES).sort(), "one vector per NOT_COMMITTED code");
+  assert.deepEqual(corpus.vectors.filter((v) => v.owner.kind === "OUTCOME_UNKNOWN").map((v) => v.owner.code), ["EFFECT_OUTCOME_UNKNOWN"]);
+  assert.equal(corpus.vectors.length, refusalCodes.length + 1, "no vector of another kind");
+  assert.equal(new Set(corpus.vectors.map((v) => v.id)).size, corpus.vectors.length, "vector ids are unique");
+  // The claim each answer makes: a NOT_COMMITTED code says nothing was written; only OUTCOME_UNKNOWN says it is unknown.
+  for (const v of corpus.vectors) assert.equal(v.expect.written, v.owner.kind === "OUTCOME_UNKNOWN" ? "UNKNOWN" : "NOTHING", v.id);
+  for (const v of corpus.vectors) {
+    const detail = `vector ${v.id}`;
+    const outcome: EffectOutcome =
+      v.owner.kind === "OUTCOME_UNKNOWN"
+        ? { kind: "OUTCOME_UNKNOWN", code: "EFFECT_OUTCOME_UNKNOWN", detail }
+        : { kind: "NOT_COMMITTED", code: v.owner.code as EffectRefusalCode, effectId: null, detail };
+    const fx = gateWith(`answer-${v.id}`, (owner) => wrapped(owner, { commit: () => outcome }));
+    const holdId = approvedTransfer(fx, v.id);
+    const r = fx.engine.commit(holdId, fx.agent);
+    assert.equal(rowCount(fx.owner), 0, `${v.id}: consequence: nothing is written for an answer without a row`);
+    assert.deepEqual([grantOf(fx, holdId).status, grantOf(fx, holdId).reportedAt], ["UNUSED", null], `${v.id}: consequence: the engine records no consumption`);
+    const b = r.body as Record<string, unknown>;
+    assert.deepEqual(
+      { status: r.status, error: b["error"], retryable: b["retryable"], bodyKeys: Object.keys(b).sort() },
+      { status: v.expect.status, error: v.expect.error, retryable: v.expect.retryable, bodyKeys: v.expect.bodyKeys },
+      v.id,
+    );
+    assert.equal(b["detail"], detail, `${v.id}: the owner's detail is carried`);
+  }
 });
