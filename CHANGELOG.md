@@ -6,6 +6,17 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Reference gate: an effect owner that cannot tell whether its write committed (for example a durable
+  store whose COMMIT failed) answers the new outcome `OUTCOME_UNKNOWN`, and the commit route answers it
+  `503 EFFECT_OUTCOME_UNKNOWN` (retryable only as a commit of the same hold; the engine mirrors nothing).
+  Before, such an owner could only answer `EFFECT_STORE_UNAVAILABLE`, which states that nothing was
+  written. `conformance/gate-commit-answers/vectors.json` pins the answer to every owner outcome that
+  carries no row, the owner conformance runner gains three tests that a retry of the same hold after an
+  unknown outcome yields exactly one executed or refused row, and `NON-CLAIMS.md` gains NC-S9.16
+  (`docs/gate-effect-owner.md`, "An unknown outcome").
+
 ### Changed
 
 - `NON-CLAIMS.md` NC-S9.9: the reference gate no longer signs a caller's `action.reversible`. For an

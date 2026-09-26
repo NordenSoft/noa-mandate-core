@@ -84,6 +84,12 @@ exactly as a read of the hold does.
 After a new EXECUTED row the grant record is marked REPORTED with the consumption. If that fails the
 answer is still `200`: the row is the record, and `reserve`/`report` refuse regardless.
 
+An owner that cannot tell whether its write (O9) committed answers `OUTCOME_UNKNOWN`, which the engine
+answers `503 EFFECT_OUTCOME_UNKNOWN` (retryable) and nothing else: see [An unknown outcome](#an-unknown-outcome).
+[`conformance/gate-commit-answers/vectors.json`](../conformance/gate-commit-answers/vectors.json) pins
+the answer to every owner outcome that carries no row — status, code, `retryable`, the body's members,
+and whether the answer says nothing was written (`NOTHING`) or that this is unknown (`UNKNOWN`).
+
 Error bodies are `{error, detail?, retryable}`. A REFUSED row answers
 `409 {error, outcome: "REFUSED", idempotent, effectId, retryable: false}`. Success answers
 `200 {outcome: "EXECUTED", idempotent, effectId, sequence, holdId, grantId, ledger, fromAccount,
@@ -108,7 +114,60 @@ claim is made.
 - **REFUSED:** an unsigned, terminal row; the grant stays UNUSED. An approval covers the transfer as
   approved, so a refusal is not retried until funds appear.
 - **APPROVED with no row** after the grant expires, **DENIED**, **EXPIRED** and
-  **CANCELLED_LOCAL_STATE_LOST** are unchanged. No INDETERMINATE state is reachable.
+  **CANCELLED_LOCAL_STATE_LOST** are unchanged. No INDETERMINATE state is stored: an unknown outcome is
+  an answer, not a state (below).
+
+## An unknown outcome
+
+A durable owner can fail at the one step where it cannot know the result: its COMMIT fails after it
+may have reached the disk. It then answers `OUTCOME_UNKNOWN`, never `NOT_COMMITTED` — every
+`NOT_COMMITTED` code, `EFFECT_STORE_UNAVAILABLE` included, states that nothing was written. The engine
+answers `503 {error: "EFFECT_OUTCOME_UNKNOWN", detail, retryable: true}` and mirrors no consumption.
+The answer carries no execution attestation. Signing may already have happened inside the owner's
+commit attempt before its result became unknown; this answer neither undoes that signing nor proves
+that no effect occurred. The reference in-memory owner never answers it: nothing after its first write can fail.
+
+For the client the effect is unknown — neither executed nor refused — until a retry answers it:
+
+- **Retry only the same request.** The retry is `POST /v1/holds/:holdId/commit` for the same hold. A
+  client that lost the hold id recovers it by repeating `createHold` with the same `Idempotency-Key` and
+  body (`200`, `idempotent: true`, the same `holdId`). A new `Idempotency-Key` is a new hold that needs
+  a new approval; if approved, it would be a second transfer.
+- **The retry reconciles.** When the owner holds the row, REPLAY FIRST (step 4) answers it with
+  `idempotent: true`; when the write was lost, the commit runs again and writes at most one row (O2).
+  An owner may keep answering `503` (unknown or unavailable) until its operator has decided; the client
+  keeps the effect unknown meanwhile. After the grant expires a lost write answers `410 GRANT_EXPIRED`
+  (O3), a determinate "nothing written".
+- **Consumption.** The engine mirrors nothing for an unknown outcome and nothing on the replay that
+  follows it, so an owner that can answer `OUTCOME_UNKNOWN` should record the grant's consumption
+  itself, in the same step as its row (`recordsGrantConsumption`). Otherwise the row stands with the
+  grant record still UNUSED; the row is the record, and `reserve`/`report` refuse regardless.
+
+What this does not establish is NON-CLAIMS.md NC-S9.16.
+
+### An unknown Gate-state outcome
+
+A durable embedder can also lose the outcome of a state transaction in `createHold`, `decide`,
+`cancelLocalStateLost`, `reserve` or `report`. These routes answer
+`503 {error: "GATE_OUTCOME_UNKNOWN", detail, retryable: false}`. The same answer applies to later
+mutations on that connection while the store retains the unknown outcome, including calls that
+would otherwise return early from state changed by the uncertain transaction. A read that attempts
+a state transition (such as expiring a hold) may answer this code too. It must never become
+`EFFECT_STORE_UNAVAILABLE` or another claim that the uncertain transaction wrote nothing.
+
+`retryable: false` forbids blind automatic replay; it does **not** mean a terminal refusal. The
+response claims neither completion nor absence and carries no grant, receipt or consumption.
+Signing may already have occurred. Reopen and reconcile the authoritative state before deciding
+what to do next: recover a created hold only with its original idempotency key and body, inspect a
+hold's decision/cancellation, and inspect a grant's reservation/report. An uncertain reservation
+never authorizes dispatch or another reservation, and an uncertain report never authorizes
+repeating the external action. A Gate state read alone does not prove an external effect.
+
+The commit route retains `EFFECT_OUTCOME_UNKNOWN` and the same-hold reconciliation contract above.
+The `gateStateUnknown` vector in the existing [answer corpus](../conformance/gate-commit-answers/vectors.json)
+defines the generic response and its route coverage. A durable embedder checks the first answer and
+same-connection retries with COMMIT failing both before and after storage accepted it. The reference
+in-memory store cannot produce this failure; the vector specifies its durable integration surface.
 
 ## Restarts: the boot identifier
 
@@ -178,7 +237,9 @@ the reference owner's checks, not a copy of them:
 - An owner that records the grant's consumption itself, in the same step as its row, declares
   `recordsGrantConsumption: true` and its `store`. The engine refuses it at construction unless that is
   the engine's own store (`EFFECT_OWNER_STORE_MISMATCH`), and then does not mirror the consumption.
-  `EFFECT_STORE_UNAVAILABLE` is an owner refusal that wrote nothing: `503`, retryable.
+  `EFFECT_STORE_UNAVAILABLE` is an owner refusal that wrote nothing: `503`, retryable. An owner that
+  cannot tell whether its write committed answers `OUTCOME_UNKNOWN` instead
+  ([An unknown outcome](#an-unknown-outcome)).
 - Under a supervisor-supplied `bootId`, which several processes may share, the engine accepts only an
   owner that records the consumption in its store (`EFFECT_OWNER_SUPERVISOR_BOOT_UNSAFE` otherwise).
 - `runEffectOwnerConformance(label, factory, storeFactory)` (`packages/gate/test/effect-owner-conformance.ts`
@@ -188,7 +249,12 @@ the reference owner's checks, not a copy of them:
   store the runner uses (a new in-memory store when it is omitted), and the runner builds each owner
   over the store of the engine that runs it: an owner that records the grant's consumption then meets
   the construction rules instead of `EFFECT_OWNER_STORE_MISMATCH`. `test/effect-owner.test.ts` runs it
-  over the in-memory owner and over the same owner recording the consumption in its paired store. One
+  over the in-memory owner and over the same owner recording the consumption in its paired store. Three
+  of its tests replace the answer of the owner's first commit with `OUTCOME_UNKNOWN` — once after the
+  owner wrote an executed row, once without reaching it, and once after it recorded a terminal refusal —
+  and require that a retry of the same hold then yields exactly one row, with the refusal replayed even
+  after expiry (`EFFECT-OUTCOME-UNKNOWN-COMMITTED`, `EFFECT-OUTCOME-UNKNOWN-LOST`,
+  `EFFECT-OUTCOME-UNKNOWN-REFUSED`). One
   owner-level test is exported rather than registered: `effectOwnerKeyringProof(factory, storeFactory)`,
   the proof bound to the keyring consume site, whose marker must sit on a test registered directly in a
   test file (`test/effect-owner.test.ts` registers it for the in-memory owner; another owner's test
@@ -261,6 +327,11 @@ for the reason given:
   bindings while the quorum is 1 (they are kept for larger quorums and for a durable owner);
 - `LEDGER_SAME_ACCOUNT`: unreachable while the kernel refuses `TRANSFER_SAME_ACCOUNT` (armed in the
   kernel suite); kept so that conservation does not rest on one rule;
+- the engine's answer to `OUTCOME_UNKNOWN` and to each `NOT_COMMITTED` code: the answer handler writes,
+  mirrors and signs nothing further (the owner's attempt may already have signed or committed), so a
+  knockout of that handler changes the answer itself, which
+  is what `EFFECT-COMMIT-ANSWERS` compares with the vectors; the retry that settles an unknown outcome
+  rests on REPLAY FIRST and O2 (both armed);
 - balance overflow, which the construction bound and conservation of the total rule out;
 - the engine's owner-configuration checks and the owner binding: a second engine for a bound owner is
   refused first by the boot guard (armed), and an owner shared by two engines would still write one

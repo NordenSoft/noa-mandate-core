@@ -105,8 +105,20 @@ export type EffectRefusalCode =
   | "LEDGER_SAME_ACCOUNT"
   | "EFFECT_SIGNER_UNAVAILABLE"
   | "EFFECT_ATTESTATION_INVALID"
-  /** An owner with its own durable store could not reach it: nothing was written; the commit may be retried. */
+  /**
+   * An owner with its own durable store could not reach it and KNOWS nothing was written; the commit may
+   * be retried. An owner that cannot tell whether its write committed answers OUTCOME_UNKNOWN instead.
+   */
   | "EFFECT_STORE_UNAVAILABLE";
+
+/**
+ * The owner cannot tell whether its write committed — for example a durable store whose COMMIT failed
+ * after it may have reached the disk. It claims neither a row nor its absence. The engine answers
+ * `503 EFFECT_OUTCOME_UNKNOWN` (retryable) and records nothing: the client retries the commit of the
+ * SAME hold, whose recorded row, if any, answers idempotently (a lost write commits once), and keeps
+ * the effect unknown until a retry answers it (docs/gate-effect-owner.md, "An unknown outcome").
+ */
+export type EffectUnknownCode = "EFFECT_OUTCOME_UNKNOWN";
 
 /** A refusal that writes a terminal, unsigned REFUSED row: the authority is consumed without an effect. */
 export type LedgerRefusalCode = "LEDGER_ACCOUNT_UNKNOWN" | "LEDGER_INSUFFICIENT_FUNDS";
@@ -135,7 +147,8 @@ export interface LedgerRow {
 
 export type EffectOutcome =
   | { kind: "EXECUTED" | "REFUSED"; idempotent: boolean; row: LedgerRow }
-  | { kind: "NOT_COMMITTED"; code: EffectRefusalCode; effectId: string | null; detail: string };
+  | { kind: "NOT_COMMITTED"; code: EffectRefusalCode; effectId: string | null; detail: string }
+  | { kind: "OUTCOME_UNKNOWN"; code: EffectUnknownCode; detail: string };
 
 /** Signs the attestation of an effect at the owner's instant, from the owner's verified parses only. */
 export type EffectSealer = (atMs: number, verified: VerifiedAuthority) => EffectAttestation;
@@ -167,7 +180,10 @@ export interface EffectOwner {
   admit(canonicalParams: string): { ok: true } | { ok: false; code: "LEDGER_NOT_OWNED"; detail: string };
   /** The row, if any, recorded for the hold envelope with this refHash. */
   find(holdEnvelopeHash: string): LedgerRow | undefined;
-  /** Verify, then write exactly one row or nothing. `seal` signs the attestation, which is then verified. */
+  /**
+   * Verify, then write exactly one row or nothing. `seal` signs the attestation, which is then verified.
+   * An owner that cannot tell which of the two happened answers OUTCOME_UNKNOWN, never NOT_COMMITTED.
+   */
   commit(input: EffectCommitInput, seal: EffectSealer): EffectOutcome;
   /** Copies of the rows and balances, for tests and inspection. No route exposes it. */
   inspect(): { rows: readonly LedgerRow[]; balances: Readonly<Record<string, number>> };

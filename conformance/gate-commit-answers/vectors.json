@@ -1,0 +1,27 @@
+{
+  "corpus": "reference-gate commit-route answers to an effect owner's outcome when the owner answers no row",
+  "spec": "docs/gate-effect-owner.md (The commit route; An unknown outcome)",
+  "checkedBy": "packages/gate/test/effect-hooks.test.ts EFFECT-COMMIT-ANSWERS",
+  "note": "One vector per owner outcome that carries no row: every NOT_COMMITTED code and OUTCOME_UNKNOWN. `written` is what the answer claims about the owner's write: NOTHING (the owner knows nothing was written) or UNKNOWN (the owner cannot tell). `bodyKeys` is the exact member set of the answer body. A retryable answer is retried only as a commit of the same hold. These codes are an implementation surface of the reference gate, not wire language.",
+  "vectors": [
+    { "id": "not-committed-hold-from-dead-boot", "owner": { "kind": "NOT_COMMITTED", "code": "HOLD_FROM_DEAD_BOOT" }, "expect": { "status": 410, "error": "HOLD_FROM_DEAD_BOOT", "retryable": false, "written": "NOTHING", "bodyKeys": ["detail", "error", "retryable"] } },
+    { "id": "not-committed-commit-authority-invalid", "owner": { "kind": "NOT_COMMITTED", "code": "COMMIT_AUTHORITY_INVALID" }, "expect": { "status": 500, "error": "COMMIT_AUTHORITY_INVALID", "retryable": false, "written": "NOTHING", "bodyKeys": ["detail", "error", "retryable"] } },
+    { "id": "not-committed-effect-commit-reentrant", "owner": { "kind": "NOT_COMMITTED", "code": "EFFECT_COMMIT_REENTRANT" }, "expect": { "status": 409, "error": "EFFECT_COMMIT_REENTRANT", "retryable": true, "written": "NOTHING", "bodyKeys": ["detail", "error", "retryable"] } },
+    { "id": "not-committed-effect-authority-consumed", "owner": { "kind": "NOT_COMMITTED", "code": "EFFECT_AUTHORITY_CONSUMED" }, "expect": { "status": 409, "error": "EFFECT_AUTHORITY_CONSUMED", "retryable": false, "written": "NOTHING", "bodyKeys": ["detail", "effectId", "error", "retryable"] } },
+    { "id": "not-committed-grant-expired", "owner": { "kind": "NOT_COMMITTED", "code": "GRANT_EXPIRED" }, "expect": { "status": 410, "error": "GRANT_EXPIRED", "retryable": false, "written": "NOTHING", "bodyKeys": ["detail", "error", "retryable"] } },
+    { "id": "not-committed-params-snapshot-mismatch", "owner": { "kind": "NOT_COMMITTED", "code": "PARAMS_SNAPSHOT_MISMATCH" }, "expect": { "status": 500, "error": "PARAMS_SNAPSHOT_MISMATCH", "retryable": false, "written": "NOTHING", "bodyKeys": ["detail", "error", "retryable"] } },
+    { "id": "not-committed-ledger-not-owned", "owner": { "kind": "NOT_COMMITTED", "code": "LEDGER_NOT_OWNED" }, "expect": { "status": 422, "error": "LEDGER_NOT_OWNED", "retryable": false, "written": "NOTHING", "bodyKeys": ["detail", "error", "retryable"] } },
+    { "id": "not-committed-ledger-same-account", "owner": { "kind": "NOT_COMMITTED", "code": "LEDGER_SAME_ACCOUNT" }, "expect": { "status": 422, "error": "LEDGER_SAME_ACCOUNT", "retryable": false, "written": "NOTHING", "bodyKeys": ["detail", "error", "retryable"] } },
+    { "id": "not-committed-effect-signer-unavailable", "owner": { "kind": "NOT_COMMITTED", "code": "EFFECT_SIGNER_UNAVAILABLE" }, "expect": { "status": 503, "error": "EFFECT_SIGNER_UNAVAILABLE", "retryable": true, "written": "NOTHING", "bodyKeys": ["detail", "error", "retryable"] } },
+    { "id": "not-committed-effect-attestation-invalid", "owner": { "kind": "NOT_COMMITTED", "code": "EFFECT_ATTESTATION_INVALID" }, "expect": { "status": 500, "error": "EFFECT_ATTESTATION_INVALID", "retryable": false, "written": "NOTHING", "bodyKeys": ["detail", "error", "retryable"] } },
+    { "id": "not-committed-effect-store-unavailable", "owner": { "kind": "NOT_COMMITTED", "code": "EFFECT_STORE_UNAVAILABLE" }, "expect": { "status": 503, "error": "EFFECT_STORE_UNAVAILABLE", "retryable": true, "written": "NOTHING", "bodyKeys": ["detail", "error", "retryable"] } },
+    { "id": "outcome-unknown", "owner": { "kind": "OUTCOME_UNKNOWN", "code": "EFFECT_OUTCOME_UNKNOWN" }, "expect": { "status": 503, "error": "EFFECT_OUTCOME_UNKNOWN", "retryable": true, "written": "UNKNOWN", "bodyKeys": ["detail", "error", "retryable"] } }
+  ],
+  "gateStateUnknown": {
+    "id": "gate-state-outcome-unknown",
+    "routes": ["createHold", "decide", "cancelLocalStateLost", "reserve", "report"],
+    "spec": "docs/gate-effect-owner.md (An unknown Gate-state outcome)",
+    "note": "For a durable embedder's ambiguous state COMMIT and every later mutation on that connection until reopen and reconciliation. Exercise each route before and after COMMIT reaches storage, including the first answer and same-connection retries. This is not a terminal refusal or evidence of no write. No blind automatic retry is safe for these routes; reconcile first. Reads that attempt a state transition may answer this code too.",
+    "expect": { "status": 503, "error": "GATE_OUTCOME_UNKNOWN", "retryable": false, "written": "UNKNOWN", "bodyKeys": ["detail", "error", "retryable"] }
+  }
+}
