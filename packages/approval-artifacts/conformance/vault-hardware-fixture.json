@@ -1,0 +1,29 @@
+{
+  "description": "Synthetic P-256 test key (scalar 1), software-generated signature fixed as published bytes. No hardware or attestation claim.",
+  "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpZP40Li/hp/m47n60p8D54WK84zV2sxXs7LtkBoN79R9Q==",
+  "subject": {
+    "spec": "noa.decision/0.1",
+    "holdEnvelopeHash": "sha256:af02b191b6a827101a67fd43a49b7e1f63d896558fa67865e67ff4a974a980ee",
+    "decision": "APPROVE",
+    "reasonCode": null,
+    "reasonEncryption": null,
+    "decidedAt": "2030-01-02T11:59:30.000Z",
+    "approverKid": "approver-example-1",
+    "sig": {
+      "alg": "ed25519",
+      "kid": "approver-example-1",
+      "value": "uizcgl6QSqI3UTWmNu+9ilfzBUDI2HQRz7bfgid7EPY6aAqZ1Fp1RV88QWLh7yEdZ2aSagDn+9Gjp38o3LrxBg=="
+    }
+  },
+  "cosignature": {
+    "spec": "noa.device-cosignature/0.1",
+    "subjectSpec": "noa.decision/0.1",
+    "subjectHash": "sha256:a27d50750d927c8c017e28778cce15b244a3d92bd08e9404ce93f18d9f90515e",
+    "approverKid": "approver-example-1",
+    "sig": {
+      "alg": "ES256",
+      "kid": "approver-example-1",
+      "value": "l0pzbU/19hOM1zPIFZhuXFaq2UWBRVaCxCi9nptqMEip3hWRKGUz8uyXucDDGCvmCFUqcB5pJCQ+3wdoGn9aGg=="
+    }
+  }
+}

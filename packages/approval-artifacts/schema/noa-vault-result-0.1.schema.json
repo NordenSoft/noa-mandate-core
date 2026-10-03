@@ -1,0 +1,514 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noatrust.com/schema/noa-vault-result-0.1.schema.json",
+  "title": "NOA Vault Verification Result",
+  "description": "Guard-signed observation, domain NOA-VaultResult-v0.1-sig. REFUSED before commit consumes nothing; terminal effect refusal consumes. ALREADY_CONSUMED returns the stored original outcome/effect. INDETERMINATE never asserts non-consumption.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spec",
+        "tenant",
+        "vaultId",
+        "vaultInstanceId",
+        "grantHash",
+        "effectId",
+        "checkedAt",
+        "setVersion",
+        "policyVersion",
+        "sig",
+        "outcome",
+        "code",
+        "consumed",
+        "originalOutcome",
+        "effectCode"
+      ],
+      "properties": {
+        "spec": {
+          "const": "noa.vault-result/0.1"
+        },
+        "tenant": {
+          "type": "string",
+          "pattern": "^.{1,256}$"
+        },
+        "vaultId": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "vaultInstanceId": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "grantHash": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/hash256"
+        },
+        "effectId": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "checkedAt": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/rfc3339"
+        },
+        "setVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "policyVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "sig": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/sig"
+        },
+        "outcome": {
+          "const": "EXECUTED"
+        },
+        "code": {
+          "type": "null"
+        },
+        "consumed": {
+          "const": true
+        },
+        "originalOutcome": {
+          "type": "null"
+        },
+        "effectCode": {
+          "type": "null"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spec",
+        "tenant",
+        "vaultId",
+        "vaultInstanceId",
+        "grantHash",
+        "effectId",
+        "checkedAt",
+        "setVersion",
+        "policyVersion",
+        "sig",
+        "outcome",
+        "code",
+        "consumed",
+        "originalOutcome",
+        "effectCode"
+      ],
+      "properties": {
+        "spec": {
+          "const": "noa.vault-result/0.1"
+        },
+        "tenant": {
+          "type": "string",
+          "pattern": "^.{1,256}$"
+        },
+        "vaultId": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "vaultInstanceId": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "grantHash": {
+          "oneOf": [
+            {
+              "$ref": "noa-hold-0.1.schema.json#/$defs/hash256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effectId": {
+          "type": "null"
+        },
+        "checkedAt": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/rfc3339"
+        },
+        "setVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "policyVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "sig": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/sig"
+        },
+        "outcome": {
+          "const": "REFUSED"
+        },
+        "code": {
+          "enum": [
+            "VV_MALFORMED",
+            "VV_SPEC_UNSUPPORTED",
+            "VV_ROOT_REQUIRED",
+            "VV_POLICY_INVALID",
+            "VV_SET_LIFE",
+            "VV_SET_ROLLBACK",
+            "VV_KEY_REUSE",
+            "VV_APPROVER_SET_EXPIRED",
+            "VV_POLICY_EXPIRED",
+            "VV_HOLD_INVALID",
+            "VV_CLASS_NOT_ACCEPTED",
+            "VV_PROJECTION",
+            "VV_AUDIENCE_MISMATCH",
+            "VV_PARAMS_MISMATCH",
+            "VV_LIMIT",
+            "VV_RECEIPT_LINK",
+            "VV_APPROVER_UNKNOWN",
+            "VV_APPROVER_SUSPENDED",
+            "VV_DECISION_INVALID",
+            "VV_DEVICE_DUPLICATE",
+            "VV_DENIED",
+            "VV_COSIG_REQUIRED",
+            "VV_QUORUM_NOT_MET",
+            "VV_REQUIRED_APPROVER",
+            "VV_GRANT_SIGNER",
+            "VV_GRANT_LINK",
+            "VV_NOT_YET_VALID",
+            "VV_EXPIRED",
+            "VV_HOLD_EXPIRED",
+            "VV_DECISION_FUTURE",
+            "VV_APPROVAL_STALE",
+            "VV_GRANT_LIFE",
+            "VV_BELOW_FLOOR",
+            "VV_SET_CHANGED",
+            "VV_RETRYABLE",
+            "VV_PROBE_STOP",
+            "VV_FROZEN"
+          ]
+        },
+        "consumed": {
+          "const": false
+        },
+        "originalOutcome": {
+          "type": "null"
+        },
+        "effectCode": {
+          "type": "null"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spec",
+        "tenant",
+        "vaultId",
+        "vaultInstanceId",
+        "grantHash",
+        "effectId",
+        "checkedAt",
+        "setVersion",
+        "policyVersion",
+        "sig",
+        "outcome",
+        "code",
+        "consumed",
+        "originalOutcome",
+        "effectCode"
+      ],
+      "properties": {
+        "spec": {
+          "const": "noa.vault-result/0.1"
+        },
+        "tenant": {
+          "type": "string",
+          "pattern": "^.{1,256}$"
+        },
+        "vaultId": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "vaultInstanceId": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "grantHash": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/hash256"
+        },
+        "effectId": {
+          "type": "null"
+        },
+        "checkedAt": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/rfc3339"
+        },
+        "setVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "policyVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "sig": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/sig"
+        },
+        "outcome": {
+          "const": "REFUSED"
+        },
+        "code": {
+          "const": "VV_EFFECT_REFUSED"
+        },
+        "consumed": {
+          "const": true
+        },
+        "originalOutcome": {
+          "type": "null"
+        },
+        "effectCode": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spec",
+        "tenant",
+        "vaultId",
+        "vaultInstanceId",
+        "grantHash",
+        "effectId",
+        "checkedAt",
+        "setVersion",
+        "policyVersion",
+        "sig",
+        "outcome",
+        "code",
+        "consumed",
+        "originalOutcome",
+        "effectCode"
+      ],
+      "properties": {
+        "spec": {
+          "const": "noa.vault-result/0.1"
+        },
+        "tenant": {
+          "type": "string",
+          "pattern": "^.{1,256}$"
+        },
+        "vaultId": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "vaultInstanceId": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "grantHash": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/hash256"
+        },
+        "effectId": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "checkedAt": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/rfc3339"
+        },
+        "setVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "policyVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "sig": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/sig"
+        },
+        "outcome": {
+          "const": "ALREADY_CONSUMED"
+        },
+        "code": {
+          "const": "VV_ALREADY_CONSUMED"
+        },
+        "consumed": {
+          "const": true
+        },
+        "originalOutcome": {
+          "const": "EXECUTED"
+        },
+        "effectCode": {
+          "type": "null"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spec",
+        "tenant",
+        "vaultId",
+        "vaultInstanceId",
+        "grantHash",
+        "effectId",
+        "checkedAt",
+        "setVersion",
+        "policyVersion",
+        "sig",
+        "outcome",
+        "code",
+        "consumed",
+        "originalOutcome",
+        "effectCode"
+      ],
+      "properties": {
+        "spec": {
+          "const": "noa.vault-result/0.1"
+        },
+        "tenant": {
+          "type": "string",
+          "pattern": "^.{1,256}$"
+        },
+        "vaultId": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "vaultInstanceId": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "grantHash": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/hash256"
+        },
+        "effectId": {
+          "type": "null"
+        },
+        "checkedAt": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/rfc3339"
+        },
+        "setVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "policyVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "sig": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/sig"
+        },
+        "outcome": {
+          "const": "ALREADY_CONSUMED"
+        },
+        "code": {
+          "const": "VV_ALREADY_CONSUMED"
+        },
+        "consumed": {
+          "const": true
+        },
+        "originalOutcome": {
+          "const": "REFUSED"
+        },
+        "effectCode": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spec",
+        "tenant",
+        "vaultId",
+        "vaultInstanceId",
+        "grantHash",
+        "effectId",
+        "checkedAt",
+        "setVersion",
+        "policyVersion",
+        "sig",
+        "outcome",
+        "code",
+        "consumed",
+        "originalOutcome",
+        "effectCode"
+      ],
+      "properties": {
+        "spec": {
+          "const": "noa.vault-result/0.1"
+        },
+        "tenant": {
+          "type": "string",
+          "pattern": "^.{1,256}$"
+        },
+        "vaultId": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "vaultInstanceId": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "grantHash": {
+          "oneOf": [
+            {
+              "$ref": "noa-hold-0.1.schema.json#/$defs/hash256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effectId": {
+          "type": "null"
+        },
+        "checkedAt": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/rfc3339"
+        },
+        "setVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "policyVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "sig": {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/sig"
+        },
+        "outcome": {
+          "const": "INDETERMINATE"
+        },
+        "code": {
+          "const": "VV_INDETERMINATE"
+        },
+        "consumed": {
+          "const": null
+        },
+        "originalOutcome": {
+          "type": "null"
+        },
+        "effectCode": {
+          "type": "null"
+        }
+      }
+    }
+  ]
+}

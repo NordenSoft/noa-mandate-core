@@ -30,8 +30,8 @@
       "name": "noa-approval-artifacts",
       "noticeTitle": "NOA Approval Artifacts — signed approval and execution-control artifact schemas and conformance vectors",
       "packagePath": "packages/approval-artifacts",
-      "pathCount": 195,
-      "pathSetSha256": "fc14c4bc73696487ea9c19b08a59439abaf06ef3a0a88299b3ef9e42d76cfab1"
+      "pathCount": 312,
+      "pathSetSha256": "aacb1745f6b1d302bd7ea0249104adf107188a17fb04ae2578ac391a94d7a1ca"
     },
     {
       "name": "noa-framework-adapters",

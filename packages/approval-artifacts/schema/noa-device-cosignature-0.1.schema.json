@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noatrust.com/schema/noa-device-cosignature-0.1.schema.json",
+  "title": "NOA Device Co-signature",
+  "description": "Detached hardware-key signature over an entire signed decision or join (rule-b refHash). Domain NOA-DeviceCosignature-v0.1-sig. ES256 means P-256/SHA-256 with a 64-byte R||S signature, standard padded base64, not a JWS envelope. sig.kid is the associated approver kid; the key is its separately pinned cosignPublicKey.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spec",
+    "subjectSpec",
+    "subjectHash",
+    "approverKid",
+    "sig"
+  ],
+  "properties": {
+    "spec": {
+      "const": "noa.device-cosignature/0.1"
+    },
+    "subjectSpec": {
+      "enum": [
+        "noa.decision/0.1",
+        "noa.vault-approver-join/0.1"
+      ]
+    },
+    "subjectHash": {
+      "$ref": "noa-hold-0.1.schema.json#/$defs/hash256"
+    },
+    "approverKid": {
+      "type": "string",
+      "pattern": "^.{1,128}$"
+    },
+    "sig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alg",
+        "kid",
+        "value"
+      ],
+      "properties": {
+        "alg": {
+          "const": "ES256"
+        },
+        "kid": {
+          "type": "string",
+          "pattern": "^.{1,128}$"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]{86}==$"
+        }
+      }
+    }
+  }
+}

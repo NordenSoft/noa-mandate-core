@@ -299,7 +299,8 @@ function buildWorkflowFixture(work) {
   writeFileSync(join(root, "scripts", "boundary-public-repos.json"), `${JSON.stringify({
     note: "Synthetic public-only snapshot for the credential-free workflow bootstrap selftest.",
     source: "synthetic bootstrap fixture",
-    refreshedAt: "2026-08-30T00:00:00.000Z",
+    // Fresh relative to the real clock: the gate enforces a 30-day allowlist age, so a fixed date expires.
+    refreshedAt: new Date(Date.now() - 60_000).toISOString(),
     orgs: {
       examplearmorg: [
         "bootstrap-fixture",

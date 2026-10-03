@@ -1,0 +1,10 @@
+{
+  "id": "noa.device-cosignature/0.1-missing-member",
+  "artifact": {
+    "spec": "noa.device-cosignature/0.1",
+    "subjectSpec": "noa.decision/0.1",
+    "subjectHash": "sha256:a27d50750d927c8c017e28778cce15b244a3d92bd08e9404ce93f18d9f90515e",
+    "approverKid": "approver-example-1"
+  },
+  "valid": false
+}

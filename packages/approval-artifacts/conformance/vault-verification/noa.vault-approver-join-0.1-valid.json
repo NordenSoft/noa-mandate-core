@@ -1,0 +1,22 @@
+{
+  "id": "noa.vault-approver-join/0.1-valid",
+  "artifact": {
+    "spec": "noa.vault-approver-join/0.1",
+    "tenant": "tenant-example",
+    "vaultId": "vault-example",
+    "kid": "approver-example-1",
+    "publicKey": "MCowBQYDK2VwAyEAxNVQOSVlpP/RO8zsyrg4dDwWGlmEH1rnpGpVyvnOuRo=",
+    "hpkePublicKey": "MCowBQYDK2VuAyEAB9IPISUDRCsglgSq+XTYZdgcCIzkZautSZc+kpo/iHA=",
+    "deviceId": "device-approver-example-1",
+    "custody": "software-native",
+    "cosignPublicKey": null,
+    "attestationChain": null,
+    "createdAt": "2030-01-02T11:00:00.000Z",
+    "sig": {
+      "alg": "ed25519",
+      "kid": "approver-example-1",
+      "value": "iEcFqvN1Yol3oKrvyXJFNFD+CSnxP+iy4BfpHgL06tu59wVgYYeXvK1TldVwiP2qau0pmCaCurS+PcyxQ8Q7BQ=="
+    }
+  },
+  "valid": true
+}

@@ -51,6 +51,7 @@ interface Loaded {
 }
 const vectors: Loaded[] = [];
 for (const entry of readdirSync(CONF_DIR)) {
+  if (entry === "vault-verification") continue; // Separate profile, exercised by vault-verification.test.mjs.
   const abs = join(CONF_DIR, entry);
   if (!statSync(abs).isDirectory()) continue; // skip keyring.json / INDEX.json
   for (const f of readdirSync(abs)) {

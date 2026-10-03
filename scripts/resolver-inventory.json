@@ -1707,6 +1707,26 @@
       "consumer": "parseGateRoster / createPinnedTrust under test",
       "proofs": [],
       "exception": "EX-TEST-FIXTURES"
+    },
+    {
+      "id": "approval-artifacts-world-state-set-gatekeys-0",
+      "package": "approval-artifacts",
+      "file": "packages/approval-artifacts/test/vault-vector-fixtures.mjs",
+      "scope": "world>state>set>gateKeys",
+      "ordinal": 0,
+      "line": 78,
+      "kind": "construct",
+      "class": "test",
+      "input": "test-local key material",
+      "output": "vault approver-set gateKeys entry (synthetic conformance fixture; not a KeyEntry)",
+      "validFrom": "absent",
+      "revokedAt": "absent",
+      "missingValue": "the vault approver-set entry has no validFrom/revokedAt fields; its lifetime is the signed set lifecycle (notBefore/expiresAt), which the vault vectors pin",
+      "malformedValue": "rejection vectors mutate the fixture on purpose",
+      "timestampParser": "test-local constants",
+      "consumer": "vault-spec-model.mjs (synthetic executable specification) and the vault-verification vectors",
+      "proofs": [],
+      "exception": "EX-TEST-FIXTURES"
     }
   ],
   "anchoredResolvers": [
@@ -1941,7 +1961,8 @@
     "packages/gate/src/cli.ts": "reference gate CLI: reads roster fields only to print the roster-check report and the pinned boot banner; constructs no KeyEntry — the pinned keyring is built by createPinnedTrust (trust.ts, censused above)",
     "packages/gate/test/pinned-cli.test.ts": "gate tests: spawn the pinned CLI with rosters built by test/helpers/pinned.ts; construct no KeyEntry",
     "packages/gate/test/effect-commit.test.ts": "gate tests: read the pinned trust root's keyring and receiptKeyring wholesale to verify a commit's signed consumption and receipt chain; construct no KeyEntry (the roster fixtures are test/helpers/pinned.ts, censused above)",
-    "packages/gate/test/alpha-keyring-prototype.test.ts": "gate tests: read the alpha trust root's keyring and receiptKeyring only to assert that they are null-prototype maps whose unenrolled kids resolve to nothing; construct no KeyEntry and resolve no keyring"
+    "packages/gate/test/alpha-keyring-prototype.test.ts": "gate tests: read the alpha trust root's keyring and receiptKeyring only to assert that they are null-prototype maps whose unenrolled kids resolve to nothing; construct no KeyEntry and resolve no keyring",
+    "packages/approval-artifacts/test/vault-spec-model.mjs": "synthetic vault executable specification: string-keyring consumer. It maps the fixture set gateKeys with the hold-signer role to a { [kid]: publicKey } string keyring and passes it to verifyChain; it constructs no KeyEntry and never reads validFrom/revokedAt or calls resolveVerificationKey (measured: zero occurrences). Same classification as the sibling string-keyring consumers in this census."
   },
   "proofs": {
     "RES-PAR-GATE-KEYRING": {
