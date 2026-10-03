@@ -247,7 +247,7 @@ Additional stable codes: `VV_ROOT_REQUIRED` (installation and request stage 3),
 Codes and precedence are frozen within this profile. New behavior requires a new
 profile/version, never silent acceptance of unknown fields or algorithms.
 
-## 5. Atomic consumption and recovery
+## 5. Atomic consumption and recovery (synthetic model: `packages/approval-artifacts/test/vault-spec-model.mjs:170-176`)
 
 One authoritative transaction MUST serialize against set/policy updates,
 suspensions, freeze and replay-floor movement. Acquire the authority lock first,
@@ -279,8 +279,9 @@ a read replica and MUST NOT support independent multi-primary consumption stores
   Invalid requests cannot burn a valid grant by carrying wrong parameters.
 
 Consumption survives process restart. Retain rows at least the maximum grant
-lifetime plus skew, and until an atomic, monotonic replay floor makes every grant
-represented by the removed rows invalid. Retention alone is not permission to
+lifetime plus skew, and until a monotonic replay floor, moved atomically inside that
+same transaction, makes the grants behind the removed rows invalid (floor refusal in
+the synthetic model: `packages/approval-artifacts/test/vault-spec-model.mjs:84`). Retention alone is not permission to
 forget a live authorization. Transaction/post-commit error handling MUST preserve
 the stored outcome. The signed result is an observation, never a new grant.
 
@@ -343,8 +344,9 @@ before either record is written, for every class. These are distinct operations.
 
 ## 9. Conformance and limits of the evidence
 
-`conformance/vault-verification.json` is an additive corpus, separate from the
-legacy per-artifact vectors. Its trusted `state` is a **test fixture for the vault
+`conformance/vault-verification/INDEX.json` lists the ordered request and artifact
+vector files in this additive corpus, separate from the legacy per-artifact vectors.
+Its trusted `state` is a **test fixture for the vault
 store**, never an API field. Every test computes its verdict from the artifacts,
 clock and state; it does not read the expected verdict to choose behavior.
 `requests` model retries/restart and concurrency serialization; `expected` pins

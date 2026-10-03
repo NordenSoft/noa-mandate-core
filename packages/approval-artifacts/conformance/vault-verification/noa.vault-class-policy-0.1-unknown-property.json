@@ -1,0 +1,74 @@
+{
+  "id": "noa.vault-class-policy/0.1-unknown-property",
+  "artifact": {
+    "spec": "noa.vault-class-policy/0.1",
+    "tenant": "tenant-example",
+    "vaultId": "vault-example",
+    "version": 1,
+    "issuedAt": "2030-01-02T11:00:00.000Z",
+    "notBefore": "2030-01-02T11:00:00.000Z",
+    "expiresAt": "2030-01-03T12:00:00.000Z",
+    "previousPolicyHash": null,
+    "minArtifactVersions": {
+      "noa.vault-authority-bundle": "0.1",
+      "noa.hold": "0.1",
+      "noa.receipt": "0.1",
+      "noa.decision": "0.1",
+      "noa.execution-grant": "0.1",
+      "noa.device-cosignature": "0.1"
+    },
+    "classes": [
+      {
+        "canonical": "noa.ledger.transfer",
+        "actionSchema": {
+          "id": "noa.ledger.transfer.schema",
+          "version": 1,
+          "hash": "sha256:f34d508cfa9080eadaa771ed8852a0d34c09246d03f818d75f848abb4df25901"
+        },
+        "displayProjection": {
+          "id": "noa.ledger.transfer.display",
+          "version": 1,
+          "hash": "sha256:bb6e72d64700383a4ceabefeb8e8eb170a2877ca95a5522c90901466e9a421db"
+        },
+        "audienceMember": "ledger",
+        "quorum": 1,
+        "requiredApprovers": [],
+        "maxGrantLifeSeconds": 600,
+        "maxApprovalAgeSeconds": 900,
+        "limits": {
+          "maxAmount": "100",
+          "unit": "XTS"
+        },
+        "probe": false
+      },
+      {
+        "canonical": "noa.vault.probe",
+        "actionSchema": {
+          "id": "noa.vault.probe.schema",
+          "version": 1,
+          "hash": "sha256:3765482f8f2234b053599645241b9731cd61175a1e09c0b53f001b565b8a77bc"
+        },
+        "displayProjection": {
+          "id": "noa.vault.probe.display",
+          "version": 1,
+          "hash": "sha256:547c00fd8231279953f548b70f957787b7e43706528fdebe093991b5ce625070"
+        },
+        "audienceMember": "vault",
+        "quorum": 1,
+        "requiredApprovers": [],
+        "maxGrantLifeSeconds": 600,
+        "maxApprovalAgeSeconds": 900,
+        "limits": {},
+        "probe": true
+      }
+    ],
+    "emergency": null,
+    "sig": {
+      "alg": "ed25519",
+      "kid": "root-example",
+      "value": "1g3A99mwvWtn1U0Qt5b9xRn3PCrPp91bMqRu7F13BMAHHEH9Y3e2LaLOrgYtNsn96OJtxFqkmRei20M9AZmZCg=="
+    },
+    "unexpected": true
+  },
+  "valid": false
+}

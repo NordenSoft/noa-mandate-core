@@ -1,23 +1,50 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join as joinPath } from 'node:path';
 import { refHash } from '../dist/src/refhash.js';
 import { ARTIFACTS } from '../dist/src/domains.js';
 import { evalSchema } from '../dist/src/schema-eval.js';
-import { schemaCheck, schemaFor, corpusPath } from './vault-schema-fixtures.mjs';
-import { buildCorpus, domains, world, hardwareFixture, keys, signed, join, pin, probeIdentities, bind } from './vault-vector-fixtures.mjs';
+import { schemaCheck, schemaFor, corpusDir } from './vault-schema-fixtures.mjs';
+import { buildCorpus, corpusFiles, domains, world, hardwareFixture, keys, signed, join, pin, probeIdentities, bind } from './vault-vector-fixtures.mjs';
 import { runVector, authentic, validCosignature } from './vault-spec-model.mjs';
 import { projectLedgerTransfer } from '../../../dist/src/ledger-transfer.js';
 
-const corpus=JSON.parse(readFileSync(corpusPath,'utf8'));
+const readCorpusFile=name=>JSON.parse(readFileSync(joinPath(corpusDir,name),'utf8'));
+const index=readCorpusFile('INDEX.json');
+const corpus={spec:index.spec,now:index.now,artifactVectors:index.artifactVectors.map(readCorpusFile),
+  probe:index.probe,vectors:index.vectors.map(readCorpusFile)};
 const spec=readFileSync(new URL('../vault-verification.md',import.meta.url),'utf8');
 
 test('vault corpus is deterministic and all stable codes have an executable case',()=>{
-  assert.equal(JSON.stringify(buildCorpus(),null,2)+'\n',readFileSync(corpusPath,'utf8'));
+  const files=corpusFiles(buildCorpus());
+  const indexedFiles=['INDEX.json',...index.vectors,...index.artifactVectors];
+  assert.equal(new Set(indexedFiles).size,indexedFiles.length,'duplicate file in corpus index');
+  assert.deepEqual(readdirSync(corpusDir).sort(),indexedFiles.toSorted(),'corpus folder differs from index');
+  assert.deepEqual([...files.keys()].sort(),indexedFiles.toSorted(),'generated file set differs from index');
+  for(const [name,text] of files) assert.equal(readFileSync(joinPath(corpusDir,name),'utf8'),text,name);
   assert.equal(new Set(corpus.vectors.map(v=>v.id)).size,corpus.vectors.length);
   const codes=new Set(corpus.vectors.flatMap(v=>v.expected.map(x=>x.code)));
   for(const code of new Set(spec.match(/VV_[A-Z_]+/g))) assert.ok(codes.has(code),`no vector for ${code}`);
   for(const code of codes) if(code!=='VV_OK') assert.ok(spec.includes('`'+code+'`'),`undocumented ${code}`);
+});
+test('every vault corpus file stays within published JSON carrier bounds',()=>{
+  for(const name of readdirSync(corpusDir)) {
+    const text=readFileSync(joinPath(corpusDir,name),'utf8');
+    JSON.parse(text);
+    assert.ok(Buffer.byteLength(text,'utf8')<=1024*1024,`${name}: exceeds 1 MiB`);
+    let strings=0,depth=0;
+    // Scan literals, including keys, without treating escaped quotes or braces as delimiters.
+    for(const [token] of text.matchAll(/"(?:[^"\\]|\\[\s\S])*"|[{}\[\]]/g)) {
+      if(token[0]==='"') strings++;
+      else if(token==='{' || token==='[') {
+        depth++;
+        assert.ok(depth<=64,`${name}: exceeds nesting 64`);
+      } else depth--;
+    }
+    assert.ok(strings<=4096,`${name}: ${strings} strings and keys exceeds 4096`);
+    assert.equal(depth,0,name);
+  }
 });
 for(const v of corpus.vectors) test(`vault verdict: ${v.id}`,()=>{
   for(const doc of [v.state.set,v.state.policy]) {

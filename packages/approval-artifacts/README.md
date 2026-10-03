@@ -36,7 +36,7 @@ So this is its own package, mirroring the monorepo convention (`packages/<name>`
 - `src/` — the reference verifier (`verifyArtifact`), the three `refHash` rules, the signing helper
   (`signArtifact`), the domain registry, and the schema evaluator.
 - [Vault verification profile](vault-verification.md) — six additional schemas and
-  `conformance/vault-verification.json` define root-pinned sets and class policies,
+  `conformance/vault-verification/INDEX.json` define root-pinned sets and class policies,
   joins, authority bundles, results and device co-signatures. This is a wire specification
   with a test-only executable model; `verifyArtifact` does not implement vault admission
   or transactional consumption. Existing artifact formats remain unchanged.

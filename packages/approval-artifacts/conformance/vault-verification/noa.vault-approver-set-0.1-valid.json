@@ -1,0 +1,62 @@
+{
+  "id": "noa.vault-approver-set/0.1-valid",
+  "artifact": {
+    "spec": "noa.vault-approver-set/0.1",
+    "tenant": "tenant-example",
+    "vaultId": "vault-example",
+    "version": 1,
+    "issuedAt": "2030-01-02T11:00:00.000Z",
+    "notBefore": "2030-01-02T11:00:00.000Z",
+    "expiresAt": "2030-01-03T12:00:00.000Z",
+    "previousSetHash": null,
+    "keyManifestHash": "sha256:8d388f7872e05501ba67cfdb11ca1eabaa649af6b813bd7e9b314f5bc0e3a5ef",
+    "gateKeys": [
+      {
+        "kid": "gate-example",
+        "publicKey": "MCowBQYDK2VwAyEAdXP4CRGm5quxmO7+aDRYbM3BC0lcKX25zWpYiCh/Cis=",
+        "roles": [
+          "hold-signer",
+          "execution-signer"
+        ],
+        "standby": false,
+        "tlsClientSpki": "sha256:dba96deaac3a7e063ee6631e8ec947a7ff938814007450dbcbf902db96db1107"
+      }
+    ],
+    "guardKey": {
+      "kid": "guard-example",
+      "publicKey": "MCowBQYDK2VwAyEAglO3+gm1mgECDyheRH3e9kJVRVZjUKP7CHCeE8WyA9Y="
+    },
+    "approvers": [
+      {
+        "kid": "approver-example-1",
+        "publicKey": "MCowBQYDK2VwAyEAxNVQOSVlpP/RO8zsyrg4dDwWGlmEH1rnpGpVyvnOuRo=",
+        "deviceId": "device-approver-example-1",
+        "custody": "software-native",
+        "cosignPublicKey": null,
+        "attestationDigest": null,
+        "joinHash": "sha256:2fdbe632afa10b6a5422e6031015d558fc7ba51f451b797847302a5cbb224a3d"
+      },
+      {
+        "kid": "approver-example-2",
+        "publicKey": "MCowBQYDK2VwAyEAArYT8KNcsJ17amhta5ymL5sDJC2+5GnIDRpG2kK5lys=",
+        "deviceId": "device-approver-example-2",
+        "custody": "software-native",
+        "cosignPublicKey": null,
+        "attestationDigest": null,
+        "joinHash": "sha256:ec62d8e6215219dc1517ae2ea5bc516b9bc9581e90cfb708416555b61abdfa16"
+      }
+    ],
+    "probe": {
+      "kid": "probe-example",
+      "tlsClientSpki": "sha256:1b7047865ac2cc637c3ead30bb1f4aef23ab0eb20cc831ae85dcfdd82eedde45"
+    },
+    "liftSuspensions": [],
+    "clockSkewSeconds": 60,
+    "sig": {
+      "alg": "ed25519",
+      "kid": "root-example",
+      "value": "jojJ9Cp1m/tEY5oKHMNXBOo4T8gnMlP7kHFO9qEQUTdLodiC4oIcZ39mfXoHadRIikAwFDxbfhh8hzEFaKWHBg=="
+    }
+  },
+  "valid": true
+}

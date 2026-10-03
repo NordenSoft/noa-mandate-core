@@ -1,6 +1,7 @@
 // Deterministic synthetic fixtures. Seeds here are public test data, never deployment keys.
 import { createPrivateKey, createPublicKey, createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join as joinPath } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { canonicalize } from '../dist/src/jcs.js';
 import { signArtifact } from '../dist/src/sign.js';
@@ -9,7 +10,7 @@ import { signingMessage, signEd25519, sha256Prefixed } from '../dist/src/crypto.
 import { receiptHashInput } from '../../../dist/src/canonicalize.js';
 import { LEDGER_TRANSFER_SCHEMA_ID, LEDGER_TRANSFER_DISPLAY_ID, projectLedgerTransfer } from '../../../dist/src/ledger-transfer.js';
 import { projectionIdentityHash } from '../../../dist/src/deploy-release.js';
-import { corpusPath } from './vault-schema-fixtures.mjs';
+import { corpusDir } from './vault-schema-fixtures.mjs';
 
 export const NOW = '2030-01-02T12:00:00.000Z';
 export const domains = {
@@ -205,6 +206,25 @@ export function buildCorpus() {
 export function hardwareFixture() {
   return JSON.parse(readFileSync(new URL('../conformance/vault-hardware-fixture.json',import.meta.url),'utf8'));
 }
+export function corpusFiles(corpus) {
+  const files=new Map();
+  function add(vector) {
+    const name=vector.id.replace(/[^A-Za-z0-9._-]/g,'-')+'.json';
+    if(name==='INDEX.json' || files.has(name)) throw new Error(`Duplicate corpus file: ${name}`);
+    files.set(name,JSON.stringify(vector,null,2)+'\n');
+    return name;
+  }
+  const index={spec:corpus.spec,now:corpus.now,probe:corpus.probe,
+    vectors:corpus.vectors.map(add),artifactVectors:corpus.artifactVectors.map(add)};
+  files.set('INDEX.json',JSON.stringify(index,null,2)+'\n');
+  return files;
+}
 if (process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href && process.argv[2]==='--write') {
-  writeFileSync(corpusPath,JSON.stringify(buildCorpus(),null,2)+'\n');
+  const files=corpusFiles(buildCorpus());
+  mkdirSync(corpusDir,{recursive:true});
+  // Only this corpus's generated JSON files are owned by this writer.
+  for(const entry of readdirSync(corpusDir,{withFileTypes:true})) {
+    if(entry.isFile() && entry.name.endsWith('.json') && !files.has(entry.name)) unlinkSync(joinPath(corpusDir,entry.name));
+  }
+  for(const [name,text] of files) writeFileSync(joinPath(corpusDir,name),text);
 }

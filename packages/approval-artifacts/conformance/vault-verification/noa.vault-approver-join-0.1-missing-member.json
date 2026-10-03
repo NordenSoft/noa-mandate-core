@@ -1,0 +1,17 @@
+{
+  "id": "noa.vault-approver-join/0.1-missing-member",
+  "artifact": {
+    "spec": "noa.vault-approver-join/0.1",
+    "tenant": "tenant-example",
+    "vaultId": "vault-example",
+    "kid": "approver-example-1",
+    "publicKey": "MCowBQYDK2VwAyEAxNVQOSVlpP/RO8zsyrg4dDwWGlmEH1rnpGpVyvnOuRo=",
+    "hpkePublicKey": "MCowBQYDK2VuAyEAB9IPISUDRCsglgSq+XTYZdgcCIzkZautSZc+kpo/iHA=",
+    "deviceId": "device-approver-example-1",
+    "custody": "software-native",
+    "cosignPublicKey": null,
+    "attestationChain": null,
+    "createdAt": "2030-01-02T11:00:00.000Z"
+  },
+  "valid": false
+}

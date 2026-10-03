@@ -1,0 +1,25 @@
+{
+  "id": "noa.vault-result/0.1-valid",
+  "artifact": {
+    "spec": "noa.vault-result/0.1",
+    "tenant": "tenant-example",
+    "vaultId": "vault-example",
+    "vaultInstanceId": "instance-example",
+    "grantHash": "sha256:9ca9171647d487e1d2d8c0bbfaf9858b082446d4897174185fe734f911540eac",
+    "effectId": "effect-example",
+    "checkedAt": "2030-01-02T12:00:00.000Z",
+    "setVersion": 1,
+    "policyVersion": 1,
+    "outcome": "EXECUTED",
+    "code": null,
+    "consumed": true,
+    "originalOutcome": null,
+    "effectCode": null,
+    "sig": {
+      "alg": "ed25519",
+      "kid": "guard-example",
+      "value": "2kkTCmlH3siHV258Cu+twEBss/qKDtYvYCdutF3rRyd9jFZ2o+uDrjlJBffOSkSJE1fJJEX0CUkBrFjuZr2uBg=="
+    }
+  },
+  "valid": true
+}

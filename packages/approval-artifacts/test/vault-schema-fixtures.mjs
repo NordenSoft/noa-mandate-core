@@ -41,4 +41,4 @@ export function schemaCheck(artifact) {
   }
   return { ok: result.errors.length === 0, errors: result.errors };
 }
-export const corpusPath = fileURLToPath(new URL('../conformance/vault-verification.json', import.meta.url));
+export const corpusDir = fileURLToPath(new URL('../conformance/vault-verification/', import.meta.url));
