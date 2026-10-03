@@ -23,7 +23,7 @@ So this is its own package, mirroring the monorepo convention (`packages/<name>`
 
 ## What ships
 
-- `schema/*.schema.json` — 12 machine-readable schemas (`additionalProperties:false` everywhere), the
+- `schema/*.schema.json` — 12 established artifact schemas (`additionalProperties:false` everywhere), the
   enforced structural validator (executed directly by `src/schema-eval.ts`, a tiny zero-dep
   JSON-Schema-subset evaluator, so the shipped schema and the validator can never drift):
   Hold Envelope, Decision, Key Manifest, Key Delegation, Execution Grant, Execution Consumption,
@@ -35,6 +35,11 @@ So this is its own package, mirroring the monorepo convention (`packages/<name>`
   two unsigned blobs. `keyring.json` is the shared trust root; `INDEX.json` the counts.
 - `src/` — the reference verifier (`verifyArtifact`), the three `refHash` rules, the signing helper
   (`signArtifact`), the domain registry, and the schema evaluator.
+- [Vault verification profile](vault-verification.md) — six additional schemas and
+  `conformance/vault-verification.json` define root-pinned sets and class policies,
+  joins, authority bundles, results and device co-signatures. This is a wire specification
+  with a test-only executable model; `verifyArtifact` does not implement vault admission
+  or transactional consumption. Existing artifact formats remain unchanged.
 
 Run the gate: `npm test` (build → regenerate vectors deterministically → `node --test`). A single
 mismatch fails the build.

@@ -8,6 +8,11 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Added
 
+- Approval artifacts: the [vault verification profile](packages/approval-artifacts/vault-verification.md),
+  six additional wire schemas and deterministic conformance vectors specify root-pinned
+  authority, action binding, approval quorum and atomic single-use consumption.
+  These are specification and test artifacts, not a production vault adapter.
+
 - Reference gate: an effect owner that cannot tell whether its write committed (for example a durable
   store whose COMMIT failed) answers the new outcome `OUTCOME_UNKNOWN`, and the commit route answers it
   `503 EFFECT_OUTCOME_UNKNOWN` (retryable only as a commit of the same hold; the engine mirrors nothing).

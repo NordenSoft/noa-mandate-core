@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noatrust.com/schema/noa-vault-approver-join-0.1.schema.json",
+  "title": "NOA Vault Approver Join",
+  "description": "Decision-key proof of possession; sig.kid equals kid. Domain NOA-VaultApproverJoin-v0.1-sig. A join is evidence for local root-holder enrollment, never runtime authority. Attestation certificates use canonical standard base64 DER; hardware evidence must be independently verified.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spec",
+    "tenant",
+    "vaultId",
+    "kid",
+    "publicKey",
+    "hpkePublicKey",
+    "deviceId",
+    "custody",
+    "cosignPublicKey",
+    "attestationChain",
+    "createdAt",
+    "sig"
+  ],
+  "properties": {
+    "spec": {
+      "const": "noa.vault-approver-join/0.1"
+    },
+    "tenant": {
+      "type": "string",
+      "pattern": "^.{1,256}$"
+    },
+    "vaultId": {
+      "type": "string",
+      "pattern": "^.{1,128}$"
+    },
+    "kid": {
+      "type": "string",
+      "pattern": "^.{1,128}$"
+    },
+    "publicKey": {
+      "type": "string",
+      "pattern": "^(?=.{4,}$)(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+    },
+    "hpkePublicKey": {
+      "type": "string",
+      "pattern": "^(?=.{4,}$)(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+    },
+    "deviceId": {
+      "type": "string",
+      "pattern": "^.{1,128}$"
+    },
+    "custody": {
+      "enum": [
+        "software-native",
+        "hardware-attested"
+      ]
+    },
+    "cosignPublicKey": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^(?=.{4,}$)(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "attestationChain": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^(?=.{4,}$)(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "createdAt": {
+      "$ref": "noa-hold-0.1.schema.json#/$defs/rfc3339"
+    },
+    "sig": {
+      "$ref": "noa-hold-0.1.schema.json#/$defs/sig"
+    }
+  }
+}

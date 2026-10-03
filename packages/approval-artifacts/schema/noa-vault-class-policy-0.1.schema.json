@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noatrust.com/schema/noa-vault-class-policy-0.1.schema.json",
+  "title": "NOA Vault Class Policy",
+  "description": "Independent owner-root-only policy, domain NOA-VaultClassPolicy-v0.1-sig. Limits are closed: maxAmount and unit together for ledger transfers, neither for the zero-effect probe. Cross-field and emergency narrowing rules are normative in vault-verification.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spec",
+    "tenant",
+    "vaultId",
+    "version",
+    "previousPolicyHash",
+    "issuedAt",
+    "notBefore",
+    "expiresAt",
+    "minArtifactVersions",
+    "classes",
+    "emergency",
+    "sig"
+  ],
+  "properties": {
+    "spec": {
+      "const": "noa.vault-class-policy/0.1"
+    },
+    "tenant": {
+      "type": "string",
+      "pattern": "^.{1,256}$"
+    },
+    "vaultId": {
+      "type": "string",
+      "pattern": "^.{1,128}$"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "previousPolicyHash": {
+      "oneOf": [
+        {
+          "$ref": "noa-hold-0.1.schema.json#/$defs/hash256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "issuedAt": {
+      "$ref": "noa-hold-0.1.schema.json#/$defs/rfc3339"
+    },
+    "notBefore": {
+      "$ref": "noa-hold-0.1.schema.json#/$defs/rfc3339"
+    },
+    "expiresAt": {
+      "$ref": "noa-hold-0.1.schema.json#/$defs/rfc3339"
+    },
+    "minArtifactVersions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "noa.vault-authority-bundle",
+        "noa.hold",
+        "noa.receipt",
+        "noa.decision",
+        "noa.execution-grant",
+        "noa.device-cosignature"
+      ],
+      "properties": {
+        "noa.vault-authority-bundle": {
+          "const": "0.1"
+        },
+        "noa.hold": {
+          "const": "0.1"
+        },
+        "noa.receipt": {
+          "const": "0.1"
+        },
+        "noa.decision": {
+          "const": "0.1"
+        },
+        "noa.execution-grant": {
+          "const": "0.1"
+        },
+        "noa.device-cosignature": {
+          "const": "0.1"
+        }
+      }
+    },
+    "classes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "canonical",
+          "actionSchema",
+          "displayProjection",
+          "audienceMember",
+          "quorum",
+          "requiredApprovers",
+          "maxGrantLifeSeconds",
+          "maxApprovalAgeSeconds",
+          "limits",
+          "probe"
+        ],
+        "properties": {
+          "canonical": {
+            "type": "string",
+            "pattern": "^.{1,128}$"
+          },
+          "actionSchema": {
+            "$ref": "noa-hold-0.1.schema.json#/$defs/projectionId"
+          },
+          "displayProjection": {
+            "$ref": "noa-hold-0.1.schema.json#/$defs/projectionId"
+          },
+          "audienceMember": {
+            "type": "string",
+            "pattern": "^.{1,128}$"
+          },
+          "quorum": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "requiredApprovers": {
+            "type": "array",
+            "minItems": 0,
+            "items": {
+              "type": "string",
+              "pattern": "^.{1,128}$"
+            }
+          },
+          "maxGrantLifeSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 600
+          },
+          "maxApprovalAgeSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 900
+          },
+          "limits": {
+            "$ref": "#/$defs/limits"
+          },
+          "probe": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "emergency": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "class",
+            "covers",
+            "eligibleApprovers",
+            "quorum",
+            "maxGrantLifeSeconds",
+            "limits"
+          ],
+          "properties": {
+            "class": {
+              "type": "string",
+              "pattern": "^.{1,128}$"
+            },
+            "covers": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "pattern": "^.{1,128}$"
+              }
+            },
+            "eligibleApprovers": {
+              "type": "array",
+              "minItems": 2,
+              "items": {
+                "type": "string",
+                "pattern": "^.{1,128}$"
+              }
+            },
+            "quorum": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 9007199254740991
+            },
+            "maxGrantLifeSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 300
+            },
+            "limits": {
+              "$ref": "#/$defs/limits"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sig": {
+      "$ref": "noa-hold-0.1.schema.json#/$defs/sig"
+    }
+  },
+  "$defs": {
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "maxAmount": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,14}$"
+        },
+        "unit": {
+          "const": "XTS"
+        }
+      }
+    }
+  }
+}
