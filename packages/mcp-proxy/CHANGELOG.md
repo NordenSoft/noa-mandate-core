@@ -1,5 +1,65 @@
 # Changelog — `noa-mcp-proxy`
 
+## [0.5.0] - 2026-10-05
+
+> This entry describes version `0.5.0`. Registry publication is separate from repository state;
+> check `npm view noa-mcp-proxy version` for the current published version. Minor, not patch: a new
+> flag and a new subcommand are new capability, and [VERSIONING.md](../../VERSIONING.md) §1 puts new
+> capability in a minor; nothing that started before is refused now. Released in lockstep with
+> `noa-mcp-adapter-core` 0.5.0.
+
+### Added — `--policy <file.json>`: govern your own tools from the CLI
+
+The CLI always ran the built-in demo policy, written for the three bundled demo tools; the only way
+to govern a different server was the library API (`createProxyServer({ policy })`). `--policy` takes
+the same `noa.policy/0.2` document and is checked by the same kernel validator, at startup, before
+any key is loaded or any downstream is spawned. It fails closed: an unreadable file (missing, a
+symlink, foreign-owned, group/other-writable, too large), a file that is not JSON, or a document the
+validator refuses stops the process with exit `1` and ONE stderr line that names the file and the
+field, led by a stable code: `[POLICY_UNREADABLE]`, `[POLICY_UNPARSABLE]` or `[POLICY_INVALID]`.
+`--policy` with no value, or given twice, is refused rather than falling back to the demo. A tool the
+policy does not name is denied.
+
+The policy is also checked AGAINST `--approval-rules`. Measured on this release's own first draft:
+run `init`, rename the approval tool in `policy.json` only, start the proxy as the README said, and
+the renamed tool EXECUTED with no human asked and nothing on stderr: the policy allowed it and the
+approval rule still named the old tool. Now an exact-match approval rule for a tool no policy rule
+names stops the proxy with `[POLICY_APPROVAL_MISMATCH]` before anything is spawned, and `--policy`
+without `--approval-rules` prints one warning that no call will be held for a human. The file is
+read once at start; an edit takes effect on restart.
+
+Without `--policy` the demo policy is still used, and the proxy now says so on stderr at every
+start, so a demo cannot pass for a production setup unnoticed.
+
+### Added — `init` writes a starter policy and prints how to start
+
+`noa-mcp-proxy init` now writes five files: a starter `policy.json` (one allowed tool, one tool held
+for a human, one blocked tool, every other tool denied) next to the four approval-gate files. The
+tool names come from `--allow-tool`, `--approval-tool` and `--block-tool` (placeholders that match
+nothing otherwise), and the approval tool's name is written into BOTH `policy.json` and
+`approval-rules.json` from one value, so the two cannot disagree. `approval-rules.json` now holds
+only that rule; the bundled demo's `transfer_funds` threshold rule is no longer in the starter (it
+stays in `src/policy.mjs` for the demo). It prints the one-line start command and an MCP config
+snippet, both with absolute paths. Both starter files are checked against the validators the proxy
+itself runs before they are written.
+
+### Added — `verify-outcome`: check outcome receipts from the command line
+
+Outcome receipts (`noa.mcp.outcome/0.1`, `--outcome-log`) are a separate, domain-separated format the
+`noa-receipt` CLI does not read. `noa-mcp-proxy verify-outcome <file> --keyring <file>` verifies one
+receipt or a JSONL log offline, through the existing `verifyOutcomeReceipt`, and exits `0` VALID,
+`2` TAMPERED, `3` MALFORMED or `4` usage. A file with no receipt is MALFORMED, never VALID; the same
+decision's outcome twice (a replayed line) is TAMPERED; every line is read by the kernel's strict
+parser, so a duplicate key is MALFORMED. VALID does not prove the log is complete: a deleted line
+leaves no trace. The receipt format is unchanged. `verifyOutcomeReceipt` now also returns a stable `code`
+(`MALFORMED`, `TAMPERED`, `VERIFICATION_INPUT`) next to its `reason`.
+
+### Fixed — `init.mjs` run through a symlink skipped its body
+
+Same entry-check defect as `noa-approve` (see `noa-mcp-adapter-core` 0.5.0); fixed with the same
+`isEntryPoint` helper. The `noa-mcp-proxy` bin itself (`proxy.mjs`) has no entry check and was not
+affected.
+
 ## [0.4.0] - 2026-08-12
 
 > This entry describes version `0.4.0`. Registry publication is separate from repository state;

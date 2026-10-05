@@ -15,7 +15,19 @@
  * approver keypair) into a target directory. It is scaffolding, not activation — read init.mjs's
  * own doc comment before assuming a clean exit means anything is protected yet.
  *
+ * `proxy.mjs verify-outcome <file> --keyring <file>` verifies OUTCOME receipts (the
+ * `noa.mcp.outcome/0.1` lines --outcome-log writes) offline — see src/verify-outcome-cli.mjs.
+ * DECISION receipts (--receipt-log) are verified with the `noa-receipt` CLI instead.
+ *
  * Flags (all optional):
+ *   --policy <file.json>       the `noa.policy/0.2` document that decides every tools/call (see
+ *                              src/policy-file.mjs). Read and validated at startup, FAIL-CLOSED: an
+ *                              unreadable, unparsable or invalid file stops the process with a stable
+ *                              code (POLICY_UNREADABLE / POLICY_UNPARSABLE / POLICY_INVALID) before
+ *                              any downstream is spawned. A tool the policy does not name is denied.
+ *                              Without this flag the BUILT-IN DEMO policy (src/policy.mjs, written
+ *                              for demo-downstream.mjs's three tools) is used, and the proxy says so
+ *                              on stderr at startup.
  *   --session-id <id>          receipt-chain session id (default: a fresh randomUUID())
  *   --tenant <name>            receipt scope.tenant (default: "default-tenant")
  *   --agent-id <id>            STATIC receipt.agent.id for every call this process makes (default:
@@ -107,6 +119,8 @@ import { generateKeyPair, createChainSessionStore, createFileSessionStore, loadO
 import { createProxyServer } from "./create-proxy-server.mjs";
 import { TRANSFER_GUARD_POLICY } from "./policy.mjs";
 import { runInitCli } from "./init.mjs";
+import { loadPolicyFile, requireApprovalRulesCovered } from "./policy-file.mjs";
+import { runVerifyOutcomeCli } from "./verify-outcome-cli.mjs";
 
 import { intrinsics } from "noa-mcp-adapter-core";
 
@@ -133,13 +147,14 @@ function parseArgs(argv) {
   const sepIndex = arrayIndexOf(argv, "--");
   if (sepIndex === -1) {
     throw new Error(
-      "usage: proxy.mjs [--session-id <id>] [--tenant <name>] [--agent-id <id>] " +
+      "usage: proxy.mjs [--policy <file.json>] [--session-id <id>] [--tenant <name>] [--agent-id <id>] " +
         "[--receipt-log <path>] [--outcome-log <path>] [--keyring-file <path>] [--key-file <path>] [--signer-socket <path>] " +
         "[--session-idle-ttl-ms <n>] [--max-sessions <n>] [--session-dir <path>] " +
         "[--approval-rules <path>] [--pending-store <path>] [--approver-keyring <path>] [--approver-identity <path>] " +
         "[--http-port <n>] [--http-host <host>] " +
         "-- <downstream-command> [downstream-args...]\n" +
-        "       proxy.mjs init [--dir <path>] [--force]   (scaffolds the approval-gate inputs above — see init.mjs)",
+        "       proxy.mjs init [--dir <path>] [--force]   (scaffolds a starter policy and the approval-gate inputs — see init.mjs)\n" +
+        "       proxy.mjs verify-outcome <outcome-receipts.jsonl> --keyring <keyring.json>",
     );
   }
   const own = arraySlice(argv, 0, sepIndex);
@@ -147,6 +162,7 @@ function parseArgs(argv) {
   if (downstream.length === 0) throw new Error("proxy.mjs: no downstream command given after `--`");
 
   const opts = {
+    policyFile: null,
     sessionId: null,
     tenant: "default-tenant",
     agentId: null,
@@ -175,7 +191,13 @@ function parseArgs(argv) {
   for (let i = 0; i < own.length; i++) {
     const flag = own[i];
     const value = own[++i];
-    if (flag === "--session-id") opts.sessionId = value;
+    if (flag === "--policy") {
+      // Refused here rather than defaulted: `--policy` with no value (or given twice) must never
+      // fall back to the demo policy — the operator asked for THEIR policy and would not get it.
+      if (opts.policyFile !== null) throw new Error('proxy.mjs: [POLICY_UNREADABLE] "--policy" given more than once — pass exactly one policy file');
+      if (value === undefined || value.length === 0) throw new Error('proxy.mjs: [POLICY_UNREADABLE] "--policy" needs a file path — pass --policy <file.json>');
+      opts.policyFile = value;
+    } else if (flag === "--session-id") opts.sessionId = value;
     else if (flag === "--tenant") opts.tenant = value;
     else if (flag === "--agent-id") opts.agentId = value;
     else if (flag === "--receipt-log") opts.receiptLog = value;
@@ -244,12 +266,83 @@ async function main() {
   // (noa-mcp-adapter-core's loadOrCreateKeyFile/generateKeyPair, ./policy.mjs) are ALREADY loaded
   // unconditionally by this file for the normal proxy path, so there is no lazy-load benefit to
   // defer for — unlike the genuinely optional noa-signer-sidecar/http-server.mjs imports below.
-  if (PROCESS.argv[2] === "init") {
-    PROCESS.exitCode = runInitCli(arraySlice(PROCESS.argv, 3));
+  //
+  // `noa-mcp-proxy verify-outcome <file> --keyring <file>` is the other subcommand: offline
+  // verification of outcome receipts; it never starts a proxy or spawns anything.
+  const subcommand = PROCESS.argv[2];
+  if (subcommand === "init" || subcommand === "verify-outcome") {
+    const subArgs = arraySlice(PROCESS.argv, 3);
+    PROCESS.exitCode = subcommand === "init" ? runInitCli(subArgs) : runVerifyOutcomeCli(subArgs);
     return;
   }
 
   const { opts, downstreamCommand, downstreamArgs } = parseArgs(arraySlice(PROCESS.argv, 2));
+
+  // The policy is settled FIRST, before a key is loaded, a file written or a downstream spawned:
+  // a policy file that cannot be used stops the process here (loadPolicyFile throws an error whose
+  // message leads with its stable code, which main().catch below turns into exit 1).
+  let policy;
+  if (opts.policyFile !== null) {
+    policy = loadPolicyFile(opts.policyFile);
+  } else {
+    policy = TRANSFER_GUARD_POLICY;
+    // Never let a demo pass for production: one line, every start, on stderr (stdout is the MCP
+    // channel in stdio mode).
+    console.error(
+      `noa-mcp-proxy: WARNING — no --policy given; using the built-in DEMO policy "${TRANSFER_GUARD_POLICY.id}" ` +
+        "(written for the bundled demo tools only; every other tool is denied). Pass --policy <file.json> for your own tools.",
+    );
+  }
+  // ── CONFIG ARTIFACTS ARE READ THROUGH A DESCRIPTOR, NEVER BY PATH (CWE-59/CWE-367) ────────────
+  // MEASURED 2026-08-12 against the shipped CLI: with a path-based `readFileSync`, replacing
+  // `approval-rules.json` with a SYMLINK to a file containing `[]` turned the human-approval gate
+  // OFF and a `transfer_funds` of 7000 (above the configured 5000 threshold) was forwarded and
+  // EXECUTED with no human approval; replacing `approver-keyring.json` with a symlink to an
+  // attacker keyring let the attacker sign their own approval and the identical retry EXECUTED.
+  // In most real deployments the agent process CAN WRITE ITS OWN WORKING DIRECTORY, so planting
+  // that symlink is inside the threat model, not outside it. readConfigJson (adapter-core's
+  // config-artifact.mjs) opens with O_NOFOLLOW, fstats the DESCRIPTOR (regular file, owned by this
+  // process or root, not group/other-writable) and reads from that same descriptor — the pathname
+  // never gets a second chance to decide which bytes this process trusts.
+  //
+  // ── AND THE BYTES ARE THEN STRUCTURALLY VALIDATED, BEFORE ANY DOWNSTREAM IS SPAWNED ───────────
+  // MEASURED 2026-08-12 against the shipped CLI, with the symlink guard above already in place: a
+  // REGULAR, mode-0600, correctly-owned `approval-rules.json` containing `{}` — valid JSON, not an
+  // array — was accepted, and the same 7000 transfer was FORWARDED AND EXECUTED with no human
+  // approval. `readConfigJson` decides WHICH BYTES are read; it has nothing to say about whether
+  // those bytes are a rule set. `matchApprovalRule` answers `null` for a non-array, `null` means
+  // "no rule matched", and "no rule matched" means forward — so a two-byte file switched the gate
+  // off. This removes the need for the conspicuous `[]` payload the symlink attack needed: ANY
+  // content-write primitive, including the same-uid rewrite NON-CLAIMS.md NC-6.9 names as an
+  // accepted residual, was a full bypass. `requireValidApprovalRules` refuses a non-array AND every
+  // malformed rule — in FULL, never partially — so the process exits non-zero here rather than
+  // serving the host with the gate silently absent. createProxyServer/startHttpProxy apply the
+  // identical check on their own inputs (a library consumer must not be able to skip it by not
+  // using this CLI); this call is what gives the OPERATOR the flag-named error.
+  // THE RETURN VALUE is what travels on: a frozen, inert snapshot compiled from own data properties
+  // only. Keeping the parsed object instead would keep the bug — a rule set whose fields are
+  // inherited or computed, or one mutated after this line, was measured executing the same
+  // unapproved 7000-unit transfer (see `requireValidApprovalRules`' own note).
+  let approvalRules;
+  if (opts.approvalRulesFile) {
+    approvalRules = requireValidApprovalRules(
+      readConfigJson(opts.approvalRulesFile, { label: "--approval-rules" }),
+      `--approval-rules "${opts.approvalRulesFile}"`,
+    );
+  }
+
+  // A policy file and an approval rule set are checked AGAINST EACH OTHER before anything starts: an
+  // exact-match approval rule for a tool the policy never names holds nothing (see
+  // policy-file.mjs's requireApprovalRulesCovered). A policy with no approval rules at all is a
+  // legitimate setup, but never a silent one.
+  if (opts.policyFile !== null) {
+    if (approvalRules !== undefined) {
+      requireApprovalRulesCovered(policy, approvalRules, `--approval-rules "${opts.approvalRulesFile}"`);
+    } else {
+      console.error("noa-mcp-proxy: WARNING — --policy given without --approval-rules; no call will be held for human approval.");
+    }
+  }
+
   const sessionId = opts.sessionId ?? randomUUID();
   const keyFile = opts.keyFile ?? PROCESS.env.NOA_MCP_PROXY_KEY_FILE ?? null;
 
@@ -326,44 +419,6 @@ async function main() {
   // single session (one factory call); HTTP calls it once per MCP session.
   const makeDownstreamTransport = () => new StdioClientTransport({ command: downstreamCommand, args: downstreamArgs });
 
-  // ── CONFIG ARTIFACTS ARE READ THROUGH A DESCRIPTOR, NEVER BY PATH (CWE-59/CWE-367) ────────────
-  // MEASURED 2026-08-12 against the shipped CLI: with a path-based `readFileSync`, replacing
-  // `approval-rules.json` with a SYMLINK to a file containing `[]` turned the human-approval gate
-  // OFF and a `transfer_funds` of 7000 (above the configured 5000 threshold) was forwarded and
-  // EXECUTED with no human approval; replacing `approver-keyring.json` with a symlink to an
-  // attacker keyring let the attacker sign their own approval and the identical retry EXECUTED.
-  // In most real deployments the agent process CAN WRITE ITS OWN WORKING DIRECTORY, so planting
-  // that symlink is inside the threat model, not outside it. readConfigJson (adapter-core's
-  // config-artifact.mjs) opens with O_NOFOLLOW, fstats the DESCRIPTOR (regular file, owned by this
-  // process or root, not group/other-writable) and reads from that same descriptor — the pathname
-  // never gets a second chance to decide which bytes this process trusts.
-  //
-  // ── AND THE BYTES ARE THEN STRUCTURALLY VALIDATED, BEFORE ANY DOWNSTREAM IS SPAWNED ───────────
-  // MEASURED 2026-08-12 against the shipped CLI, with the symlink guard above already in place: a
-  // REGULAR, mode-0600, correctly-owned `approval-rules.json` containing `{}` — valid JSON, not an
-  // array — was accepted, and the same 7000 transfer was FORWARDED AND EXECUTED with no human
-  // approval. `readConfigJson` decides WHICH BYTES are read; it has nothing to say about whether
-  // those bytes are a rule set. `matchApprovalRule` answers `null` for a non-array, `null` means
-  // "no rule matched", and "no rule matched" means forward — so a two-byte file switched the gate
-  // off. This removes the need for the conspicuous `[]` payload the symlink attack needed: ANY
-  // content-write primitive, including the same-uid rewrite NON-CLAIMS.md NC-6.9 names as an
-  // accepted residual, was a full bypass. `requireValidApprovalRules` refuses a non-array AND every
-  // malformed rule — in FULL, never partially — so the process exits non-zero here rather than
-  // serving the host with the gate silently absent. createProxyServer/startHttpProxy apply the
-  // identical check on their own inputs (a library consumer must not be able to skip it by not
-  // using this CLI); this call is what gives the OPERATOR the flag-named error.
-  // THE RETURN VALUE is what travels on: a frozen, inert snapshot compiled from own data properties
-  // only. Keeping the parsed object instead would keep the bug — a rule set whose fields are
-  // inherited or computed, or one mutated after this line, was measured executing the same
-  // unapproved 7000-unit transfer (see `requireValidApprovalRules`' own note).
-  let approvalRules;
-  if (opts.approvalRulesFile) {
-    approvalRules = requireValidApprovalRules(
-      readConfigJson(opts.approvalRulesFile, { label: "--approval-rules" }),
-      `--approval-rules "${opts.approvalRulesFile}"`,
-    );
-  }
-
   // FAIL-CLOSED at startup: the human-approval gate (--approval-rules and/or --pending-store) can
   // adopt an approver's ALLOWED receipt onto the live chain and forward the held action. Adopting
   // one requires authenticating the approver's signature, which needs a trusted approver keyring.
@@ -383,7 +438,7 @@ async function main() {
   // per transport. This one config object feeds both paths.
   const gateConfig = {
     signer,
-    policy: TRANSFER_GUARD_POLICY,
+    policy,
     store,
     tenant: opts.tenant,
     agentId: opts.agentId ?? undefined,

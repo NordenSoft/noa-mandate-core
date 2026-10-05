@@ -4,6 +4,38 @@ The root `CHANGELOG.md` scopes itself to `noa-receipt` in its first line, so sec
 package are recorded here. At the time of this entry, `0.2.0` was published and affected; `0.3.0`
 documented the security correction.
 
+## [0.5.0] - 2026-10-05
+
+> **Repository state, not a registry claim.** A version heading here records what the tree contains,
+> never what the registry serves. Minor, not patch: new exports are new capability, and
+> [VERSIONING.md](../../VERSIONING.md) §1 puts new capability in a minor; nothing that loaded before is
+> refused now. Released in lockstep with `noa-mcp-proxy` 0.5.0, which uses all three exports.
+
+### Fixed — `noa-approve` did nothing when run through an npm bin link
+
+`approve-cli.mjs` ran its body only when `import.meta.url` equalled `file://` + `process.argv[1]`.
+npm installs every `bin` as a symlink (`node_modules/.bin/noa-approve`, or the global bin directory),
+so `process.argv[1]` is the link path and the comparison never matched: the module loaded, the body
+was skipped, and the process exited `0` with nothing recorded. An operator who approved a held call
+saw a clean exit while the hold stayed pending.
+
+Reproduced with a test that runs the real file through a real symlink in a temporary `.bin`
+directory: on the old code the exit is `0` and stdout is empty; the approval is never written.
+**Fixed** by comparing the real paths of both sides (`realpathSync` on the module path from
+`fileURLToPath` and on `argv[1]`), in a new shared helper `isEntryPoint` (`src/entry-point.mjs`). A
+path that cannot be resolved answers "not the entry point", so a module imported as a library never
+runs a CLI body by accident. `noa-mcp-proxy`'s `init.mjs` had the same check and uses the same
+helper now. The test asserts the effect (the pending store records the approval), not the exit code.
+
+### Added — three exports for `noa-mcp-proxy`
+
+- `isEntryPoint(importMetaUrl, argv1?)`, the symlink-safe entry check above.
+- `assertValidPolicy`, re-exported from `noa-receipt`: the kernel's own `noa.policy/0.2` grammar
+  check, so a CLI can refuse an invalid policy FILE at startup with the same rules `evaluate` applies
+  on every call.
+- `parseDocument`, re-exported from `noa-receipt`: the kernel's strict JSON boundary (a duplicate
+  key is refused), so a CLI that reads signed documents never resolves one "last key wins".
+
 ## [0.4.0] - 2026-08-12
 
 > **Repository state, not a registry claim.** Registry publication is a separate release operation,

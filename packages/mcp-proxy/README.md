@@ -67,15 +67,112 @@ forgery. That distinction needs a separately trusted time witness. Until such ev
 every verifier refuses every retired-key artifact,
 including genuine pre-retirement history.
 
+## Use your own tools
+
+Five steps. Each is one command. Node 20 or newer.
+
+1. Install the proxy and the approval command (`noa-approve`):
+
+   ```bash
+   npm install -g noa-mcp-proxy noa-mcp-adapter-core
+   ```
+
+2. Name three of your server's tools: one to allow, one that runs only after a human approves it,
+   one to block. Every other tool is denied. This writes the policy, the approval rule (with the same
+   tool name) and the approver keys into `./noa`, and prints the start command and an MCP config to
+   paste, both with absolute paths:
+
+   ```bash
+   noa-mcp-proxy init --dir noa --allow-tool search_docs --approval-tool refund --block-tool delete_all
+   ```
+
+3. Start the proxy in front of your server. Everything after `--` is your server's own command:
+
+   ```bash
+   noa-mcp-proxy --policy noa/policy.json --approval-rules noa/approval-rules.json --pending-store noa/pending-store.jsonl --approver-keyring noa/approver-keyring.json --key-file noa/proxy-key.json --keyring-file noa/keyring.json --receipt-log noa/decisions.jsonl --outcome-log noa/outcomes.jsonl -- node your-server.js
+   ```
+
+4. A held `refund` call returns an error carrying a receipt id. A human approves it from a
+   separate terminal, then the agent retries the identical call:
+
+   ```bash
+   noa-approve approve --id <receiptId> --by you@example.com --pending-store noa/pending-store.jsonl --key-file noa/approver-key.json
+   ```
+
+5. Check the outcome receipts offline (exit `0` VALID, `2` TAMPERED, `3` MALFORMED, `4` usage):
+
+   ```bash
+   noa-mcp-proxy verify-outcome noa/outcomes.jsonl --keyring noa/keyring.json
+   ```
+
+   VALID means every line is a genuine, signed outcome receipt, each for a different decision. It
+   does **not** prove the log is complete: a deleted line leaves no trace. A line repeated (the same
+   decision's outcome twice) is TAMPERED.
+
+To edit the policy by hand later (more tools, argument limits), see **Policy file format** below.
+If a tool needs approval, its name must appear in both `noa/policy.json` and
+`noa/approval-rules.json`; the proxy refuses to start when an approval rule names a tool the policy
+does not (`[POLICY_APPROVAL_MISMATCH]`).
+
+Two kinds of receipt, two verifiers: **outcome** receipts (`noa.mcp.outcome/0.1`, `--outcome-log`)
+verify with `noa-mcp-proxy verify-outcome`; **decision** receipts (`noa.receipt/0.1`,
+`--receipt-log`) verify with the [`noa-receipt`](https://www.npmjs.com/package/noa-receipt) CLI
+(`noa verify <receipts.json> --keyring <keyring.json>`). That CLI reads one JSON array, not JSONL,
+so put the log's lines inside one `[ ... ]` array first; and its keyring must hold every key that
+signed the chain: the proxy's key from `noa/keyring.json` and, when a call was approved, the
+approver's key from `noa/approver-keyring.json`, merged into one JSON object.
+
+Without `--policy` the proxy uses its built-in demo policy (written for the bundled demo server)
+and prints a warning line to stderr at every start. With `--policy` but no `--approval-rules`, it
+prints a warning that no call will be held for human approval.
+
+### Policy file format
+
+`--policy` takes a `noa.policy/0.2` document: the same format `createProxyServer({ policy })` and
+`noa-mcp-adapter-core`'s `preCheck` take, checked by the same validator.
+
+```json
+{
+  "spec": "noa.policy/0.2",
+  "id": "my-tools-v1",
+  "requiredPaths": ["action"],
+  "rules": [
+    { "id": "allow-search_docs", "when": { "op": "eq", "path": "action", "value": "search_docs" }, "then": "ALLOW" },
+    { "id": "small-refunds-only", "when": { "op": "and", "clauses": [
+        { "op": "eq", "path": "action", "value": "refund" },
+        { "op": "lt", "path": "args.amountMinor", "value": 10000 } ] }, "then": "ALLOW" }
+  ]
+}
+```
+
+- `action` is the tool name; `args.<name>` is a tool argument (nested: `args.a.b`). Integers only.
+- Operators: `eq ne lt le gt ge` (`value`), `in` (`values`), `exists absent`, `and or` (`clauses`),
+  `not` (`clause`). A verdict is `ALLOW` or `DENY`.
+- The first matching rule decides. A call no rule matches is **denied**.
+- The grammar is closed: an unknown or duplicate key is an error, so JSON comments are not possible.
+- Known limit: the file is read once, at start, so an edit takes effect only when the proxy restarts.
+
+The file is read and checked when the proxy starts. If it cannot be used, the proxy does not start;
+it exits `1` with one stderr line that names the file, the field and the fix, led by a stable code:
+`[POLICY_UNREADABLE]` (missing, a symlink, not owned by you, group/other-writable, too large),
+`[POLICY_UNPARSABLE]` (not JSON), `[POLICY_INVALID]` (not a valid policy) or
+`[POLICY_APPROVAL_MISMATCH]` (an exact-match approval rule names a tool no policy rule names), for
+example:
+
+```
+noa-mcp-proxy: fatal — Error: [POLICY_INVALID] --policy "noa/policy.json": policy.rules[0].then: must be exactly "ALLOW" or "DENY" — fix the named field(s); the format is described in the noa-mcp-proxy README, "Use your own tools"
+```
+
 ## Flags (all optional)
 
 | Flag | Default | Meaning |
 |---|---|---|
+| `--policy <file.json>` | built-in demo policy, with a stderr warning | the `noa.policy/0.2` document that decides every call (see **Policy file format** above). Validated at startup; an unusable file stops the proxy with a stable code. A tool the policy does not name is denied. |
 | `--session-id <id>` | fresh `randomUUID()` | receipt-chain session id |
 | `--tenant <name>` | `"default-tenant"` | receipt `scope.tenant` |
 | `--agent-id <id>` | the session id | STATIC `receipt.agent.id` — never read from a tool call's own arguments |
 | `--receipt-log <path>` | (none) | append each DECISION receipt as one JSON line, written via a non-blocking, per-file-ordered `fs.promises.appendFile` |
-| `--outcome-log <path>` | (none) | (R2) append each POST-execution OUTCOME receipt as one JSON line (same non-blocking appender). For this static single-key CLI path, pass the parsed `--keyring-file` map as `verifyOutcomeReceipt(..., { verification })`. |
+| `--outcome-log <path>` | (none) | (R2) append each POST-execution OUTCOME receipt as one JSON line (same non-blocking appender). Verify it with `noa-mcp-proxy verify-outcome <file> --keyring <keyring-file>`, or in code by passing the parsed `--keyring-file` map as `verifyOutcomeReceipt(..., { verification })`. |
 | `--http-port <n>` | (none — stdio) | (R2) serve over HTTP+SSE (Streamable HTTP) on this port INSTEAD of stdio. Each MCP session gets its own downstream connection + receipt chain, fronted by the same fail-closed gate as stdio. |
 | `--http-host <host>` | `127.0.0.1` | (R2) bind address for `--http-port` (loopback only by default; set `0.0.0.0` deliberately to expose beyond localhost). |
 | `--keyring-file <path>` | (none) | write `{ [kid]: publicKey }` once at startup for an external verifier. Written through an `O_NOFOLLOW` descriptor (see **Config-artifact integrity** below), so a symlink planted at this path cannot turn the startup write into "clobber any file this process can write". |
@@ -107,37 +204,44 @@ Enable the gate by giving `--approval-rules`, `--pending-store`, and (required) 
 
 ### Getting started: `proxy.mjs init`
 
-`node src/proxy.mjs init [--dir <path>] [--force]` scaffolds the four inputs the gate above needs
-to START — `approval-rules.json` (a starter rule matching the bundled demo's `transfer_funds`
-tool), `pending-store.jsonl` (empty), and a fresh `approver-key.json` / `approver-keyring.json`
-identity pair (private key mode `0600`, written through the same hardened key-file loader
-`packages/signer-sidecar` uses). Refuses to touch a directory that already has any of the four
-files unless `--force` is given, in which case it regenerates all four, including a brand-new
-approver identity.
+`noa-mcp-proxy init [--dir <path>] [--allow-tool <name>] [--approval-tool <name>] [--block-tool <name>] [--force]`
+writes five files: a starter `policy.json` for `--policy` (one allowed tool, one held for approval,
+one blocked; placeholder names unless you pass your own), and the four inputs the gate above needs
+to START — `approval-rules.json` (holds every call of the approval tool, the same name as in
+`policy.json`), `pending-store.jsonl`
+(empty), and a fresh `approver-key.json` / `approver-keyring.json` identity pair (private key mode
+`0600`, written through the same hardened key-file loader `packages/signer-sidecar` uses). It then
+prints the one-line start command and an MCP config snippet. Refuses to touch a directory that
+already has any of the five files unless `--force` is given, in which case it regenerates all five,
+including a brand-new approver identity.
 
 **This is scaffolding, not activation — read this before running it.** `init` does not wire an MCP
-host's config, does not adapt the starter rule to your own tools' action ids, and does not perform
+host's config, does not rename the placeholders to your own tools' names, and does not perform
 any approval. Turning the gate on for real still needs, in order: (1) an MCP host actually launched
 with this proxy wrapping your downstream, pointed at the generated files; (2) your OWN
-`approval-rules.json` matching your OWN tools (the generated rule matches nothing you own until you
-edit it); (3) a real human running `noa-approve` out-of-band, holding `approver-key.json`, for every
+`policy.json` and `approval-rules.json` naming your OWN tools (the placeholders match nothing you
+own until you rename them); (3) a real human running `noa-approve` out-of-band, holding `approver-key.json`, for every
 held call; (4) the agent retrying the *identical* call once approved. Skipping any of the four means
-nothing is protected. `init`'s own `--help` output repeats this exact sequence with the literal
-paths it just generated.
+nothing is protected. `init`'s own output repeats this sequence with the literal paths it just
+generated.
 
 ## Layout
 
 - `src/demo-downstream.mjs` — a small ordinary MCP server (3 tools: `echo`, `read_data`,
   `transfer_funds`) standing in for "the user's existing server". Imports only the MCP SDK.
-- `src/policy.mjs` — the demo governance policy for those 3 tools.
+- `src/policy.mjs` — the demo governance policy for those 3 tools, and the starter files `init`
+  writes.
+- `src/policy-file.mjs` — loads and validates `--policy <file.json>`, fail-closed.
 - `src/create-proxy-server.mjs` — the reusable core: builds one governed `Server` in front of one
   connected downstream `Client`. Both `proxy.mjs` and the smoke test use this exact module. Emits
   the decision receipt AND (R2) the post-execution outcome receipt, and forwards
   `tools/list_changed` + streaming progress.
 - `src/proxy.mjs` — the CLI entrypoint (`command: node`, `args: [proxy.mjs, --, ...]`); also
-  dispatches the `init` subcommand below.
-- `src/init.mjs` — `proxy.mjs init`: scaffolds the human-approval gate's four inputs (see "Getting
-  started" above). Scaffolding, not activation — its own doc comment states exactly what still has
+  dispatches the `init` and `verify-outcome` subcommands.
+- `src/init.mjs` — `proxy.mjs init`: writes the starter policy and the human-approval gate's four
+  inputs (see "Getting started" above).
+- `src/verify-outcome-cli.mjs` — `proxy.mjs verify-outcome`: offline outcome-receipt verification
+  (a command-line front of `verifyOutcomeReceipt`). Scaffolding, not activation — its own doc comment states exactly what still has
   to happen for real.
 - `src/http-server.mjs` — (R2) the HTTP+SSE (Streamable HTTP) front transport; a pure transport
   adapter that fronts the SAME `createProxyServer` gate as stdio (the gate is not forked per

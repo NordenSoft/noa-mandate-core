@@ -22,6 +22,7 @@ import { buildApprovalReceipt, buildDenialReceipt, DEFAULT_APPROVAL_TICKET_TTL_M
 import { opaqueApproverId } from "./opaque-id.mjs";
 import { loadOrCreateKeyFile } from "./key-file.mjs";
 import { describeThrown } from "./safe-throw.mjs";
+import { isEntryPoint } from "./entry-point.mjs";
 
 import { intrinsics } from "noa-receipt";
 
@@ -264,6 +265,9 @@ export function runApproveCli(argv) {
   return 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Through `isEntryPoint`, not a raw `import.meta.url === file://argv[1]` comparison: npm runs this
+// file through a `node_modules/.bin` SYMLINK, and the raw comparison skipped the body there and exited
+// 0 with nothing recorded (see entry-point.mjs).
+if (isEntryPoint(import.meta.url)) {
   process.exit(runApproveCli(process.argv.slice(2)));
 }

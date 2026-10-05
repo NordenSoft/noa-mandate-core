@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, statSync, symlinkSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname, delimiter } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { generateKeyPair, verifyChain } from "noa-receipt";
 import { b } from "./helpers/bytes.mjs";
@@ -341,6 +343,33 @@ test("runApproveCli: two genuinely different paths are NOT refused — the alias
 
   assert.equal(runApproveCli(["approve", "--id", deferred.id, "--by", "jane@acme.example", "--pending-store", pendingStorePath, "--key-file", join(dir, "k.json"), "--receipt-log", receiptLogPath]), 0);
   assert.equal(loadPendingIndex(pendingStorePath).get(deferred.id).status, "approved");
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// npm installs `noa-approve` as a SYMLINK in a `.bin` directory. The old entry check compared
+// `import.meta.url` with that symlink path, never matched, skipped the body and exited 0 with NOTHING
+// recorded. This runs the real file through a real symlink, exactly as npm would, and asserts the
+// EFFECT (the hold is approved in the pending store), not just the exit code.
+test("noa-approve run through an npm-style bin SYMLINK actually records the approval (not a silent exit 0)", () => {
+  const dir = tmpDir();
+  const binDir = join(dir, "node_modules", ".bin");
+  mkdirSync(binDir, { recursive: true });
+  const link = join(binDir, "noa-approve");
+  symlinkSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "approve-cli.mjs"), link);
+  const pendingStorePath = join(dir, "pending.jsonl");
+  const agentKp = generateKeyPair("agent-cli-bin-link");
+  const deferred = seedDeferred(pendingStorePath, { kid: agentKp.kid, privateKey: agentKp.privateKey });
+
+  const run = spawnSync(link, ["approve", "--id", deferred.id, "--by", "jane@acme.example", "--pending-store", pendingStorePath, "--key-file", join(dir, "k.json")], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: dirname(process.execPath) + delimiter + (process.env.PATH ?? "") },
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, new RegExp(`^APPROVED ${deferred.id} -> `));
+  const rec = loadPendingIndex(pendingStorePath).get(deferred.id);
+  assert.equal(rec.status, "approved", "the approval must be recorded in the pending store");
+  assert.equal(rec.allowedReceipt.governance.verdict, "ALLOWED");
 
   rmSync(dir, { recursive: true, force: true });
 });

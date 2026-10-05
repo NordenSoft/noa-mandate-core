@@ -699,6 +699,8 @@ const ADAPTER_CORE_TCB = [
   "packages/adapter-core/src/tool-outcome-not-recorded.mjs", // security discriminator for already-run tools
 ];
 const ADAPTER_CORE_OUT_OF_TCB = {
+  "packages/adapter-core/src/entry-point.mjs":
+    "decides only whether a CLI's own body runs; a wrong answer can only SKIP the command (nothing is signed or recorded, a held call stays held) and never produces, alters or adopts a verdict",
   "packages/adapter-core/src/index.mjs":
     "re-export surface only; declares no rule and makes no runtime decision",
   "packages/adapter-core/src/safe-throw.d.ts":
@@ -769,8 +771,10 @@ const MCP_PROXY_TCB = [
   "packages/mcp-proxy/src/init.mjs",
   "packages/mcp-proxy/src/outcome-receipt.mjs",     // signed outcome construction and verification
   "packages/mcp-proxy/src/policy.mjs",              // shipped proxy governance and approval policy
+  "packages/mcp-proxy/src/policy-file.mjs",         // loads and validates the operator's --policy (fail-closed)
   "packages/mcp-proxy/src/proxy.mjs",               // key handling and fail-closed authorization configuration
   "packages/mcp-proxy/src/rotatable-signer.mjs",    // signing-key lifecycle and retirement authority
+  "packages/mcp-proxy/src/verify-outcome-cli.mjs",  // outcome-receipt VALID/TAMPERED/MALFORMED verdict
 ];
 const MCP_PROXY_OUT_OF_TCB = {
   "packages/mcp-proxy/src/demo-downstream.mjs":
