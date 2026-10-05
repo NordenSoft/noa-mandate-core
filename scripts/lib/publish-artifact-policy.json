@@ -23,8 +23,8 @@
       "name": "noa-mcp-adapter-core",
       "noticeTitle": "NOA MCP Adapter Core — shared pre-flight governance for MCP integrations",
       "packagePath": "packages/adapter-core",
-      "pathCount": 25,
-      "pathSetSha256": "ae135ff3a43c913da375296f84cc9123952332e509fc1664d3cfe4ab008a44c8"
+      "pathCount": 26,
+      "pathSetSha256": "0e158ddf2e077e2189efc490bee7f1f700f46693e5cdb490be031c483b489064"
     },
     {
       "name": "noa-approval-artifacts",
@@ -44,8 +44,8 @@
       "name": "noa-mcp-proxy",
       "noticeTitle": "NOA MCP Proxy — fail-closed governance proxy for MCP tool calls",
       "packagePath": "packages/mcp-proxy",
-      "pathCount": 13,
-      "pathSetSha256": "f25c48ef25700bc44cb2ecf170ff3d933428e6ba6f06a85e063c5a9a0ed6af69"
+      "pathCount": 15,
+      "pathSetSha256": "b4eecbdc10418271355bc989dded94246fb6054a518973a9a8b8fd92398c24d7"
     },
     {
       "name": "noa-rail-x402",
