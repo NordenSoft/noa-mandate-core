@@ -109,7 +109,12 @@
  *
  * Fail-closed at startup: if the downstream command cannot be spawned or fails MCP
  * initialization, this process logs to stderr and exits non-zero WITHOUT ever starting to serve
- * the host — there is no partially-working proxy state.
+ * the host — there is no partially-working proxy state. A downstream that has not answered MCP
+ * initialize within DOWNSTREAM_INITIALIZE_TIMEOUT_MS (30 s) counts as failed.
+ *
+ * Lifecycle (stdio mode): the host closing stdin, SIGTERM/SIGINT/SIGHUP, the downstream connection
+ * closing and every startup failure end in ONE shutdown path, which stops the downstream this
+ * process started before exiting — see the stdio section of main().
  */
 import { randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
@@ -134,14 +139,27 @@ import { intrinsics } from "noa-mcp-adapter-core";
 // swallow a parsed flag and answer the read with a path of its own choosing — with no builtin
 // replaced at all. See scripts/lint-inert-containers.mjs.
 const { isFiniteNumber, jsonParse, jsonStringify, arrayIndexOf, arraySlice, toNumber, strIncludes,
-        objectSetPrototypeOf } = intrinsics;
+        objectSetPrototypeOf, objectDefineProperty } = intrinsics;
 
-// Captured ONCE at module load, same reasoning as the intrinsics destructure just above: `process`
-// and `Promise` have no wrapper in the shared intrinsics bundle (host object / language builtin the
-// kernel doesn't wrap), so they are captured locally here instead of read live from inside `main()`
-// and its callbacks, which all run at CALL time, not load time.
+// Captured ONCE at module load, same reasoning as the intrinsics destructure just above: `process`,
+// `Promise` and the timer functions have no wrapper in the shared intrinsics bundle (host objects /
+// language builtins the kernel doesn't wrap), so they are captured locally here instead of read live
+// from inside `main()` and its callbacks, which all run at CALL time, not load time.
 const PROCESS = process;
 const PROMISE = Promise;
+const SET_TIMEOUT = setTimeout;
+const CLEAR_TIMEOUT = clearTimeout;
+
+// The downstream must answer MCP initialize within this bound, or the proxy fails closed: it stops
+// the downstream and exits 1 without ever serving the host. Fixed and documented in the README.
+// 30 s is half the MCP SDK client's own default request timeout (60 s), so a host built on that SDK
+// gets this process's explicit refusal and exit rather than its own generic timeout, and it leaves
+// room for a downstream launched through a package runner that fetches the server on first start.
+const DOWNSTREAM_INITIALIZE_TIMEOUT_MS = 30_000;
+// How long a shutdown waits, after the SDK transport's close() returns, for the child process to be
+// reaped; and the bound on the whole shutdown, whatever happens beneath it.
+const CHILD_REAP_WAIT_MS = 2_000;
+const SHUTDOWN_BACKSTOP_MS = 10_000;
 
 function parseArgs(argv) {
   const sepIndex = arrayIndexOf(argv, "--");
@@ -468,20 +486,96 @@ async function main() {
   }
 
   // Default: stdio front transport, one session for this process.
+  //
+  // ── ONE SHUTDOWN PATH ──────────────────────────────────────────────────────────────────────────
+  // MEASURED on 0.5.0 (Node 22, a healthy downstream after a full MCP handshake): the proxy was
+  // still running 8 s after the host closed its stdin; after SIGTERM the proxy died and a downstream
+  // that does not exit on stdin EOF lived on with parent pid 1; a downstream that never answered
+  // initialize held the proxy for the SDK's implicit 60 s and was then left running the same way.
+  //
+  // The host closing stdin, SIGTERM/SIGINT/SIGHUP, the downstream connection closing, a downstream
+  // that misses the initialize bound and a failed connect now all call shutdown(), which acts once.
+  // It stops reading the host, then closes the downstream through the SDK transport. That close()
+  // drops the transport's process handle before anything else, so every later send is refused
+  // ("Not connected") and nothing is forwarded once shutdown has begun; it then ends the child's
+  // stdin, sends SIGTERM after 2 s and SIGKILL after 2 s more. The child is signalled only through
+  // that transport's own ChildProcess handle, which Node stops using once the child is reaped, and
+  // never by a bare pid, so no other process can be hit. The proxy exits after the child has been
+  // reaped (or the bound has passed): 0 after the host closed stdin, 128+n after signal n, 1 on
+  // every other path. No session state is ended here, so a --session-dir store keeps its on-disk
+  // position exactly as before and a restart still resumes the same chain segment.
+  const downstreamTransport = makeDownstreamTransport();
+  let shuttingDown = false;
+  let connected = false;
+  let initializeTimer;
+  let markDownstreamClosed;
+  const downstreamClosed = new PROMISE((resolve) => {
+    markDownstreamClosed = resolve;
+  });
+  const shutdown = (line, exitCode) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    CLEAR_TIMEOUT(initializeTimer);
+    console.error(line);
+    PROCESS.stdin.pause();
+    SET_TIMEOUT(() => PROCESS.exit(exitCode), SHUTDOWN_BACKSTOP_MS);
+    // Read before close(), which clears it: null when no child was spawned or it has already closed.
+    const childRunning = downstreamTransport.pid !== null;
+    const exit = () => PROCESS.exit(exitCode);
+    downstreamTransport
+      .close()
+      .then(() => (childRunning ? PROMISE.race([downstreamClosed, new PROMISE((resolve) => SET_TIMEOUT(resolve, CHILD_REAP_WAIT_MS))]) : undefined))
+      .then(exit, exit);
+  };
+  // Defined BEFORE connect: the SDK's Protocol.connect keeps an onclose handler that is already on
+  // the transport and calls it first whenever the child process closes, during connect or after it.
+  // An own data property (no [[Set]], so no prototype-chain accessor can swallow it — L11), writable
+  // because Protocol.connect then replaces it with its wrapper.
+  objectDefineProperty(downstreamTransport, "onclose", {
+    value: () => {
+      markDownstreamClosed();
+      shutdown(
+        connected
+          ? "noa-mcp-proxy: fatal — the downstream MCP connection closed; stopping (fail closed)"
+          : "noa-mcp-proxy: fatal — could not establish the downstream MCP connection: the downstream process exited before MCP initialize completed",
+        1,
+      );
+    },
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+  // Exit 128 + the POSIX signal number (SIGHUP 1, SIGINT 2, SIGTERM 15).
+  const onSignal = (signal, exitCode) => shutdown(`noa-mcp-proxy: received ${signal}; stopping the downstream and exiting`, exitCode);
+  PROCESS.on("SIGTERM", () => onSignal("SIGTERM", 143));
+  PROCESS.on("SIGINT", () => onSignal("SIGINT", 130));
+  PROCESS.on("SIGHUP", () => onSignal("SIGHUP", 129));
+  initializeTimer = SET_TIMEOUT(
+    () => shutdown(`noa-mcp-proxy: fatal — the downstream did not answer MCP initialize within ${DOWNSTREAM_INITIALIZE_TIMEOUT_MS} ms; stopping it (fail closed, nothing was served)`, 1),
+    DOWNSTREAM_INITIALIZE_TIMEOUT_MS,
+  );
+
   let proxy;
   try {
     proxy = await createProxyServer({
       sessionId,
-      downstreamTransport: makeDownstreamTransport(),
+      downstreamTransport,
       ...gateConfig,
     });
   } catch (err) {
     // Fail-closed at startup: never expose a half-connected proxy to the host.
-    console.error(`noa-mcp-proxy: fatal — could not establish the downstream MCP connection: ${describeThrown(err)}`);
-    PROCESS.exit(1);
+    shutdown(`noa-mcp-proxy: fatal — could not establish the downstream MCP connection: ${describeThrown(err)}`, 1);
     return;
   }
+  CLEAR_TIMEOUT(initializeTimer);
+  // A signal or the initialize bound may have started a shutdown while connect was finishing.
+  if (shuttingDown) return;
+  connected = true;
 
+  // The SDK's StdioServerTransport reads stdin but never reacts to its end, so the host closing
+  // stdin (the MCP stdio way to ask a server to stop) is handled here. Registered before the
+  // transport starts reading, so an end that is already pending is not missed.
+  PROCESS.stdin.once("end", () => shutdown("noa-mcp-proxy: the host closed stdin; stopping the downstream and exiting", 0));
   const frontTransport = new StdioServerTransport();
   await proxy.server.connect(frontTransport);
 }

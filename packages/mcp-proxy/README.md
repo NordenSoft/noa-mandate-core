@@ -25,8 +25,12 @@ would have spawned it directly. The proxy:
   additive: it is not chained into the decision hash-chain, so the decision receipt is byte-unchanged;
 - (R2) serves over **HTTP+SSE** (`--http-port`) as well as stdio (default), forwards downstream
   `tools/list_changed`, and streams downstream **progress** notifications through to the host;
-- fails closed if the downstream can't be reached/initialized at startup, or if the downstream
-  connection breaks after an ALLOW decision;
+- fails closed if the downstream can't be reached/initialized at startup (it must answer MCP
+  `initialize` within 30 s), or if the downstream connection breaks after an ALLOW decision;
+- (stdio) stops the downstream it started before it exits: when the host closes the proxy's stdin
+  (exit `0`), on `SIGTERM`/`SIGINT`/`SIGHUP` (exit `128+n`), and when the downstream connection
+  closes (exit `1`). The downstream's stdin is closed first, then `SIGTERM` follows after 2 s and
+  `SIGKILL` after 2 s more;
 - gives the policy visibility into the FULL tool-call arguments (not just `action`/`amountMinor`),
   under an `args.*` scalar-path prefix — see [`noa-mcp-adapter-core`](../adapter-core)'s README;
 - bounds session-state growth: an idle session is dropped after a TTL, a session's chain state is
@@ -406,7 +410,7 @@ logic) — redirecting those damages the audit trail, not the approval verdict.
 - **The MCP SDK requires subpath imports — a bare import is broken at the pinned version.** Every
   import in this package uses a specific subpath (`@modelcontextprotocol/sdk/client/index.js`,
   `/server/index.js`, `/types.js`, `/client/stdio.js`, `/server/stdio.js`, `/inMemory.js`), never a
-  bare `import { Client } from "@modelcontextprotocol/sdk"`. At the pinned SDK version (1.29.0)
+  bare `import { Client } from "@modelcontextprotocol/sdk"`. At the pinned SDK version (1.32.0)
   the bare form THROWS: the package's own `package.json` `exports` map advertises a root `"."`
   export pointing at `dist/esm/index.js`, but that file is not actually present in the published
   package — `node -e "import('@modelcontextprotocol/sdk')"` fails with `Cannot find module`.
