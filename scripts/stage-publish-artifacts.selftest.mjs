@@ -874,6 +874,83 @@ try {
     );
   });
 
+  check("release manifests transform local sibling links in every dependency field, optional ones included", () => {
+    // The shape of the MCP packages: a subpackage that links another subpackage and the root, and a
+    // subpackage that links a sibling as an optional dependency.
+    const source = fakeGitSource({
+      "package.json": { name: "noa-root", version: "2.3.4" },
+      "packages/core/package.json": { name: "noa-core", version: "0.5.0", dependencies: { "noa-root": "file:../.." } },
+      "packages/side/package.json": {
+        name: "noa-side", version: "0.1.0", dependencies: { "noa-core": "file:../core", "noa-root": "file:../.." },
+      },
+      "packages/proxy/package.json": {
+        name: "noa-proxy",
+        version: "0.5.0",
+        dependencies: { "noa-core": "file:../core" },
+        optionalDependencies: { "noa-side": "file:../side" },
+        peerDependencies: { "noa-root": "file:../.." },
+      },
+    });
+    const planned = planReleaseManifests(derivePackageInventory(source), FIXTURE_PLANNING_POLICY);
+    const byName = new Map(planned.map((entry) => [entry.name, entry]));
+    const linkRewrites = (name) => byName.get(name).transformations.filter((transformation) => transformation.field !== "repository");
+    assert.deepEqual(byName.get("noa-proxy").releaseManifest.optionalDependencies, { "noa-side": "^0.1.0" });
+    assert.deepEqual(byName.get("noa-proxy").releaseManifest.peerDependencies, { "noa-root": "^2.3.4" });
+    assert.deepEqual(linkRewrites("noa-proxy"), [
+      { field: "dependencies", from: "file:../core", name: "noa-core", targetPath: "packages/core", to: "^0.5.0" },
+      { field: "optionalDependencies", from: "file:../side", name: "noa-side", targetPath: "packages/side", to: "^0.1.0" },
+      { field: "peerDependencies", from: "file:../..", name: "noa-root", targetPath: ".", to: "^2.3.4" },
+    ]);
+    assert.deepEqual(byName.get("noa-side").releaseManifest.dependencies, { "noa-core": "^0.5.0", "noa-root": "^2.3.4" });
+    assert.deepEqual(linkRewrites("noa-side"), [
+      { field: "dependencies", from: "file:../core", name: "noa-core", targetPath: "packages/core", to: "^0.5.0" },
+      { field: "dependencies", from: "file:../..", name: "noa-root", targetPath: ".", to: "^2.3.4" },
+    ]);
+    // An optional link to a directory that holds no publishable package is refused, never kept.
+    const unpublished = fakeGitSource({
+      "package.json": { name: "noa-root", version: "2.3.4" },
+      "packages/proxy/package.json": { name: "noa-proxy", version: "0.5.0", optionalDependencies: { "noa-side": "file:../side" } },
+      "packages/side/package.json": { name: "noa-side", version: "0.1.0", private: true },
+    });
+    expectValidation(
+      () => planReleaseManifests(derivePackageInventory(unpublished), FIXTURE_PLANNING_POLICY),
+      /optionalDependencies\.noa-side targets non-publishable packages\/side/u,
+    );
+  });
+
+  check("release manifests turn this repository's MCP package links into carets of the linked versions", () => {
+    // Read from the committed tree with the real policy: noa-mcp-proxy links noa-mcp-adapter-core and,
+    // optionally, noa-signer-sidecar; noa-signer-sidecar links noa-mcp-adapter-core and the kernel.
+    const planned = planReleaseManifests(derivePackageInventory(loadGitSource(REPO_ROOT, "HEAD")), loadPublishArtifactPolicy());
+    const byName = new Map(planned.map((entry) => [entry.name, entry]));
+    const caretOf = (name) => {
+      const entry = byName.get(name);
+      assert.ok(entry, `${name} is not a publishable package of this repository`);
+      assert.match(entry.version, /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u, `${name} has no plain release version`);
+      return `^${entry.version}`;
+    };
+    const expected = {
+      "noa-mcp-proxy": [
+        ["dependencies", "noa-mcp-adapter-core", "file:../adapter-core", "packages/adapter-core"],
+        ["optionalDependencies", "noa-signer-sidecar", "file:../signer-sidecar", "packages/signer-sidecar"],
+      ],
+      "noa-signer-sidecar": [
+        ["dependencies", "noa-mcp-adapter-core", "file:../adapter-core", "packages/adapter-core"],
+        ["dependencies", "noa-receipt", "file:../..", "."],
+      ],
+    };
+    for (const [owner, links] of Object.entries(expected)) {
+      const entry = byName.get(owner);
+      assert.ok(entry, `${owner} is not a publishable package of this repository`);
+      const rewrites = entry.transformations.filter((transformation) => transformation.field !== "repository");
+      assert.deepEqual(rewrites, links.map(([field, name, from, targetPath]) => ({ field, from, name, targetPath, to: caretOf(name) })),
+        `${owner}: the local links were not each rewritten to a caret of the linked version`);
+      for (const [field, name] of links) {
+        assert.equal(entry.releaseManifest[field][name], caretOf(name), `${owner} ${field}.${name} keeps another value`);
+      }
+    }
+  });
+
   check("release manifest planning rejects path escape and mismatched dependency identity", () => {
     const escaped = fakeGitSource({
       "package.json": { name: "noa-root", version: "1.0.0" },
