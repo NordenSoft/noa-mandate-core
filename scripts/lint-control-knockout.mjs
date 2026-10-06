@@ -2935,6 +2935,283 @@ const KNOCKOUTS = [
     }],
     suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
   },
+  // MCP release controller arms (.github/workflows/release-npm-mcp.yml). The file is digest-pinned
+  // like the receipt controller, and that digest check fires on every mutation below under its own
+  // name. The first nine mirror the receipt controller's arms; the rest remove the MCP controller's
+  // own controls: the closed package list, the release order and the dependency refusals.
+  {
+    id: "mcp-release-controller-stage-mints-no-oidc",
+    control:
+      "MCP release controller — the stage job runs repository code and holds read scopes only. Granting " +
+      "it id-token would let repository code mint the publish credential. Detector: the MCP " +
+      "knockout-selftest check on OIDC placement.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "      pull-requests: read\n",
+    replace: "      pull-requests: read\n      id-token: write\n",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller mints OIDC only in the environment-gated publish job",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-publish-requires-environment",
+    control:
+      "MCP release controller — the only OIDC-capable job runs behind the npm-release environment. " +
+      "Removing the environment line leaves an ungated OIDC job. Detector: the MCP knockout-selftest " +
+      "check on OIDC placement.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "    environment: npm-release\n",
+    replace: "",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller mints OIDC only in the environment-gated publish job",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-publish-checks-out-nothing",
+    control:
+      "MCP release controller — the publish job never checks out the repository, so no repository byte " +
+      "runs while an OIDC token can be minted. Detector: the MCP knockout-selftest check on the publish " +
+      "job.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "    environment: npm-release\n    permissions:\n      id-token: write\n    steps:\n",
+    replace: "    environment: npm-release\n    permissions:\n      id-token: write\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller publish runs no repository code and publishes only the staged bytes",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-publishes-only-staged-bytes",
+    control:
+      "MCP release controller — publish compares the downloaded tarball's sha512 with the stage output " +
+      "before npm stage publish. Detector: the MCP knockout-selftest check on the publish job.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "            test \"sha512-$(openssl dgst -sha512 -binary \"$tarball\" | base64 -w0)\" = \"$STAGED_INTEGRITY\" ||\n",
+    replace: "            true ||\n",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller publish runs no repository code and publishes only the staged bytes",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-dispatch-only",
+    control:
+      "MCP release controller — workflow_dispatch is the only trigger. A tag trigger would run the " +
+      "workflow bytes of whatever commit a tag names. Detector: the MCP knockout-selftest check on the " +
+      "trigger and commit binding.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "on:\n  workflow_dispatch:\n",
+    replace: "on:\n  push:\n    tags: [v1]\n  workflow_dispatch:\n",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller is dispatch-only and bound to the named commit on main",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-binds-named-commit",
+    control:
+      "MCP release controller — stage refuses unless github.sha equals the full commit the dispatcher " +
+      "named. Detector: the MCP knockout-selftest check on the trigger and commit binding.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "          [[ \"$INPUT_COMMIT\" =~ ^[0-9a-f]{40}$ ]] || { echo \"::error::INPUT_COMMIT is malformed\"; exit 1; }\n          test \"$GITHUB_SHA\" = \"$INPUT_COMMIT\"\n",
+    replace: "          [[ \"$INPUT_COMMIT\" =~ ^[0-9a-f]{40}$ ]] || { echo \"::error::INPUT_COMMIT is malformed\"; exit 1; }\n",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller is dispatch-only and bound to the named commit on main",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-requires-minimum-contexts",
+    control:
+      "MCP release controller — stage refuses a live ruleset that no longer requires every (context, " +
+      "app) pair of the pinned minimum set. Detector: the MCP knockout-selftest check that executes the " +
+      "source binding.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "select(any(.[]; .context == $c and .integration_id == $a) | not)",
+    replace: "select(false)",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller source binding refuses every unmet condition when executed",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-publish-requires-live-main",
+    control:
+      "MCP release controller — right before npm stage publish, the live main ref must still be the " +
+      "released commit. Detector: the MCP knockout-selftest check that executes the publish step.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "          test \"$live_main\" = \"$INPUT_COMMIT\" ||\n",
+    replace: "          test -n \"$live_main\" ||\n",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller publish reaches npm only with the staged bytes on live main when executed",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-reads-every-check-run",
+    control:
+      "MCP release controller — every page of check runs is read and the collected count must equal the " +
+      "reported total before success is judged. Detector: the MCP knockout-selftest check that executes " +
+      "the source binding.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: " and ([.[].check_runs[]] | length) == .[0].total_count' <<<\"$runs\" >/dev/null ||",
+    replace: "' <<<\"$runs\" >/dev/null ||",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller source binding refuses every unmet condition when executed",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-closed-package-list",
+    control:
+      "MCP release controller — the stage guard accepts exactly noa-mcp-adapter-core and noa-mcp-proxy. " +
+      "A wider pattern lets one dispatch release another package (noa-receipt, or any noa-* name) under " +
+      "this workflow's trusted-publisher binding. Detector: the MCP knockout-selftest check that " +
+      "executes the stage guard with names outside the list.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "{ echo \"::error::INPUT_VERSION is malformed\"; exit 1; }\n          [[ \"$INPUT_PACKAGE\" =~ ^(noa-mcp-adapter-core|noa-mcp-proxy)$ ]]",
+    replace: "{ echo \"::error::INPUT_VERSION is malformed\"; exit 1; }\n          [[ \"$INPUT_PACKAGE\" =~ ^noa-[a-z-]+$ ]]",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller stage guard refuses a foreign ref, commit or event when executed",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-publish-closed-package-list",
+    control:
+      "MCP release controller — publish maps each closed package to its directory and refuses every " +
+      "other name before npm runs. Without the refusal, a package outside the list whose tarball names " +
+      "itself consistently reaches npm stage publish. Detector: the MCP knockout-selftest check that " +
+      "executes the publish step.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "            *) echo \"::error::INPUT_PACKAGE is not a package this controller releases\"; exit 1 ;;\n          esac\n          tar -xzOf",
+    replace: "            *) directory=\"packages/${INPUT_PACKAGE}\" ;;\n          esac\n          tar -xzOf",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller publish reaches npm only with the staged bytes on live main when executed",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-sibling-must-be-released",
+    control:
+      "MCP release controller — release order: a dependency on a package this repository publishes must " +
+      "be a version the registry serves with status 200, so noa-mcp-proxy cannot be staged before " +
+      "noa-mcp-adapter-core is public. Detector: the MCP knockout-selftest check that executes the " +
+      "sibling step against a non-200 registry answer.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "            test \"$code\" = 200 ||\n",
+    replace: "            test -n \"$code\" ||\n",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller stage refuses a sibling dependency the registry does not serve when executed",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-sibling-census-nonempty",
+    control:
+      "MCP release controller — the sibling step refuses a staged manifest with no sibling dependency, " +
+      "so a census that found nothing cannot pass as a released order. Detector: the MCP " +
+      "knockout-selftest check that executes the sibling step.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "jq -e 'length > 0 and all(.[]; (.value",
+    replace: "jq -e 'all(.[]; (.value",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller stage refuses a sibling dependency the registry does not serve when executed",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-plain-registry-ranges",
+    control:
+      "MCP release controller — every entry in dependencies, optionalDependencies and peerDependencies must " +
+      "be a plain registry range, so an npm alias, a git, hosted-git or URL spec, or a workspace: spec cannot " +
+      "carry a package past the name-based sibling rule. Detector: the MCP knockout-selftest check that " +
+      "executes the step with each form under a name the sibling rule never reads.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "          test -z \"$unplain\" ||\n",
+    replace: "          test -n \"$INPUT_PACKAGE\" ||\n",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller stage refuses a dependency that is not a plain registry range when executed",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-refuses-local-path-dependency",
+    control:
+      "MCP release controller — the staged manifest is checked by the repository's local-path " +
+      "dependency lint, which refuses any remaining file:, link:, portal: or path specifier. Detector: " +
+      "the MCP knockout-selftest check that executes the dependency step.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "          node scripts/lint-publish-tarball-deps.mjs --manifest --dir \"$extracted/package\"\n",
+    replace: "",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller stage refuses a local-path dependency when executed",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
+  {
+    id: "mcp-release-controller-refuses-registry-reuse",
+    control:
+      "MCP release controller — stage refuses a version the registry ever held, including one published " +
+      "and later removed (the packument time map keeps it). Detector: the MCP knockout-selftest check " +
+      "that executes the version step.",
+    file: ".github/workflows/release-npm-mcp.yml",
+    find: "(.versions | has($v) | not) and (.time | has($v) | not)",
+    replace: "(.versions | has($v) | not)",
+    kind: "gate",
+    gateId: "knockout-selftest",
+    expectedGateFindings: [{
+      rule: "SELFTEST",
+      subject: "MCP release controller stage refuses a version the registry ever held when executed",
+    }],
+    suite: [".", "node", ["scripts/lint-control-knockout.selftest.mjs"]],
+  },
   {
     id: "k4-launch-coverage-counts-are-exact",
     control: "L4 evidence integrity — the launch-point coverage asserts EXACT counts, not merely that the sanitized launches it finds are sanitized. Without the count a launch point can disappear, or be added unsanitized, while the check stays green on its siblings — which is precisely how the npm publish launch went unnoticed.",

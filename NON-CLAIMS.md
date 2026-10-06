@@ -742,6 +742,10 @@ squash commit that was the tip of `main` when the workflow re-read it right befo
 human approved the run as the `npm-release` environment reviewer, and that a maintainer then approved
 the npm stage.
 
+`.github/workflows/release-npm-mcp.yml` releases `noa-mcp-adapter-core` and `noa-mcp-proxy` under the
+same model, one package per run. Every non-claim in this section applies to it as written for
+`noa-receipt`; NC-R1.7 covers the one check it adds.
+
 ### NC-R1.1 — A merged pull request is not evidence of code review
 
 The branch ruleset requires no approving review, and the required `review` context is dependency
@@ -789,6 +793,23 @@ reports ABSENT until a maintainer approves the stage. The provenance attestation
 signed inside the workflow when it stages. That npm publishes that attestation with the version on
 approval is npm's behaviour, not this repository's; the readback checks it afterwards, from the public
 registry, and refuses when it is missing or names another workflow, ref, commit or bytes.
+
+### NC-R1.7 — The MCP release order is checked against the registry, not against a release decision
+
+The MCP controller refuses a staged manifest that bundles dependencies or whose `dependencies`,
+`optionalDependencies` or `peerDependencies` hold anything other than a plain registry range (no npm
+alias, git, hosted-git, URL, `workspace:`, `file:` or `link:` spec, path or dist-tag), and it refuses
+an entry that names a package this repository publishes unless the value is one caret range of an
+exact version the registry serves. The range test is a character and prefix rule, not a full semver
+parser, and a third-party range still resolves at install time to whatever the registry then serves.
+The shared local-path lint and the staging policy refuse only local-path specifiers; the wider rule
+lives in the MCP controller alone. A satisfied sibling rule shows the dependency's version was public
+when the stage job ran. It does not show that the version was
+released through a controller, that its published bytes equal that package's source at the release
+commit, that it is the version a maintainer intended, or that it stays on the registry afterwards. Trusted-publisher bindings are provider settings the workflow cannot read: a
+binding of these packages to another workflow, such as the legacy `publish-mcp.yml` binding in the
+former Core repository until it is revoked, would let a version reach the registry without passing
+through this controller.
 
 ## 7. Changing this document
 

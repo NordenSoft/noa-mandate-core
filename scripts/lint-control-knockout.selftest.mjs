@@ -820,6 +820,8 @@ const CLOSED_WORKFLOW_SHA256 = Object.freeze({
   // The release controller is pinned whole as well; its controls are ALSO measured structurally
   // below, because a digest alone would make every knockout arm on the file vacuous.
   "release-npm-noa-receipt.yml": "3c623c2856bdaad4d9fa760f9ac1ff5bbb63ac72aa9d95af57c556eef1bfa02d",
+  // The MCP release controller is pinned whole the same way, and measured structurally below.
+  "release-npm-mcp.yml": "8d33d073da2a1a81eba9dca09fe45a98de49fa717603f6e305b7c7d9728ac1e4",
 });
 
 // Only LF is a line separator in the canonical production representation. Reject every other
@@ -1015,6 +1017,36 @@ const RELEASE_DOWNLOAD_ARTIFACT = "actions/download-artifact@3e5f45b2cfb9172054b
 const RELEASE_UPLOAD_ARTIFACT = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a";
 const RELEASE_CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
 
+// Two release controllers share the structural reader below. A profile names the only places where
+// a controller's bytes depend on the package it releases; everything else is pinned identically for
+// both. The MCP controller's own controls (the closed package list, the package directories and the
+// sibling-release order) are pinned again by mcpReleaseControllerProblems.
+const MCP_RELEASE_CONTROLLER_WORKFLOW = "release-npm-mcp.yml";
+const RECEIPT_RELEASE_PROFILE = Object.freeze({
+  workflow: RELEASE_CONTROLLER_WORKFLOW,
+  concurrency: "release-npm-noa-receipt",
+  inputs: Object.freeze({ commit: Object.freeze({ type: "string" }), version: Object.freeze({ type: "string" }) }),
+  guardEnv: Object.freeze({ INPUT_COMMIT: "${{ inputs.commit }}", INPUT_VERSION: "${{ inputs.version }}" }),
+  releaseDirectory: "noa-receipt-release",
+  unusedVersionLine: "jq -e --arg v \"$INPUT_VERSION\" '.name == \"noa-receipt\" and (.versions | has($v) | not) and (.time | has($v) | not)' \"$packument\" >/dev/null ||",
+  extraStageSteps: Object.freeze([]),
+});
+const MCP_RELEASE_PROFILE = Object.freeze({
+  workflow: MCP_RELEASE_CONTROLLER_WORKFLOW,
+  concurrency: "release-npm-mcp",
+  inputs: Object.freeze({
+    commit: Object.freeze({ type: "string" }),
+    package: Object.freeze({ type: "choice", options: "[noa-mcp-adapter-core, noa-mcp-proxy]" }),
+    version: Object.freeze({ type: "string" }),
+  }),
+  guardEnv: Object.freeze({
+    INPUT_COMMIT: "${{ inputs.commit }}", INPUT_PACKAGE: "${{ inputs.package }}", INPUT_VERSION: "${{ inputs.version }}",
+  }),
+  releaseDirectory: "noa-mcp-release",
+  unusedVersionLine: "jq -e --arg p \"$INPUT_PACKAGE\" --arg v \"$INPUT_VERSION\" '.name == $p and (.versions | has($v) | not) and (.time | has($v) | not)' \"$packument\" >/dev/null ||",
+  extraStageSteps: Object.freeze(["Require plain registry dependencies and released sibling versions"]),
+});
+
 /** A closed reader for the canonical block-YAML shape of one workflow file. */
 function parseCanonicalWorkflow(source) {
   const shape = [];
@@ -1123,7 +1155,7 @@ function pullRequestOnlyContexts(workflowDir, exclude) {
   return contexts;
 }
 
-function releaseControllerProblems(source, prOnlyContexts) {
+function releaseControllerProblems(source, prOnlyContexts, profile = RECEIPT_RELEASE_PROFILE) {
   const problems = [];
   const fail = (group, pin, detail) => problems.push({ group, pin, detail });
   const { root, shape } = parseCanonicalWorkflow(source);
@@ -1161,14 +1193,16 @@ function releaseControllerProblems(source, prOnlyContexts) {
   const inputs = workflowEntry(dispatch?.entries ?? [], "inputs");
   if (on?.value !== null || !sameSet(workflowKeys(on?.entries ?? []), ["workflow_dispatch"]) ||
       !sameSet(workflowKeys(dispatch?.entries ?? []), ["inputs"]) ||
-      !sameSet(workflowKeys(inputs?.entries ?? []), ["commit", "version"]) ||
+      !sameSet(workflowKeys(inputs?.entries ?? []), Object.keys(profile.inputs)) ||
       !(inputs?.entries ?? []).every((input) => {
         const fields = workflowMap(input);
-        return fields.required === "true" && fields.type === "string";
+        const expected = profile.inputs[input.key];
+        return expected !== undefined && fields.required === "true" && fields.type === expected.type &&
+          (fields.options ?? null) === (expected.options ?? null);
       })) {
-    fail("trigger", "TRG-DISPATCH-ONLY", "the only trigger is workflow_dispatch with required string inputs commit and version");
+    fail("trigger", "TRG-DISPATCH-ONLY", `the only trigger is workflow_dispatch with the required inputs ${Object.keys(profile.inputs).join(", ")}`);
   }
-  if (!sameMap(workflowMap(workflowEntry(top, "concurrency")), { group: "release-npm-noa-receipt", "cancel-in-progress": "false" })) {
+  if (!sameMap(workflowMap(workflowEntry(top, "concurrency")), { group: profile.concurrency, "cancel-in-progress": "false" })) {
     fail("trigger", "TRG-CONCURRENCY", "one serialized, never-cancelled release group");
   }
   const expectedJobKeys = {
@@ -1195,7 +1229,7 @@ function releaseControllerProblems(source, prOnlyContexts) {
   }
   const guard = steps("stage")[0];
   if (guard?.name !== "Refuse any dispatch other than the named commit on main" || guard.uses !== null ||
-      !sameMap(guard.env, { INPUT_COMMIT: "${{ inputs.commit }}", INPUT_VERSION: "${{ inputs.version }}" })) {
+      !sameMap(guard.env, profile.guardEnv)) {
     fail("trigger", "TRG-GUARD-FIRST", "the dispatch guard is the first stage step and reads inputs only through env");
   }
   if (!hasLine(guard?.run, 'test "$GITHUB_EVENT_NAME" = workflow_dispatch') ||
@@ -1289,7 +1323,7 @@ function releaseControllerProblems(source, prOnlyContexts) {
   const download = steps("publish").find((step) => step.uses === RELEASE_DOWNLOAD_ARTIFACT);
   if (!sameMap(download?.with, {
     name: "${{ needs.stage.outputs.artifact }}",
-    path: "${{ runner.temp }}/noa-receipt-release",
+    path: "${{ runner.temp }}/" + profile.releaseDirectory,
     "digest-mismatch": "error",
   })) {
     fail("publish", "PUB-DOWNLOAD", "publish downloads only the stage artifact and errors on a digest mismatch");
@@ -1305,7 +1339,7 @@ function releaseControllerProblems(source, prOnlyContexts) {
   const upload = steps("stage").find((step) => step.uses === RELEASE_UPLOAD_ARTIFACT);
   if (!sameMap(upload?.with, {
     name: "${{ steps.bind-bytes.outputs.artifact }}",
-    path: "${{ runner.temp }}/noa-receipt-release/",
+    path: "${{ runner.temp }}/" + profile.releaseDirectory + "/",
     "if-no-files-found": "error",
     "compression-level": "0",
     "retention-days": "1",
@@ -1388,7 +1422,7 @@ function releaseControllerProblems(source, prOnlyContexts) {
     fail("stage", "STG-EXACT-BOOTSTRAP", "staging runs the exact bootstrap from the release commit and verifies it");
   }
   const unused = stepNamed("stage", "Require the declared version, its changelog entry and an unused registry version");
-  if (!hasLine(unused?.run, "jq -e --arg v \"$INPUT_VERSION\" '.name == \"noa-receipt\" and (.versions | has($v) | not) and (.time | has($v) | not)' \"$packument\" >/dev/null ||")) {
+  if (!hasLine(unused?.run, profile.unusedVersionLine)) {
     fail("stage", "STG-UNUSED-VERSION", "the version was never published before");
   }
 
@@ -1399,7 +1433,7 @@ function releaseControllerProblems(source, prOnlyContexts) {
       !hasLine(readback?.run, 'test "$served" = "$STAGED_INTEGRITY" ||')) {
     fail("readback", "RB-INTEGRITY", "the registry integrity equals the staged integrity");
   }
-  if (!hasLine(readback?.run, 'const WORKFLOW = ".github/workflows/release-npm-noa-receipt.yml";') ||
+  if (!hasLine(readback?.run, `const WORKFLOW = ".github/workflows/${profile.workflow}";`) ||
       !hasLine(readback?.run, 'const REF = "refs/heads/main";') ||
       !hasLine(readback?.run, 'if (text("1.3.6.1.4.1.57264.1.13") !== INPUT_COMMIT) fail("the certificate names another source commit");')) {
     fail("readback", "RB-PROVENANCE", "identity is read from the verified bundle for this workflow file on main");
@@ -1418,7 +1452,8 @@ function releaseControllerProblems(source, prOnlyContexts) {
       "Acquire the exact public Node image (setup only; staging later uses pull=never)",
       "Stage and verify immutable tarballs from the exact Git commit",
       "Require the independent main-push candidate to carry the same tarball bytes",
-      "Refuse local-path dependencies in the staged manifest", "Bind the release bytes", RELEASE_UPLOAD_ARTIFACT,
+      "Refuse local-path dependencies in the staged manifest", ...profile.extraStageSteps, "Bind the release bytes",
+      RELEASE_UPLOAD_ARTIFACT,
     ],
     publish: [
       RELEASE_SETUP_NODE, "Install the exact npm CLI", RELEASE_DOWNLOAD_ARTIFACT, "Stage only the checked bytes on npm",
@@ -1539,6 +1574,78 @@ check("release controller workflow bytes are the reviewed closed digest", () => 
 for (const group of ["trigger", "oidc", "publish", "stage", "readback", "hygiene"]) {
   check(RELEASE_CONTROLLER_CHECKS[group], () => {
     const problems = releaseControllerGroupProblems(group, RELEASE_CONTROLLER_SOURCE(), RELEASE_PR_ONLY_CONTEXTS());
+    assert.deepEqual(problems, [], problems.join("; "));
+  });
+}
+
+// ── MCP RELEASE CONTROLLER ──────────────────────────────────────────────────────────────────────
+// `release-npm-mcp.yml` releases noa-mcp-adapter-core and noa-mcp-proxy. It is read by the same
+// structural reader under MCP_RELEASE_PROFILE, and its own controls are pinned here: the package
+// input accepts a closed list, each closed name maps to its directory and every other name is
+// refused, and a sibling dependency must be a caret range of an exact version the registry serves.
+const MCP_PACKAGE_GUARD = "[[ \"$INPUT_PACKAGE\" =~ ^(noa-mcp-adapter-core|noa-mcp-proxy)$ ]] || { echo \"::error::INPUT_PACKAGE is not a package this controller releases\"; exit 1; }";
+const MCP_REFUSE_OTHER_PACKAGE = "*) echo \"::error::INPUT_PACKAGE is not a package this controller releases\"; exit 1 ;;";
+const MCP_SIBLING_LINES = Object.freeze([
+  "jq -e '((.bundledDependencies // .bundleDependencies // []) | if type == \"array\" then length == 0 else . == false end)' \"$manifest\" >/dev/null ||",
+  "unplain=\"$(jq -r '[(.dependencies // {}), (.optionalDependencies // {}), (.peerDependencies // {}) | to_entries[] | select((.value | type) != \"string\" or (.value | gsub(\"[-+][0-9A-Za-z.-]+\"; \"\") | test(\"^[0-9^~<>=*xX][0-9xX*^~<>=|. -]*$\") | not)) | \"\\(.key)@\\(.value)\"] | join(\", \")' \"$manifest\")\"",
+  "test -z \"$unplain\" ||",
+  "published=\"$(jq -c '[.packages[].name]' scripts/lib/publish-artifact-policy.json)\"",
+  "siblings=\"$(jq -c --argjson own \"$published\" '[(.dependencies // {}), (.optionalDependencies // {}), (.peerDependencies // {}) | to_entries[] | select(.key as $k | $own | index($k) != null)]' \"$manifest\")\"",
+  "jq -e 'length > 0 and all(.[]; (.value | type) == \"string\" and (.value | test(\"^\\\\^(0|[1-9][0-9]*)\\\\.(0|[1-9][0-9]*)\\\\.(0|[1-9][0-9]*)$\")))' <<<\"$siblings\" >/dev/null ||",
+  "code=\"$(curl --silent --show-error --proto '=https' --tlsv1.2 -o \"$RUNNER_TEMP/noa-sibling-version.json\" -w '%{http_code}' \"https://registry.npmjs.org/${name}/${version}\")\"",
+  "test \"$code\" = 200 ||",
+  "jq -e --arg n \"$name\" --arg v \"$version\" '.name == $n and .version == $v' \"$RUNNER_TEMP/noa-sibling-version.json\" >/dev/null ||",
+  "done < <(jq -c '.[]' <<<\"$siblings\")",
+]);
+const MCP_RELEASE_CONTROLLER_CHECKS = Object.freeze(Object.fromEntries(
+  Object.entries(RELEASE_CONTROLLER_CHECKS).map(([group, name]) => [group, `MCP ${name}`]),
+));
+
+function mcpReleaseControllerProblems(source, prOnlyContexts) {
+  const problems = releaseControllerProblems(source, prOnlyContexts, MCP_RELEASE_PROFILE);
+  const fail = (group, pin, detail) => problems.push({ group, pin, detail });
+  const index = releaseStepIndex(source);
+  const runOf = (key) => index.get(key)?.run ?? "";
+  const hasLine = (body, expected) => body.split("\n").some((line) => line.trim() === expected);
+  if (!hasLine(runOf("stage/Refuse any dispatch other than the named commit on main"), MCP_PACKAGE_GUARD) ||
+      !hasLine(runOf("readback/Read back the registry state, integrity and verified provenance identity"), MCP_PACKAGE_GUARD)) {
+    fail("trigger", "MCP-PACKAGE-CLOSED", "the stage guard and readback refuse every package outside the closed list");
+  }
+  // Each case statement maps exactly the two closed names and refuses every other name.
+  const directoryCase = (body, variable) =>
+    hasLine(body, `noa-mcp-adapter-core) ${variable}=packages/adapter-core ;;`) &&
+    hasLine(body, `noa-mcp-proxy) ${variable}=packages/mcp-proxy ;;`) &&
+    hasLine(body, MCP_REFUSE_OTHER_PACKAGE) &&
+    body.split("\n").filter((line) => line.trim().endsWith(";;")).length === 3;
+  if (!directoryCase(runOf("stage/Require the declared version, its changelog entry and an unused registry version"), "dir")) {
+    fail("stage", "MCP-PACKAGE-DIRECTORY", "the version step reads exactly the closed package's own directory");
+  }
+  if (!directoryCase(runOf("publish/Stage only the checked bytes on npm"), "directory")) {
+    fail("publish", "MCP-PACKAGE-DIRECTORY", "publish binds the staged manifest to exactly the closed package's directory");
+  }
+  const siblings = runOf("stage/Require plain registry dependencies and released sibling versions");
+  for (const expected of MCP_SIBLING_LINES) {
+    if (!hasLine(siblings, expected)) fail("stage", "MCP-SIBLINGS-RELEASED", expected);
+  }
+  return problems;
+}
+
+const MCP_RELEASE_CONTROLLER_SOURCE = () =>
+  fs.readFileSync(path.join(REPO, ".github/workflows", MCP_RELEASE_CONTROLLER_WORKFLOW), "utf8");
+const MCP_RELEASE_PR_ONLY_CONTEXTS = () =>
+  pullRequestOnlyContexts(path.join(REPO, ".github/workflows"), MCP_RELEASE_CONTROLLER_WORKFLOW);
+
+check("MCP release controller workflow bytes are the reviewed closed digest", () => {
+  const raw = fs.readFileSync(path.join(REPO, ".github/workflows", MCP_RELEASE_CONTROLLER_WORKFLOW));
+  const problems = closedWorkflowByteProblems(MCP_RELEASE_CONTROLLER_WORKFLOW, raw);
+  assert.deepEqual(problems, [], problems.join("; "));
+});
+
+for (const group of ["trigger", "oidc", "publish", "stage", "readback", "hygiene"]) {
+  check(MCP_RELEASE_CONTROLLER_CHECKS[group], () => {
+    const problems = mcpReleaseControllerProblems(MCP_RELEASE_CONTROLLER_SOURCE(), MCP_RELEASE_PR_ONLY_CONTEXTS())
+      .filter((problem) => problem.group === group || problem.group === "shape")
+      .map((problem) => `${problem.pin}: ${problem.detail}`);
     assert.deepEqual(problems, [], problems.join("; "));
   });
 }
@@ -1767,30 +1874,69 @@ function releaseGitFixture(world, subject, files = { "README.md": "fixture\n" },
   return { repo, sha: git("rev-parse", "HEAD"), tree: git("rev-parse", "HEAD^{tree}") };
 }
 
-check(RELEASE_BEHAVIOUR_CHECKS.guard, () => {
-  const world = releaseWorld("release-guard-");
+
+// Both controllers run the same behaviour checks. A profile supplies the package-specific fixture
+// values; the MCP profile adds the closed-list refusals and its sibling-release check.
+const MCP_RELEASE_BEHAVIOUR_CHECKS = Object.freeze({
+  ...Object.fromEntries(Object.entries(RELEASE_BEHAVIOUR_CHECKS).map(([key, name]) => [key, `MCP ${name}`])),
+  siblings: "MCP release controller stage refuses a sibling dependency the registry does not serve when executed",
+});
+const RELEASE_PUBLIC_SOURCE = Object.freeze({ type: "git", url: "https://github.com/NordenSoft/noa-mandate-core.git" });
+const RELEASE_BEHAVIOUR_PROFILES = Object.freeze([
+  Object.freeze({
+    checks: RELEASE_BEHAVIOUR_CHECKS, prefix: "release-", source: RELEASE_CONTROLLER_SOURCE,
+    workflow: RELEASE_CONTROLLER_WORKFLOW, otherWorkflow: MCP_RELEASE_CONTROLLER_WORKFLOW,
+    pkg: "noa-receipt", version: "0.9.0", previous: "0.8.0", nextPatch: "0.9.1", packagePath: ".",
+    releaseDirectory: "noa-receipt-release", repository: RELEASE_PUBLIC_SOURCE, expressions: Object.freeze({}),
+    closedPackages: Object.freeze([]), outsidePackages: Object.freeze([]),
+    bindSibling: Object.freeze({ name: "noa-mcp-proxy", filename: "noa-mcp-proxy-1.0.0.tgz", tarballSha256: "1".repeat(64) }),
+  }),
+  Object.freeze({
+    checks: MCP_RELEASE_BEHAVIOUR_CHECKS, prefix: "mcp-release-", source: MCP_RELEASE_CONTROLLER_SOURCE,
+    workflow: MCP_RELEASE_CONTROLLER_WORKFLOW, otherWorkflow: RELEASE_CONTROLLER_WORKFLOW,
+    pkg: "noa-mcp-proxy", version: "0.5.0", previous: "0.4.0", nextPatch: "0.5.1", packagePath: "packages/mcp-proxy",
+    releaseDirectory: "noa-mcp-release", repository: Object.freeze({ ...RELEASE_PUBLIC_SOURCE, directory: "packages/mcp-proxy" }),
+    expressions: Object.freeze({ "inputs.package": "noa-mcp-proxy" }),
+    closedPackages: Object.freeze(["noa-mcp-adapter-core", "noa-mcp-proxy"]),
+    outsidePackages: Object.freeze(["noa-receipt", "noa-mcp-proxy-extra", "noa-other"]),
+    bindSibling: Object.freeze({ name: "noa-mcp-adapter-core", filename: "noa-mcp-adapter-core-0.5.0.tgz", tarballSha256: "1".repeat(64) }),
+  }),
+]);
+const [, MCP_BEHAVIOUR] = RELEASE_BEHAVIOUR_PROFILES;
+const outsideCases = (P, change = (name) => ({ expressions: { "inputs.package": name } })) =>
+  P.outsidePackages.map((name) => [`the package ${name}, outside the closed list`, change(name)]);
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\/]/gu, "\\$&");
+
+const releaseGuardBehaviour = (P) => {
+  const world = releaseWorld(`${P.prefix}guard-`, P.source());
   try {
     const sha = "a".repeat(40);
     const step = "stage/Refuse any dispatch other than the named commit on main";
-    const base = { sha, expressions: { "inputs.commit": sha, "inputs.version": "0.9.0" } };
+    const base = { sha, expressions: { "inputs.commit": sha, "inputs.version": P.version, ...P.expressions } };
     const accepted = world.run(step, base);
     assert.equal(accepted.status, 0, `the guard refused the named commit on main:\n${accepted.output}`);
+    for (const name of P.closedPackages) {
+      const closed = world.run(step, mergeRun(base, { expressions: { "inputs.package": name } }));
+      assert.equal(closed.status, 0, `the guard refused the closed-list package ${name}:\n${closed.output}`);
+    }
     expectRefusals(world, step, base, [
       ["a branch ref", { env: { GITHUB_REF: "refs/heads/feature" } }],
-      ["a tag ref", { env: { GITHUB_REF: "refs/tags/v0.9.0" } }],
+      ["a tag ref", { env: { GITHUB_REF: `refs/tags/v${P.version}` } }],
       ["a commit other than the named one", { env: { GITHUB_SHA: "b".repeat(40) } }],
       ["an abbreviated commit", { expressions: { "inputs.commit": "aaaaaaa" }, env: { GITHUB_SHA: "aaaaaaa" } }],
       ["a push event", { env: { GITHUB_EVENT_NAME: "push" } }],
       ["a fork", { env: { GITHUB_REPOSITORY: "fixture/fork" } }],
-      ["a prerelease version", { expressions: { "inputs.version": "0.9.0-rc.1" } }],
+      ["a prerelease version", { expressions: { "inputs.version": `${P.version}-rc.1` } }],
+      ...outsideCases(P),
     ]);
   } finally {
     world.dispose();
   }
-});
+};
+for (const P of RELEASE_BEHAVIOUR_PROFILES) check(P.checks.guard, () => releaseGuardBehaviour(P));
 
-check(RELEASE_BEHAVIOUR_CHECKS.bind, () => {
-  const world = releaseWorld("release-bind-");
+const releaseBindBehaviour = (P) => {
+  const world = releaseWorld(`${P.prefix}bind-`, P.source());
   try {
     const { repo, sha, tree } = releaseGitFixture(world, "feat: fixture release (#13)");
     const head = "b".repeat(40);
@@ -1892,7 +2038,7 @@ check(RELEASE_BEHAVIOUR_CHECKS.bind, () => {
     // one at another app whose run is green, is refused, and the refusal must come from the minimum
     // check itself: a pull-request-lane context would also be refused by the lane loop, and a
     // context with no green run by the check-run loop, so neither could show the minimum works.
-    const pinned = JSON.parse(releaseStepIndex(RELEASE_CONTROLLER_SOURCE()).get(step).env.MINIMUM_REQUIRED_CHECKS);
+    const pinned = JSON.parse(releaseStepIndex(P.source()).get(step).env.MINIMUM_REQUIRED_CHECKS);
     const prLane = ["pr-title", "review"];
     assert.ok(Array.isArray(pinned) && pinned.every((pair) => Array.isArray(pair) && pair.length === 2) &&
       prLane.every((context) => pinned.some(([name]) => name === context)),
@@ -1928,10 +2074,11 @@ check(RELEASE_BEHAVIOUR_CHECKS.bind, () => {
   } finally {
     world.dispose();
   }
-});
+};
+for (const P of RELEASE_BEHAVIOUR_PROFILES) check(P.checks.bind, () => releaseBindBehaviour(P));
 
-check(RELEASE_BEHAVIOUR_CHECKS.environment, () => {
-  const world = releaseWorld("release-environment-");
+const releaseEnvironmentBehaviour = (P) => {
+  const world = releaseWorld(`${P.prefix}environment-`, P.source());
   try {
     const R = RELEASE_REPOSITORY;
     const environment = (overrides = {}) => ({
@@ -1963,43 +2110,48 @@ check(RELEASE_BEHAVIOUR_CHECKS.environment, () => {
   } finally {
     world.dispose();
   }
-});
+};
+for (const P of RELEASE_BEHAVIOUR_PROFILES) check(P.checks.environment, () => releaseEnvironmentBehaviour(P));
 
-check(RELEASE_BEHAVIOUR_CHECKS.version, () => {
-  const world = releaseWorld("release-version-");
+const releaseVersionBehaviour = (P) => {
+  const world = releaseWorld(`${P.prefix}version-`, P.source());
   try {
     const cwd = world.dirs.work;
-    fs.writeFileSync(path.join(cwd, "package.json"), JSON.stringify({ name: "noa-receipt", version: "0.9.0" }));
-    fs.writeFileSync(path.join(cwd, "CHANGELOG.md"), "# Changelog\n\n## [0.9.0] - 2026-09-24\n\n## [0.8.0] - 2026-08-14\n");
-    const url = "https://registry.npmjs.org/noa-receipt";
+    const packageDir = path.join(cwd, P.packagePath);
+    fs.mkdirSync(packageDir, { recursive: true });
+    fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: P.pkg, version: P.version }));
+    fs.writeFileSync(path.join(packageDir, "CHANGELOG.md"), `# Changelog\n\n## [${P.version}] - 2026-09-24\n\n## [${P.previous}] - 2026-08-14\n`);
+    const url = `https://registry.npmjs.org/${P.pkg}`;
     const packument = (overrides = {}) => ({
-      name: "noa-receipt", versions: { "0.8.0": {} }, time: { "0.8.0": "2026-08-20T00:00:00Z" },
-      "dist-tags": { latest: "0.8.0" }, ...overrides,
+      name: P.pkg, versions: { [P.previous]: {} }, time: { [P.previous]: "2026-08-20T00:00:00Z" },
+      "dist-tags": { latest: P.previous }, ...overrides,
     });
     world.set("curl", url, packument());
     const step = "stage/Require the declared version, its changelog entry and an unused registry version";
-    const base = { sha: "a".repeat(40), cwd, expressions: { "inputs.version": "0.9.0" } };
+    const base = { sha: "a".repeat(40), cwd, expressions: { "inputs.version": P.version, ...P.expressions } };
     const accepted = world.run(step, base);
     assert.equal(accepted.status, 0, `an unused, documented version was refused:\n${accepted.output}`);
     const route = (body, status) => swapRoute(world, "curl", url, body, status);
     const changelog = (text) => () => {
-      const file = path.join(cwd, "CHANGELOG.md");
+      const file = path.join(packageDir, "CHANGELOG.md");
       const previous = fs.readFileSync(file);
       fs.writeFileSync(file, text);
       return () => fs.writeFileSync(file, previous);
     };
     expectRefusals(world, step, base, [
-      ["a version published before and later removed", {}, route(packument({ time: { "0.8.0": "x", "0.9.0": "y" } }))],
-      ["a version on the registry", {}, route(packument({ versions: { "0.8.0": {}, "0.9.0": {} } }))],
+      ["a version published before and later removed", {}, route(packument({ time: { [P.previous]: "x", [P.version]: "y" } }))],
+      ["a version on the registry", {}, route(packument({ versions: { [P.previous]: {}, [P.version]: {} } }))],
       ["a version below latest", {}, route(packument({ "dist-tags": { latest: "1.0.0" } }))],
       ["an unreadable registry", {}, route(packument(), 500)],
-      ["a version the manifest does not declare", { expressions: { "inputs.version": "0.9.1" } }],
+      ["a version the manifest does not declare", { expressions: { "inputs.version": P.nextPatch } }],
       ["an undocumented version", {}, changelog("# Changelog\n\n## [Unreleased]\n")],
+      ...outsideCases(P),
     ]);
   } finally {
     world.dispose();
   }
-});
+};
+for (const P of RELEASE_BEHAVIOUR_PROFILES) check(P.checks.version, () => releaseVersionBehaviour(P));
 
 /**
  * A minimal stored (uncompressed) ZIP of the given entries, the shape GitHub serves for an artifact
@@ -2060,8 +2212,8 @@ const worldFlag = (world, name, content = "") => () => {
   return () => fs.rmSync(path.join(world.root, name), { force: true });
 };
 
-check(RELEASE_BEHAVIOUR_CHECKS.image, () => {
-  const world = releaseWorld("release-image-");
+const releaseImageBehaviour = (P) => {
+  const world = releaseWorld(`${P.prefix}image-`, P.source());
   try {
     world.stub("docker", [
       'case "${1:-}" in',
@@ -2086,10 +2238,11 @@ check(RELEASE_BEHAVIOUR_CHECKS.image, () => {
   } finally {
     world.dispose();
   }
-});
+};
+for (const P of RELEASE_BEHAVIOUR_PROFILES) check(P.checks.image, () => releaseImageBehaviour(P));
 
-check(RELEASE_BEHAVIOUR_CHECKS.staging, () => {
-  const world = releaseWorld("release-staging-");
+const releaseStagingBehaviour = (P) => {
+  const world = releaseWorld(`${P.prefix}staging-`, P.source());
   try {
     // node is a stub in this world only. The step must run the bootstrap bytes it read from the
     // release commit twice, first to stage and then to verify, and refuse when either pass fails.
@@ -2127,24 +2280,25 @@ check(RELEASE_BEHAVIOUR_CHECKS.staging, () => {
   } finally {
     world.dispose();
   }
-});
+};
+for (const P of RELEASE_BEHAVIOUR_PROFILES) check(P.checks.staging, () => releaseStagingBehaviour(P));
 
-check(RELEASE_BEHAVIOUR_CHECKS.candidate, () => {
-  const world = releaseWorld("release-candidate-");
+const releaseCandidateBehaviour = (P) => {
+  const world = releaseWorld(`${P.prefix}candidate-`, P.source());
   try {
     const sha = "a".repeat(40);
     const R = RELEASE_REPOSITORY;
-    const file = "noa-receipt-0.9.0.tgz";
+    const file = `${P.pkg}-${P.version}.tgz`;
     const name = `noa-publish-${sha}-CANDIDATE-NON-RELEASE`;
-    const good = releaseTarball(world, "good", { name: "noa-receipt", version: "0.9.0" });
-    const other = releaseTarball(world, "other", { name: "noa-receipt", version: "0.9.0", description: "other bytes" });
+    const good = releaseTarball(world, "good", { name: P.pkg, version: P.version });
+    const other = releaseTarball(world, "other", { name: P.pkg, version: P.version, description: "other bytes" });
     const zipOf = (entries) => {
       const bytes = storedZip(entries);
       return { bytes, digest: `sha256:${crypto.createHash("sha256").update(bytes).digest("hex")}` };
     };
     const goodZip = zipOf({ [file]: good.bytes });
     const otherZip = zipOf({ [file]: other.bytes });
-    const misnamedZip = zipOf({ "noa-receipt-9.9.9.tgz": good.bytes });
+    const misnamedZip = zipOf({ [`${P.pkg}-9.9.9.tgz`]: good.bytes });
     const artifact = (overrides = {}, run = {}) => ({
       id: 7, name, expired: false, digest: goodZip.digest,
       workflow_run: { id: 9, head_sha: sha, head_branch: "main", repository_id: 1, head_repository_id: 1, ...run },
@@ -2167,7 +2321,7 @@ check(RELEASE_BEHAVIOUR_CHECKS.candidate, () => {
       else if (bytes !== null) fs.writeFileSync(path.join(stage, file), bytes);
     };
     const step = "stage/Require the independent main-push candidate to carry the same tarball bytes";
-    const base = { sha, prepare: place(good.bytes), expressions: { "github.token": "fixture-job-token", "inputs.version": "0.9.0" } };
+    const base = { sha, prepare: place(good.bytes), expressions: { "github.token": "fixture-job-token", "inputs.version": P.version, ...P.expressions } };
     const accepted = world.run(step, base);
     assert.equal(accepted.status, 0, `the independent candidate with the staged bytes was refused:\n${accepted.output}`);
     const route = (key, body) => swapRoute(world, "gh", key, body);
@@ -2201,23 +2355,24 @@ check(RELEASE_BEHAVIOUR_CHECKS.candidate, () => {
   } finally {
     world.dispose();
   }
-});
+};
+for (const P of RELEASE_BEHAVIOUR_PROFILES) check(P.checks.candidate, () => releaseCandidateBehaviour(P));
 
-check(RELEASE_BEHAVIOUR_CHECKS.dependencies, () => {
-  const world = releaseWorld("release-dependencies-");
+const releaseDependenciesBehaviour = (P) => {
+  const world = releaseWorld(`${P.prefix}dependencies-`, P.source());
   try {
-    const manifest = (dependencies) => ({ name: "noa-receipt", version: "0.9.0", dependencies });
+    const manifest = (dependencies) => ({ name: P.pkg, version: P.version, dependencies });
     const clean = releaseTarball(world, "clean", manifest({ "fixture-dependency": "^1.0.0" }));
     const local = releaseTarball(world, "local", manifest({ "fixture-dependency": "file:../fixture-dependency" }));
     const relative = releaseTarball(world, "relative", manifest({ "fixture-dependency": "../fixture-dependency" }));
     const place = (bytes) => (runnerTemp) => {
       const stage = path.join(runnerTemp, "noa-release-stage");
       fs.mkdirSync(stage);
-      if (bytes !== null) fs.writeFileSync(path.join(stage, "noa-receipt-0.9.0.tgz"), bytes);
+      if (bytes !== null) fs.writeFileSync(path.join(stage, `${P.pkg}-${P.version}.tgz`), bytes);
     };
     // The step runs the repository's own lint from the checkout, so the fixture runs it from REPO.
     const step = "stage/Refuse local-path dependencies in the staged manifest";
-    const base = { sha: "a".repeat(40), cwd: REPO, prepare: place(clean.bytes), expressions: { "inputs.version": "0.9.0" } };
+    const base = { sha: "a".repeat(40), cwd: REPO, prepare: place(clean.bytes), expressions: { "inputs.version": P.version, ...P.expressions } };
     const accepted = world.run(step, base);
     assert.equal(accepted.status, 0, `a registry-range dependency was refused:\n${accepted.output}`);
     expectRefusals(world, step, base, [
@@ -2228,16 +2383,17 @@ check(RELEASE_BEHAVIOUR_CHECKS.dependencies, () => {
   } finally {
     world.dispose();
   }
-});
+};
+for (const P of RELEASE_BEHAVIOUR_PROFILES) check(P.checks.dependencies, () => releaseDependenciesBehaviour(P));
 
-check(RELEASE_BEHAVIOUR_CHECKS.bindBytes, () => {
-  const world = releaseWorld("release-bind-bytes-");
+const releaseBindBytesBehaviour = (P) => {
+  const world = releaseWorld(`${P.prefix}bind-bytes-`, P.source());
   try {
     const sha = "a".repeat(40);
-    const file = "noa-receipt-0.9.0.tgz";
-    const good = releaseTarball(world, "good", { name: "noa-receipt", version: "0.9.0" });
-    const row = (overrides = {}) => ({ name: "noa-receipt", filename: file, tarballSha256: good.sha256, ...overrides });
-    const sibling = { name: "noa-mcp-proxy", filename: "noa-mcp-proxy-1.0.0.tgz", tarballSha256: "1".repeat(64) };
+    const file = `${P.pkg}-${P.version}.tgz`;
+    const good = releaseTarball(world, "good", { name: P.pkg, version: P.version });
+    const row = (overrides = {}) => ({ name: P.pkg, filename: file, tarballSha256: good.sha256, ...overrides });
+    const sibling = P.bindSibling;
     const place = (packages = [sibling, row()], bytes = good.bytes) => (runnerTemp) => {
       const stage = path.join(runnerTemp, "noa-release-stage");
       fs.mkdirSync(stage);
@@ -2245,11 +2401,11 @@ check(RELEASE_BEHAVIOUR_CHECKS.bindBytes, () => {
       if (packages !== null) fs.writeFileSync(path.join(stage, "publish-artifacts.manifest.json"), JSON.stringify({ packages }));
     };
     const step = "stage/Bind the release bytes";
-    const base = { sha, prepare: place(), expressions: { "inputs.version": "0.9.0" } };
+    const base = { sha, prepare: place(), expressions: { "inputs.version": P.version, ...P.expressions } };
     const accepted = world.run(step, base);
     assert.equal(accepted.status, 0, `the manifest-bound bytes were refused:\n${accepted.output}`);
     assert.equal(accepted.outputs, [
-      `artifact=noa-receipt-0.9.0-${sha}-RELEASE-BYTES`, `filename=${file}`, `integrity=${good.integrity}`, `sha256=${good.sha256}`, "",
+      `artifact=${P.pkg}-${P.version}-${sha}-RELEASE-BYTES`, `filename=${file}`, `integrity=${good.integrity}`, `sha256=${good.sha256}`, "",
     ].join("\n"), "the step output other digests than the bytes it bound");
     const noOutputs = (result, label) => assert.equal(result.outputs, "", `${label}: the refused step still wrote its outputs`);
     expectRefusals(world, step, base, [
@@ -2263,14 +2419,15 @@ check(RELEASE_BEHAVIOUR_CHECKS.bindBytes, () => {
   } finally {
     world.dispose();
   }
-});
+};
+for (const P of RELEASE_BEHAVIOUR_PROFILES) check(P.checks.bindBytes, () => releaseBindBytesBehaviour(P));
 
-check(RELEASE_BEHAVIOUR_CHECKS.npmInstall, () => {
-  const world = releaseWorld("release-npm-install-");
+const releaseNpmInstallBehaviour = (P) => {
+  const world = releaseWorld(`${P.prefix}npm-install-`, P.source());
   try {
     const cli = Buffer.from("fixture npm cli tarball bytes");
     const integrity = `sha512-${crypto.createHash("sha512").update(cli).digest("base64")}`;
-    const index = releaseStepIndex(RELEASE_CONTROLLER_SOURCE());
+    const index = releaseStepIndex(P.source());
     const noInstall = (result, label) =>
       assert.equal(/^npm install\b/mu.test(world.read("npm.log")), false, `${label}: an unchecked npm CLI was installed`);
     for (const step of ["publish/Install the exact npm CLI", "readback/Install the exact npm CLI"]) {
@@ -2290,7 +2447,8 @@ check(RELEASE_BEHAVIOUR_CHECKS.npmInstall, () => {
   } finally {
     world.dispose();
   }
-});
+};
+for (const P of RELEASE_BEHAVIOUR_PROFILES) check(P.checks.npmInstall, () => releaseNpmInstallBehaviour(P));
 
 function releaseTarball(world, name, manifest) {
   const packageRoot = path.join(world.root, `pack-${name}`);
@@ -2306,39 +2464,38 @@ function releaseTarball(world, name, manifest) {
   };
 }
 
-check(RELEASE_BEHAVIOUR_CHECKS.publish, () => {
-  const world = releaseWorld("release-publish-");
+const releasePublishBehaviour = (P) => {
+  const world = releaseWorld(`${P.prefix}publish-`, P.source());
   try {
     const sha = "a".repeat(40);
-    const filename = "noa-receipt-0.9.0.tgz";
+    const filename = `${P.pkg}-${P.version}.tgz`;
     const stageId = "00000000-0000-0000-0000-000000000000";
-    const repository = { type: "git", url: "https://github.com/NordenSoft/noa-mandate-core.git" };
-    const good = releaseTarball(world, "good", { name: "noa-receipt", version: "0.9.0", repository });
+    const good = releaseTarball(world, "good", { name: P.pkg, version: P.version, repository: P.repository });
     const foreign = releaseTarball(world, "foreign", {
-      name: "noa-receipt", version: "0.9.0", repository: { type: "git", url: "https://example.invalid/other-source.git" },
+      name: P.pkg, version: P.version, repository: { ...P.repository, url: "https://example.invalid/other-source.git" },
     });
     const liveMain = `https://api.github.com/repos/${RELEASE_REPOSITORY}/git/ref/heads/main`;
     world.set("curl", liveMain, { ref: "refs/heads/main", object: { type: "commit", sha } });
     const responseFile = path.join(world.root, "stage-response.json");
     // The shape npm 12.1.0 prints for npm stage publish --json: its tarball summary keyed by the
     // package name, with the registry's stage id added (lib/commands/publish.js, lib/utils/tar.js).
-    const stageResponse = (overrides = {}) => JSON.stringify({ "noa-receipt": {
-      id: "noa-receipt@0.9.0", name: "noa-receipt", version: "0.9.0", filename, integrity: good.integrity, stageId, ...overrides,
+    const stageResponse = (overrides = {}) => JSON.stringify({ [P.pkg]: {
+      id: `${P.pkg}@${P.version}`, name: P.pkg, version: P.version, filename, integrity: good.integrity, stageId, ...overrides,
     } });
     fs.writeFileSync(responseFile, stageResponse());
     const response = (body) => () => {
       if (body === undefined) fs.rmSync(responseFile, { force: true }); else fs.writeFileSync(responseFile, body);
       return () => fs.writeFileSync(responseFile, stageResponse());
     };
-    const place = (bytes, extra = false) => (runnerTemp) => {
-      const dir = path.join(runnerTemp, "noa-receipt-release");
+    const place = (bytes, extra = false, name = filename) => (runnerTemp) => {
+      const dir = path.join(runnerTemp, P.releaseDirectory);
       fs.mkdirSync(dir);
-      fs.writeFileSync(path.join(dir, filename), bytes);
+      fs.writeFileSync(path.join(dir, name), bytes);
       if (extra) fs.writeFileSync(path.join(dir, "other.tgz"), bytes);
     };
     const expressionsFor = (tarball) => ({
-      "github.token": "fixture-job-token", "inputs.commit": sha, "inputs.version": "0.9.0", "needs.stage.outputs.filename": filename,
-      "needs.stage.outputs.integrity": tarball.integrity, "needs.stage.outputs.sha256": tarball.sha256,
+      "github.token": "fixture-job-token", "inputs.commit": sha, "inputs.version": P.version, "needs.stage.outputs.filename": filename,
+      "needs.stage.outputs.integrity": tarball.integrity, "needs.stage.outputs.sha256": tarball.sha256, ...P.expressions,
     });
     const step = "publish/Stage only the checked bytes on npm";
     const base = { sha, prepare: place(good.bytes), expressions: expressionsFor(good) };
@@ -2346,9 +2503,9 @@ check(RELEASE_BEHAVIOUR_CHECKS.publish, () => {
     assert.equal(accepted.status, 0, `the checked bytes on live main were refused:\n${accepted.output}`);
     assert.deepEqual(accepted.published, [], "the controller ran npm publish instead of staging");
     assert.equal(accepted.staged.length, 1, "the checked bytes were not staged exactly once");
-    assert.match(accepted.staged[0],
-      /^stage publish \S+\/noa-receipt-release\/noa-receipt-0\.9\.0\.tgz --ignore-scripts --access public --provenance --tag latest --registry https:\/\/registry\.npmjs\.org\/ --json$/u);
-    assert.ok(accepted.summary.includes(`noa-receipt@0.9.0: STAGED, stage id ${stageId}, integrity ${good.integrity}\n`),
+    assert.match(accepted.staged[0], new RegExp(`^stage publish \\S+/${escapeRegExp(P.releaseDirectory)}/${escapeRegExp(filename)} ` +
+      "--ignore-scripts --access public --provenance --tag latest --registry https://registry\\.npmjs\\.org/ --json$", "u"));
+    assert.ok(accepted.summary.includes(`${P.pkg}@${P.version}: STAGED, stage id ${stageId}, integrity ${good.integrity}\n`),
       `the run summary does not end STAGED with the stage id and integrity:\n${accepted.summary}`);
     // The live-main read is authenticated, the token travels on curl's stdin (never its argv), and
     // npm never sees it.
@@ -2359,11 +2516,29 @@ check(RELEASE_BEHAVIOUR_CHECKS.publish, () => {
       fs.writeFileSync(path.join(world.dirs.home, ".npmrc"), "registry=https://registry.npmjs.org/\n");
       return () => fs.rmSync(path.join(world.dirs.home, ".npmrc"), { force: true });
     };
+    // A package outside the closed list arrives with a tarball that names it consistently; only the
+    // closed list can refuse it before npm runs.
+    const outsideCase = (name) => {
+      const outsider = releaseTarball(world, `outside-${name}`, {
+        name, version: P.version, repository: { ...P.repository, directory: `packages/${name}` },
+      });
+      const outsiderFile = `${name}-${P.version}.tgz`;
+      return {
+        prepare: place(outsider.bytes, false, outsiderFile),
+        expressions: { ...expressionsFor(outsider), "inputs.package": name, "needs.stage.outputs.filename": outsiderFile },
+      };
+    };
+    const unboundDirectory = P.repository.directory === undefined ? [] : [
+      ["bytes that do not name their package directory", (() => {
+        const bare = releaseTarball(world, "bare", { name: P.pkg, version: P.version, repository: RELEASE_PUBLIC_SOURCE });
+        return { prepare: place(bare.bytes), expressions: expressionsFor(bare) };
+      })()],
+    ];
     expectRefusals(world, step, base, [
       ["tampered bytes", { prepare: place(Buffer.concat([good.bytes, Buffer.from([0])])) }],
       ["bytes naming another source repository", { prepare: place(foreign.bytes), expressions: expressionsFor(foreign) }],
       ["a second file in the artifact", { prepare: place(good.bytes, true) }],
-      ["a stage filename for another version", { expressions: { "needs.stage.outputs.filename": "noa-receipt-9.9.9.tgz" } }],
+      ["a stage filename for another version", { expressions: { "needs.stage.outputs.filename": `${P.pkg}-9.9.9.tgz` } }],
       ["main advanced past the released commit", {}, swapRoute(world, "curl", liveMain, { object: { type: "commit", sha: "b".repeat(40) } })],
       ["an unreadable main ref", {}, swapRoute(world, "curl", liveMain, { message: "rate limited" }, 403)],
       ["a branch ref", { env: { GITHUB_REF: "refs/heads/feature" } }],
@@ -2371,6 +2546,8 @@ check(RELEASE_BEHAVIOUR_CHECKS.publish, () => {
       ["an ambient npm token", { env: { NODE_AUTH_TOKEN: "fixture" } }],
       ["an ambient npm configuration variable", { env: { npm_config_registry: "https://registry.npmjs.org/" } }],
       ["a user npmrc", {}, npmrc],
+      ...unboundDirectory,
+      ...outsideCases(P, outsideCase),
     ]);
     // After npm has run: the run must not end STAGED unless npm reported a stage of exactly these
     // bytes. A direct publish (the body with npm publish in place of npm stage publish) reports no
@@ -2379,11 +2556,11 @@ check(RELEASE_BEHAVIOUR_CHECKS.publish, () => {
       ["a stage response without a stage id", {}, response(stageResponse({ stageId: undefined }))],
       ["a stage id that is not a UUID", {}, response(stageResponse({ stageId: "latest" }))],
       ["a stage reported for other bytes", {}, response(stageResponse({ integrity: foreign.integrity }))],
-      ["a stage reported for another version", {}, response(stageResponse({ version: "0.9.1" }))],
+      ["a stage reported for another version", {}, response(stageResponse({ version: P.nextPatch }))],
       ["a response for another package as well", {}, response(JSON.stringify({ ...JSON.parse(stageResponse()), other: { stageId } }))],
       ["a failed npm stage publish", {}, response(undefined)],
       ["a direct publish in place of staging",
-        { body: releaseStepIndex(RELEASE_CONTROLLER_SOURCE()).get(step).run.replace("npm stage publish \"$tarball\"", "npm publish \"$tarball\"") }],
+        { body: releaseStepIndex(P.source()).get(step).run.replace("npm stage publish \"$tarball\"", "npm publish \"$tarball\"") }],
     ]) {
       const restore = arrange?.() ?? (() => {});
       try {
@@ -2397,7 +2574,8 @@ check(RELEASE_BEHAVIOUR_CHECKS.publish, () => {
   } finally {
     world.dispose();
   }
-});
+};
+for (const P of RELEASE_BEHAVIOUR_PROFILES) check(P.checks.publish, () => releasePublishBehaviour(P));
 
 function derNode(tag, ...parts) {
   const body = Buffer.concat(parts);
@@ -2433,12 +2611,12 @@ function fixtureLeafCertificate({ san, signer, repository, commit, ref }) {
   return derNode(0x30, tbs, derNode(0x30, derOid("1.2.840.10045.4.3.3")), derNode(0x03, Buffer.from([0])));
 }
 
-check(RELEASE_BEHAVIOUR_CHECKS.readback, () => {
-  const world = releaseWorld("release-readback-");
+const releaseReadbackBehaviour = (P) => {
+  const world = releaseWorld(`${P.prefix}readback-`, P.source());
   try {
     const sha = "a".repeat(40);
     const repositoryUrl = `https://github.com/${RELEASE_REPOSITORY}`;
-    const workflow = ".github/workflows/release-npm-noa-receipt.yml";
+    const workflow = `.github/workflows/${P.workflow}`;
     const identity = `${repositoryUrl}/${workflow}@refs/heads/main`;
     const bytes = Buffer.from("fixture tarball bytes");
     const integrity = `sha512-${crypto.createHash("sha512").update(bytes).digest("base64")}`;
@@ -2450,7 +2628,7 @@ check(RELEASE_BEHAVIOUR_CHECKS.readback, () => {
     });
     const statement = (overrides = {}) => ({
       _type: "https://in-toto.io/Statement/v1",
-      subject: [{ name: "pkg:npm/noa-receipt@0.9.0", digest: { sha512: hex } }],
+      subject: [{ name: `pkg:npm/${P.pkg}@${P.version}`, digest: { sha512: hex } }],
       predicateType: "https://slsa.dev/provenance/v1",
       predicate: { buildDefinition: definition() },
       ...overrides,
@@ -2465,14 +2643,14 @@ check(RELEASE_BEHAVIOUR_CHECKS.readback, () => {
         verificationMaterial: { certificate: { rawBytes: cert.toString("base64") } },
       },
     });
-    const signatures = (bundles = [slsaBundle()], overrides = {}) => JSON.stringify({
+    const signatures = (bundles = [slsaBundle()], overrides = {}, name = P.pkg) => JSON.stringify({
       invalid: [], missing: [],
-      verified: [{ name: "noa-receipt", version: "0.9.0", attestationBundles: [
+      verified: [{ name, version: P.version, attestationBundles: [
         { predicateType: "https://github.com/npm/attestation/tree/main/specs/publish/v0.1", bundle: {} }, ...bundles,
       ] }],
       ...overrides,
     });
-    const versionUrl = "https://registry.npmjs.org/noa-receipt/0.9.0";
+    const versionUrl = `https://registry.npmjs.org/${P.pkg}/${P.version}`;
     world.set("curl", versionUrl, { dist: { integrity } });
     const signaturesFile = path.join(world.root, "signatures.json");
     fs.writeFileSync(signaturesFile, signatures());
@@ -2482,11 +2660,12 @@ check(RELEASE_BEHAVIOUR_CHECKS.readback, () => {
     };
     const step = "readback/Read back the registry state, integrity and verified provenance identity";
     const base = { sha, expressions: {
-      "inputs.commit": sha, "inputs.version": "0.9.0", "needs.publish.result": "success", "needs.stage.outputs.integrity": integrity,
+      "inputs.commit": sha, "inputs.version": P.version, "needs.publish.result": "success", "needs.stage.outputs.integrity": integrity,
+      ...P.expressions,
     } };
     const accepted = world.run(step, base);
     assert.equal(accepted.status, 0, `a verified attestation for this workflow on main was refused:\n${accepted.output}`);
-    assert.match(accepted.summary, /noa-receipt@0\.9\.0: PRESENT, integrity sha512-/u);
+    assert.match(accepted.summary, new RegExp(`${escapeRegExp(`${P.pkg}@${P.version}`)}: PRESENT, integrity sha512-`, "u"));
     // ABSENT refuses whether publish failed or staged the version that a maintainer has not (yet)
     // approved, and the summary says how to finish: approve the npm stage, then re-run this job.
     const restore = swapRoute(world, "curl", versionUrl, undefined)();
@@ -2494,36 +2673,178 @@ check(RELEASE_BEHAVIOUR_CHECKS.readback, () => {
       for (const publishResult of ["failure", "success"]) {
         const absent = world.run(step, mergeRun(base, { expressions: { "needs.publish.result": publishResult } }));
         assert.notEqual(absent.status, 0, `an absent version was accepted after a publish job ${publishResult}`);
-        assert.ok(absent.summary.includes(`noa-receipt@0.9.0: ABSENT (publish job: ${publishResult})\n`), absent.summary);
+        assert.ok(absent.summary.includes(`${P.pkg}@${P.version}: ABSENT (publish job: ${publishResult})\n`), absent.summary);
         assert.match(absent.summary, /approves its npm stage; after that approval, re-run this job/u);
       }
     } finally {
       restore();
     }
+    const otherIdentity = `${repositoryUrl}/.github/workflows/${P.otherWorkflow}@refs/heads/main`;
     expectRefusals(world, step, base, [
       ["another registry integrity", {}, swapRoute(world, "curl", versionUrl, { dist: { integrity: `sha512-${"A".repeat(86)}==` } })],
       ["a certificate for another workflow", {}, report(signatures([slsaBundle(statement(), certificate({ san: `${repositoryUrl}/.github/workflows/other.yml@refs/heads/main` }))]))],
+      ["a certificate and signer for the other release controller", {}, report(signatures([slsaBundle(statement(), certificate({ san: otherIdentity, signer: otherIdentity }))]))],
       ["a certificate for another commit", {}, report(signatures([slsaBundle(statement(), certificate({ commit: "b".repeat(40) }))]))],
       ["a certificate for another ref", {}, report(signatures([slsaBundle(statement(), certificate({ ref: "refs/heads/feature" }))]))],
       ["a certificate for another repository", {}, report(signatures([slsaBundle(statement(), certificate({ repository: "https://github.com/fixture/fork" }))]))],
-      ["a statement for a tag ref", {}, report(signatures([slsaBundle(statement({ predicate: { buildDefinition: definition("refs/tags/v0.9.0") } }))]))],
-      ["a statement for other bytes", {}, report(signatures([slsaBundle(statement({ subject: [{ name: "pkg:npm/noa-receipt@0.9.0", digest: { sha512: "0".repeat(128) } }] }))]))],
+      ["a statement for a tag ref", {}, report(signatures([slsaBundle(statement({ predicate: { buildDefinition: definition(`refs/tags/v${P.version}`) } }))]))],
+      ["a statement for other bytes", {}, report(signatures([slsaBundle(statement({ subject: [{ name: `pkg:npm/${P.pkg}@${P.version}`, digest: { sha512: "0".repeat(128) } }] }))]))],
       // The bundle is selected by its unsigned label; the signed statement must say the same.
       ["a signed statement of another type", {}, report(signatures([slsaBundle(statement({ _type: "https://in-toto.io/Statement/v0.1" }))]))],
       ["a signed statement of another predicate type", {}, report(signatures([slsaBundle(statement({ predicateType: "https://slsa.dev/provenance/v0.2" }))]))],
       ["two provenance bundles", {}, report(signatures([slsaBundle(), slsaBundle()]))],
       ["no provenance bundle", {}, report(signatures([]))],
-      ["an invalid signature report", {}, report(signatures([slsaBundle()], { invalid: [{ name: "noa-receipt" }] }))],
+      ["an invalid signature report", {}, report(signatures([slsaBundle()], { invalid: [{ name: P.pkg }] }))],
+      ["a verified entry for another package only", {}, report(signatures([slsaBundle()], {}, "noa-other"))],
+      ...outsideCases(P),
+    ]);
+  } finally {
+    world.dispose();
+  }
+};
+for (const P of RELEASE_BEHAVIOUR_PROFILES) check(P.checks.readback, () => releaseReadbackBehaviour(P));
+
+check(MCP_BEHAVIOUR.checks.siblings, () => {
+  const P = MCP_BEHAVIOUR;
+  const world = releaseWorld("mcp-release-siblings-", P.source());
+  try {
+    const adapter = "https://registry.npmjs.org/noa-mcp-adapter-core/0.5.0";
+    const receipt = "https://registry.npmjs.org/noa-receipt/0.9.0";
+    world.set("curl", adapter, { name: "noa-mcp-adapter-core", version: "0.5.0" });
+    world.set("curl", receipt, { name: "noa-receipt", version: "0.9.0" });
+    const proxy = (dependencies, extra = {}) => ({
+      name: "noa-mcp-proxy", version: "0.5.0",
+      dependencies: { "@modelcontextprotocol/sdk": "1.30.1", ...dependencies }, ...extra,
+    });
+    const place = (manifest, link = false) => (runnerTemp) => {
+      const dir = path.join(runnerTemp, "noa-release-manifest", "package");
+      fs.mkdirSync(dir, { recursive: true });
+      if (manifest === null) return;
+      if (link) {
+        fs.writeFileSync(path.join(runnerTemp, "elsewhere.json"), JSON.stringify(manifest));
+        fs.symlinkSync(path.join(runnerTemp, "elsewhere.json"), path.join(dir, "package.json"));
+      } else {
+        fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify(manifest));
+      }
+    };
+    // The step reads the publish policy of the checkout, so the fixture runs it from REPO: the
+    // sibling set is the repository's own list of published packages, not a list in the workflow.
+    const step = "stage/Require plain registry dependencies and released sibling versions";
+    const base = {
+      sha: "a".repeat(40), cwd: REPO, prepare: place(proxy({ "noa-mcp-adapter-core": "^0.5.0" })),
+      expressions: { "inputs.version": "0.5.0", ...P.expressions },
+    };
+    const accepted = world.run(step, base);
+    assert.equal(accepted.status, 0, `a sibling the registry serves was refused:\n${accepted.output}`);
+    assert.equal(accepted.summary, "Sibling dependency on the registry: noa-mcp-adapter-core@0.5.0\n",
+      `the step did not report exactly the one sibling it checked:\n${accepted.summary}`);
+    const adapterBase = mergeRun(base, {
+      prepare: place({ name: "noa-mcp-adapter-core", version: "0.5.0", dependencies: { "noa-receipt": "^0.9.0" } }),
+      expressions: { "inputs.package": "noa-mcp-adapter-core" },
+    });
+    const adapterRun = world.run(step, adapterBase);
+    assert.equal(adapterRun.status, 0, `adapter-core with a released noa-receipt was refused:\n${adapterRun.output}`);
+    assert.equal(adapterRun.summary, "Sibling dependency on the registry: noa-receipt@0.9.0\n", adapterRun.summary);
+    const withSibling = (spec) => ({ prepare: place(proxy({ "noa-mcp-adapter-core": spec })) });
+    expectRefusals(world, step, base, [
+      // The release order: noa-mcp-proxy before noa-mcp-adapter-core 0.5.0 is public.
+      ["a sibling version the registry does not serve", {}, swapRoute(world, "curl", adapter, undefined)],
+      // A registry answer that is not 200 refuses even when its body names the version.
+      ["a registry status other than 200", {}, swapRoute(world, "curl", adapter, { name: "noa-mcp-adapter-core", version: "0.5.0" }, 404)],
+      ["a registry answer for another package", {}, swapRoute(world, "curl", adapter, { name: "noa-other", version: "0.5.0" })],
+      ["a registry answer for another version", {}, swapRoute(world, "curl", adapter, { name: "noa-mcp-adapter-core", version: "0.4.0" })],
+      ["a sibling of a version that was never released", withSibling("^0.6.0")],
+      ["a file: sibling", withSibling("file:../adapter-core")],
+      ["a sibling range that is not one caret", withSibling(">=0.5.0")],
+      ["a sibling pinned without the caret", withSibling("0.5.0")],
+      ["a partial caret", withSibling("^0.5")],
+      ["a manifest with no sibling dependency", { prepare: place(proxy({})) }],
+      ["an unreleased sibling as a peer dependency", { prepare: place(proxy({ "noa-mcp-adapter-core": "^0.5.0" }, { peerDependencies: { "noa-receipt": "^9.9.9" } })) }],
+      ["an unreleased sibling as an optional dependency", { prepare: place(proxy({ "noa-mcp-adapter-core": "^0.5.0" }, { optionalDependencies: { "noa-receipt": "^9.9.9" } })) }],
+      ["a staged manifest for another package", { prepare: place({ ...proxy({ "noa-mcp-adapter-core": "^0.5.0" }), name: "noa-other" }) }],
+      ["a staged manifest for another version", { prepare: place({ ...proxy({ "noa-mcp-adapter-core": "^0.5.0" }), version: "0.5.1" }) }],
+      ["no staged manifest", { prepare: place(null) }],
+      ["a staged manifest that is a symlink", { prepare: place(proxy({ "noa-mcp-adapter-core": "^0.5.0" }), true) }],
+      ["a package the publish policy does not list", {
+        prepare: place({ ...proxy({ "noa-mcp-adapter-core": "^0.5.0" }), name: "noa-other" }),
+        expressions: { "inputs.package": "noa-other" },
+      }],
     ]);
   } finally {
     world.dispose();
   }
 });
 
-check("release controller pins each detect their own mutation", () => {
-  const base = RELEASE_CONTROLLER_SOURCE();
-  const lane = RELEASE_PR_ONLY_CONTEXTS();
-  assert.deepEqual(releaseControllerProblems(base, lane), [], "the reviewed workflow itself carries a pin problem");
+check("MCP release controller stage refuses a dependency that is not a plain registry range when executed", () => {
+  const P = MCP_BEHAVIOUR;
+  const world = releaseWorld("mcp-release-ranges-", P.source());
+  try {
+    world.set("curl", "https://registry.npmjs.org/noa-mcp-adapter-core/0.5.0", { name: "noa-mcp-adapter-core", version: "0.5.0" });
+    const proxy = ({ dependencies = {}, optionalDependencies, peerDependencies, top = {} } = {}) => ({
+      name: "noa-mcp-proxy", version: "0.5.0",
+      dependencies: { "@hono/node-server": "^2.0.5", "@modelcontextprotocol/sdk": "1.30.1", "noa-mcp-adapter-core": "^0.5.0", ...dependencies },
+      ...(optionalDependencies === undefined ? {} : { optionalDependencies }),
+      ...(peerDependencies === undefined ? {} : { peerDependencies }),
+      ...top,
+    });
+    const place = (manifest) => (runnerTemp) => {
+      const dir = path.join(runnerTemp, "noa-release-manifest", "package");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify(manifest));
+    };
+    const step = "stage/Require plain registry dependencies and released sibling versions";
+    const base = { sha: "a".repeat(40), cwd: REPO, prepare: place(proxy()), expressions: { "inputs.version": "0.5.0", ...P.expressions } };
+    const accepted = world.run(step, base);
+    assert.equal(accepted.status, 0, `the staged proxy's own ranges were refused:\n${accepted.output}`);
+    const ranges = world.run(step, mergeRun(base, { prepare: place(proxy({
+      dependencies: { "fixture-a": "~1.2.3", "fixture-b": ">=1.0.0 <2.0.0", "fixture-c": "1.x || 2.0.0-beta.1", "fixture-d": "*" },
+      optionalDependencies: { "fixture-e": "^3.1.0" }, peerDependencies: { "fixture-f": "^4.0.0" },
+    })) }));
+    assert.equal(ranges.status, 0, `plain registry ranges were refused:\n${ranges.output}`);
+    // Every value below sits under a name no package of this repository uses, so the sibling rule
+    // never sees it: only the registry-range rule can refuse it.
+    const byRangeRule = (result, label) => assert.match(result.output, /::error::noa-mcp-proxy has dependencies that are not plain registry ranges: /u,
+      `${label}: refused, but not by the registry-range rule:\n${result.output}`);
+    const forms = [
+      ["an npm alias of a repository package", "npm:noa-signer-sidecar@^0.1.0"],
+      ["a git spec", "git+https://example.invalid/fixture.git#main"],
+      ["a hosted git spec", "github:example/fixture#main"],
+      ["a URL tarball", "https://example.invalid/fixture-1.0.0.tgz"],
+      ["a workspace spec", "workspace:^0.1.0"],
+    ];
+    const one = (value) => ({ "fixture-dependency": value });
+    expectRefusals(world, step, base, [
+      ...forms.flatMap(([label, value]) => [
+        [`${label} in dependencies`, { prepare: place(proxy({ dependencies: one(value) })) }, undefined, byRangeRule],
+        [`${label} in optionalDependencies`, { prepare: place(proxy({ optionalDependencies: one(value) })) }, undefined, byRangeRule],
+      ]),
+      ["a hosted git spec in peerDependencies", { prepare: place(proxy({ peerDependencies: one("github:example/fixture") })) }, undefined, byRangeRule],
+      ["a git shorthand", { prepare: place(proxy({ dependencies: one("git://example.invalid/fixture.git") })) }, undefined, byRangeRule],
+      ["a gitlab shorthand", { prepare: place(proxy({ dependencies: one("gitlab:example/fixture") })) }, undefined, byRangeRule],
+      ["a bitbucket shorthand", { prepare: place(proxy({ dependencies: one("bitbucket:example/fixture") })) }, undefined, byRangeRule],
+      ["a gist", { prepare: place(proxy({ dependencies: one("gist:0123abcd") })) }, undefined, byRangeRule],
+      ["an http URL", { prepare: place(proxy({ dependencies: one("http://example.invalid/fixture.tgz") })) }, undefined, byRangeRule],
+      ["an owner/repo shorthand", { prepare: place(proxy({ dependencies: one("example/fixture") })) }, undefined, byRangeRule],
+      ["a link: spec", { prepare: place(proxy({ dependencies: one("link:../fixture") })) }, undefined, byRangeRule],
+      ["a path", { prepare: place(proxy({ dependencies: one("../fixture") })) }, undefined, byRangeRule],
+      ["a dist-tag", { prepare: place(proxy({ dependencies: one("latest") })) }, undefined, byRangeRule],
+      ["a dist-tag that starts with x", { prepare: place(proxy({ dependencies: one("xmas") })) }, undefined, byRangeRule],
+      ["a version with letters outside a suffix", { prepare: place(proxy({ dependencies: one("1abc") })) }, undefined, byRangeRule],
+      ["a non-string value", { prepare: place(proxy({ dependencies: one(1) })) }, undefined, byRangeRule],
+      ["an alias of a repository package under its own name", { prepare: place(proxy({ dependencies: { "noa-mcp-adapter-core": "npm:noa-mcp-adapter-core@^0.5.0" } })) }, undefined, byRangeRule],
+      ["bundled dependencies", { prepare: place(proxy({ top: { bundledDependencies: ["@hono/node-server"] } })) }],
+      ["bundleDependencies set to true", { prepare: place(proxy({ top: { bundleDependencies: true } })) }],
+    ]);
+  } finally {
+    world.dispose();
+  }
+});
+
+/**
+ * The mutations that every release controller pin must detect. Only the staged file expression
+ * differs between the controllers; every other subject is literal text both files share.
+ */
+function releaseControllerMutations(base, fileExpression, expandedFileExpression) {
   // Mutation subjects are the file's literal text, version comments included.
   const CHECKOUT_TEXT = `${RELEASE_CHECKOUT} # v7.0.1`;
   const SETUP_NODE_TEXT = `${RELEASE_SETUP_NODE} # v7.0.0`;
@@ -2537,11 +2858,11 @@ check("release controller pins each detect their own mutation", () => {
   const publishHead = "    environment: npm-release\n    permissions:\n      id-token: write\n    steps:\n";
   const minimumLine = base.split("\n").find((line) => line.startsWith("          MINIMUM_REQUIRED_CHECKS: "));
   assert.ok(minimumLine !== undefined, "the workflow has no MINIMUM_REQUIRED_CHECKS line");
-  const mutations = [
+  return [
     ["SHAPE-CANONICAL", "YAML anchor", "    runs-on: ubuntu-latest\n    timeout-minutes: 45\n", "    runs-on: &runner ubuntu-latest\n    timeout-minutes: 45\n"],
     ["SHAPE-CANONICAL", "second document", "  cancel-in-progress: false\n", "  cancel-in-progress: false\n---\n"],
     ["SHAPE-CANONICAL", "duplicate permissions key", publishHead, `${publishHead.replace("    steps:\n", "")}    permissions:\n      contents: write\n    steps:\n`],
-    ["SHAPE-RUN-EXPRESSION", "expression expanded into shell", '          test "$STAGED_FILENAME" = "noa-receipt-${INPUT_VERSION}.tgz"\n', '          test "$STAGED_FILENAME" = "noa-receipt-${{ inputs.version }}.tgz"\n'],
+    ["SHAPE-RUN-EXPRESSION", "expression expanded into shell", '          test "$STAGED_FILENAME" = "' + fileExpression + '"\n', '          test "$STAGED_FILENAME" = "' + expandedFileExpression + '"\n'],
     ["TRG-TOP-KEYS", "workflow-level env", "permissions: {}\n\nconcurrency:", "permissions: {}\n\nenv:\n  NODE_AUTH_TOKEN: placeholder\n\nconcurrency:"],
     ["TRG-DISPATCH-ONLY", "tag trigger", "on:\n  workflow_dispatch:\n", "on:\n  push:\n    tags: [v1]\n  workflow_dispatch:\n"],
     ["TRG-CONCURRENCY", "cancelled release", "  cancel-in-progress: false\n", "  cancel-in-progress: true\n"],
@@ -2593,8 +2914,8 @@ check("release controller pins each detect their own mutation", () => {
     ["HYG-SET-E", "guard without pipefail", '          set -euo pipefail\n          test "$GITHUB_EVENT_NAME" = workflow_dispatch\n', '          set -eu\n          test "$GITHUB_EVENT_NAME" = workflow_dispatch\n'],
     ["HYG-NO-ESCAPE", "guard exits early", '          test "$GITHUB_EVENT_NAME" = workflow_dispatch\n', '          exit 0\n          test "$GITHUB_EVENT_NAME" = workflow_dispatch\n'],
     ["HYG-NO-ESCAPE", "negated repository check", '          test "$GITHUB_REPOSITORY" = NordenSoft/noa-mandate-core\n', '          ! test "$GITHUB_REPOSITORY" = NordenSoft/noa-mandate-core\n'],
-    ["HYG-EXIT-ONE", "bare exit in the candidate step", '          file="noa-receipt-${INPUT_VERSION}.tgz"\n          staged=', '          exit\n          file="noa-receipt-${INPUT_VERSION}.tgz"\n          staged='],
-    ["HYG-EXIT-ONE", "exit 00 in the candidate step", '          file="noa-receipt-${INPUT_VERSION}.tgz"\n          staged=', '          exit 00\n          file="noa-receipt-${INPUT_VERSION}.tgz"\n          staged='],
+    ["HYG-EXIT-ONE", "bare exit in the candidate step", '          file="' + fileExpression + '"\n          staged=', '          exit\n          file="' + fileExpression + '"\n          staged='],
+    ["HYG-EXIT-ONE", "exit 00 in the candidate step", '          file="' + fileExpression + '"\n          staged=', '          exit 00\n          file="' + fileExpression + '"\n          staged='],
     ["HYG-NO-SHOPT", "errexit switched off before the verify pass", '          run_exact_bootstrap --verify "$output" --git-ref "$GITHUB_SHA"\n', '          shopt -u -o errexit\n          run_exact_bootstrap --verify "$output" --git-ref "$GITHUB_SHA"\n'],
     ["HYG-OR-REFUSALS", "candidate run provenance tolerated", '.status == "completed" and .conclusion == "success"\' >/dev/null\n', '.status == "completed" and .conclusion == "success"\' >/dev/null || echo "provenance unchecked"\n'],
     ["HYG-OR-REFUSALS", "manifest cross-check tolerated", '.[0].tarballSha256 == $s\' "$stage/publish-artifacts.manifest.json" >/dev/null\n', '.[0].tarballSha256 == $s\' "$stage/publish-artifacts.manifest.json" >/dev/null || true\n'],
@@ -2603,28 +2924,69 @@ check("release controller pins each detect their own mutation", () => {
     ["HYG-BRACKET-REFUSALS", "bracket test left to errexit", '[[ "$STAGED_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::STAGED_SHA256 is malformed"; exit 1; }', '[[ "$STAGED_SHA256" =~ ^[0-9a-f]{64}$ ]]'],
     ["RB-SIGNATURES", "signatures unchecked", 'npm audit signatures --json --include-attestations > "$work/signatures.json"', 'npm ls --json > "$work/signatures.json"'],
   ];
+}
+
+function assertReleasePinsDetectMutations(base, problemsOf, mutations, readers) {
+  assert.deepEqual(problemsOf(base), [], "the reviewed workflow itself carries a pin problem");
   const seenPins = new Set();
   for (const [pin, label, find, replace] of mutations) {
     assert.equal(base.split(find).length, 2, `${label}: the mutation subject must occur exactly once`);
     const mutant = exactReplacement(base, find, replace, label);
     assert.notEqual(mutant, base, `${label}: the mutation changed nothing`);
-    const pins = releaseControllerProblems(mutant, lane).map((problem) => problem.pin);
+    const pins = problemsOf(mutant).map((problem) => problem.pin);
     assert.ok(pins.includes(pin), `${label}: pin ${pin} did not go red (got ${JSON.stringify([...new Set(pins)])})`);
     seenPins.add(pin);
   }
-  // Every pin the reader can report has a mutation of its own; the list is read from the reader's
+  // Every pin the readers can report has a mutation of its own; the list is read from the readers'
   // own call sites so a new pin without a mutation turns this check red.
-  const declaredPins = new Set(
-    [...releaseControllerProblems.toString().matchAll(/fail\("[a-z]+", "([A-Z]+(?:-[A-Z0-9]+)+)"/gu)].map((match) => match[1]),
-  );
+  const declaredPins = new Set(readers.flatMap((reader) =>
+    [...reader.toString().matchAll(/fail\("[a-z]+", "([A-Z]+(?:-[A-Z0-9]+)+)"/gu)].map((match) => match[1])));
   assert.ok(declaredPins.size >= 30, `only ${declaredPins.size} pins were found in the reader`);
   assert.deepEqual([...declaredPins].filter((pin) => !seenPins.has(pin)), [], "pins without a mutation of their own");
+}
+
+check("release controller pins each detect their own mutation", () => {
+  const base = RELEASE_CONTROLLER_SOURCE();
+  const lane = RELEASE_PR_ONLY_CONTEXTS();
+  assertReleasePinsDetectMutations(base, (source) => releaseControllerProblems(source, lane),
+    releaseControllerMutations(base, 'noa-receipt-${INPUT_VERSION}.tgz', 'noa-receipt-${{ inputs.version }}.tgz'),
+    [releaseControllerProblems]);
   // The lane derivation itself: a sibling that also runs on push is not a pull-request-only lane.
   const widened = new Set([...lane, "shapes"]);
   assert.ok(releaseControllerProblems(base.replace('PR_ONLY_CONTEXTS: "pr-title review"', 'PR_ONLY_CONTEXTS: "pr-title review shapes"'), lane)
     .some((problem) => problem.pin === "STG-PR-LANE"));
   assert.deepEqual(releaseControllerProblems(base.replace('PR_ONLY_CONTEXTS: "pr-title review"', 'PR_ONLY_CONTEXTS: "pr-title review shapes"'), widened)
     .filter((problem) => problem.pin === "STG-PR-LANE"), [], "the lane pin is not bound to the sibling-derived set");
+});
+
+check("MCP release controller pins each detect their own mutation", () => {
+  const base = MCP_RELEASE_CONTROLLER_SOURCE();
+  const lane = MCP_RELEASE_PR_ONLY_CONTEXTS();
+  const guardLine = `          ${MCP_PACKAGE_GUARD}\n`;
+  const stageGuard = `{ echo "::error::INPUT_VERSION is malformed"; exit 1; }\n${guardLine}\n      - uses: actions/checkout@`;
+  const readbackGuard = `{ echo "::error::STAGED_INTEGRITY is malformed"; exit 1; }\n${guardLine}          work=`;
+  const publishRefusal = `            ${MCP_REFUSE_OTHER_PACKAGE}\n          esac\n          tar -xzOf`;
+  const versionRefusal = `            ${MCP_REFUSE_OTHER_PACKAGE}\n          esac\n          jq -e --arg p`;
+  const siblingStep = base.slice(
+    base.indexOf("      - name: Require plain registry dependencies and released sibling versions\n"),
+    base.indexOf("      - name: Bind the release bytes\n"),
+  );
+  assertReleasePinsDetectMutations(base, (source) => mcpReleaseControllerProblems(source, lane), [
+    ...releaseControllerMutations(base, '${INPUT_PACKAGE}-${INPUT_VERSION}.tgz', '${{ inputs.package }}-${INPUT_VERSION}.tgz'),
+    ["TRG-DISPATCH-ONLY", "package list widened", "options: [noa-mcp-adapter-core, noa-mcp-proxy]", "options: [noa-mcp-adapter-core, noa-mcp-proxy, noa-receipt]"],
+    ["TRG-DISPATCH-ONLY", "free-text package input", "        type: choice\n        options: [noa-mcp-adapter-core, noa-mcp-proxy]\n", "        type: string\n"],
+    ["TRG-GUARD-FIRST", "guard reads the package without env", "          INPUT_PACKAGE: ${{ inputs.package }}\n          INPUT_VERSION: ${{ inputs.version }}\n        run: |\n          set -euo pipefail\n          test \"$GITHUB_EVENT_NAME\"", "          INPUT_VERSION: ${{ inputs.version }}\n        run: |\n          set -euo pipefail\n          test \"$GITHUB_EVENT_NAME\""],
+    ["MCP-PACKAGE-CLOSED", "stage guard accepts any noa package", stageGuard, stageGuard.replace("^(noa-mcp-adapter-core|noa-mcp-proxy)$", "^noa-[a-z-]+$")],
+    ["MCP-PACKAGE-CLOSED", "readback package check removed", readbackGuard, readbackGuard.replace(guardLine, "")],
+    ["MCP-PACKAGE-DIRECTORY", "publish accepts any package", publishRefusal, publishRefusal.replace(MCP_REFUSE_OTHER_PACKAGE, '*) directory="packages/${INPUT_PACKAGE}" ;;')],
+    ["MCP-PACKAGE-DIRECTORY", "version step maps a third package", versionRefusal, `            noa-receipt) dir=. ;;\n${versionRefusal}`],
+    ["MCP-SIBLINGS-RELEASED", "registry status not checked", '            test "$code" = 200 ||\n', '            test -n "$code" ||\n'],
+    ["MCP-SIBLINGS-RELEASED", "empty sibling census accepted", "jq -e 'length > 0 and all(.[]; (.value", "jq -e 'all(.[]; (.value"],
+    ["MCP-SIBLINGS-RELEASED", "sibling list typed by hand", "published=\"$(jq -c '[.packages[].name]' scripts/lib/publish-artifact-policy.json)\"", "published='[\"noa-receipt\"]'"],
+    ["MCP-SIBLINGS-RELEASED", "registry-range rule removed", '          test -z "$unplain" ||\n', '          test -n "$INPUT_PACKAGE" ||\n'],
+    ["MCP-SIBLINGS-RELEASED", "bundled dependencies allowed", "if type == \"array\" then length == 0 else . == false end", "if type == \"array\" then true else true end"],
+    ["HYG-STEP-LISTS", "sibling step removed", siblingStep, ""],
+  ], [releaseControllerProblems, mcpReleaseControllerProblems]);
 });
 
 check("branch-hygiene workflow retains least-privilege pull-request measurement", () => {
