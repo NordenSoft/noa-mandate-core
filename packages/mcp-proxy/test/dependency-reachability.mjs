@@ -53,18 +53,18 @@ const SUBPATH = '@hono/node-server/serve-static';
  * has no reason to import, and asserts nothing imports it. That is a property of our own code.
  *
  * **The version-floor entries below have no such argument, and saying otherwise would be the overclaim
- * this repository treats as a red line.** `fast-uri`, `hono`, `ip-address`, and `qs` are executed BY THE SDK
+ * this repository treats as a red line.** `fast-uri`, `hono`, `ip-address`, `proxy-addr`, and `qs` are executed BY THE SDK
  * ON OUR BEHALF — ajv parses URIs while validating schemas, hono serves the HTTP+SSE transport, and
  * express/body-parser parse request query strings through `qs` while express-rate-limit parses client
- * addresses. We never import them, and that proves nothing about whether they run. **For these entries
+ * addresses and express resolves them through `proxy-addr`. We never import them, and that proves nothing about whether they run. **For these entries
  * the VERSION FLOOR is the whole control**, and it is recorded that way rather than dressed up as
  * reachability.
  *
  * A floor is also not a fix for CONSUMERS: npm `overrides` bind the project that declares them, never
  * a downstream installer. What protects a consumer here is that every fix falls INSIDE the SDK's own
  * semver ranges (`hono: ^4.11.4`, `ajv: ^8.17.1` -> `fast-uri: ^3.0.1`,
- * `express-rate-limit: ^8.2.1` -> `ip-address: ^10.2.0`, and express/body-parser accept the fixed
- * `qs@6.16.0`), so a fresh install already resolves the fixed versions. Our LOCKFILE was the stale
+ * `express-rate-limit: ^8.2.1` -> `ip-address: ^10.2.0`, `express` -> `proxy-addr: ^2.0.7`, and
+ * express/body-parser accept the fixed `qs@6.16.0`), so a fresh install already resolves the fixed versions. Our LOCKFILE was the stale
  * thing, not the shipped dependency graph. If a future advisory's fix falls OUTSIDE those ranges, an
  * override will not help consumers and the honest response is a changelog entry, not a green gate.
  */
@@ -74,19 +74,24 @@ const FLOORS = [
     advisory: 'GHSA-frvp-7c67-39w9', control: 'version floor + the serve-static import assertion above',
   },
   {
-    name: 'fast-uri', path: ['fast-uri'], floor: '3.1.6',
-    advisory: 'GHSA-5jgf-p345-68v8 + GHSA-f65p-4m7j-42xc + GHSA-fph4-wmhf-6fwf + GHSA-jqff-g426-hqxp (host confusion / SSRF normalization)',
+    name: 'fast-uri', path: ['fast-uri'], floor: '3.1.8',
+    advisory: 'GHSA-5jgf-p345-68v8 + GHSA-f65p-4m7j-42xc + GHSA-fph4-wmhf-6fwf + GHSA-jqff-g426-hqxp (host confusion / SSRF normalization) + GHSA-hrr3-gc8f-f4qj (host case normalization via percent-encoded octets)',
     control: 'VERSION FLOOR ONLY — ajv runs it on our behalf while validating tool schemas',
   },
   {
-    name: 'hono', path: ['hono'], floor: '4.13.5',
-    advisory: 'GHSA-8j4g-w8fx-2239 (ReDoS in CORS middleware) + GHSA-crvj-82cr-hjcx (query fragment differential) + GHSA-g6gw-c38x-mqfc (parseBody nesting exhaustion) + GHSA-gqvv-2mrq-wpjv (SSG traversal)',
+    name: 'hono', path: ['hono'], floor: '4.13.13',
+    advisory: 'GHSA-8j4g-w8fx-2239 (ReDoS in CORS middleware) + GHSA-crvj-82cr-hjcx (query fragment differential) + GHSA-g6gw-c38x-mqfc (parseBody nesting exhaustion) + GHSA-gqvv-2mrq-wpjv (SSG traversal) + GHSA-hxh3-vqpv-xpqv (hono/jsx boundary component XSS)',
     control: 'VERSION FLOOR ONLY — the SDK serves the HTTP+SSE transport with it',
   },
   {
-    name: 'ip-address', path: ['ip-address'], floor: '10.4.0',
-    advisory: 'GHSA-mwp4-54f8-5fhr + GHSA-4xrf-jv44-h6hh + GHSA-22jq-vg5j-6vgg (SSRF / trust-boundary bypass)',
+    name: 'ip-address', path: ['ip-address'], floor: '10.7.3',
+    advisory: 'GHSA-mwp4-54f8-5fhr + GHSA-4xrf-jv44-h6hh + GHSA-22jq-vg5j-6vgg (SSRF / trust-boundary bypass) + GHSA-2vr4-cq9g-pvrc + GHSA-rpw4-54j3-4h4q + GHSA-j6r3-76f7-8jcv (range classification / cross-family subnet checks) + GHSA-h3mg-xc3c-68pw (unbounded parse diagnostic)',
     control: 'VERSION FLOOR ONLY — express-rate-limit parses client addresses with it',
+  },
+  {
+    name: 'proxy-addr', path: ['proxy-addr'], floor: '2.0.8',
+    advisory: 'GHSA-jqcg-44mw-7w3h (IP spoofing via IPv4-mapped IPv6 trust subnet)',
+    control: 'VERSION FLOOR ONLY — express resolves the request client address with it',
   },
   {
     name: 'qs', path: ['qs'], floor: '6.16.0',
