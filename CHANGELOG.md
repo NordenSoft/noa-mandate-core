@@ -41,6 +41,38 @@ All notable changes to `noa-receipt` are documented here. The format follows
   that no longer names exactly those lines. NC-S9.1's citation of the effect owner's in-process commit
   had drifted and is corrected.
 
+### Security
+
+- A second release controller, `.github/workflows/release-npm-mcp.yml`, releases `noa-mcp-adapter-core`,
+  `noa-signer-sidecar` and `noa-mcp-proxy`; the legacy `publish-mcp.yml` workflow ID stays quarantined.
+  It mirrors `release-npm-noa-receipt.yml` control for control: the same exact-commit, ruleset,
+  environment and registry checks, the same exact-commit restage compared with the independent
+  main-push candidate, `npm stage publish --provenance` only (never a direct publish), and the same
+  readback. The run bodies that do not depend on the package are byte-identical to the receipt
+  controller's. Its `package` input accepts exactly the three names, and the stage guard, the version
+  check, the publish job and the readback each refuse any other. One package is released per run, in
+  this order: `noa-receipt`, then `noa-mcp-adapter-core`, then `noa-signer-sidecar`, then
+  `noa-mcp-proxy`. Stage refuses a staged manifest that bundles dependencies or whose `dependencies`,
+  `optionalDependencies` or `peerDependencies` hold any value other than a plain registry range: an npm
+  alias (`npm:`), a git, `git+` or hosted-git spec (`github:`, `gitlab:`, `bitbucket:`, `gist:`), an
+  `http(s)` URL, a `workspace:`, `file:` or `link:` spec, a path or a dist-tag. An entry that names a
+  package this repository publishes must also be one caret range of an exact version the registry
+  already serves, so `noa-signer-sidecar` cannot be staged before the `noa-mcp-adapter-core` version it
+  names is public, and `noa-mcp-proxy` cannot be staged before the `noa-mcp-adapter-core` and
+  `noa-signer-sidecar` versions it names are public. Ranges of third-party dependencies are not pinned.
+  The shared local-path lint and the staging policy are unchanged and still refuse only local-path
+  specifiers. The release staging turns each local link into a caret range of the linked package's
+  version (`planReleaseManifests` in `scripts/lib/publish-artifact-staging.mjs`), so the proxy's
+  optional `file:../signer-sidecar` link is staged as `^0.1.0`; the staging selftest now pins that
+  rewrite for optional and peer dependencies and for this repository's own MCP links. The name
+  `noa-signer-sidecar` also holds two placeholder versions published by the project owner before this
+  change (0.0.0-stage and 0.0.1). They match no `^0.1.0` range, stay on the registry, and the
+  maintainer deprecates them once 0.1.0 is public. The knockout selftest pins the workflow's complete
+  bytes, reads it with the receipt controller's structural reader and executes every run body against
+  stubbed tools, and knockout arms remove its controls one at a time. The `npm-release` environment and
+  each package's npm trusted-publisher binding to this file (stage publish only) are provider settings
+  that this repository does not create, and no version has been released through this controller yet.
+
 ## [0.9.0] - 2026-09-25
 
 What changed for verifier users since 0.8.0, in short (the entries below give the detail):
