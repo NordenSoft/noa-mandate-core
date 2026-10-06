@@ -197,7 +197,14 @@ export async function buildOutcomeReceiptAsync({ decisionReceipt, tool, outcome,
 
 /**
  * Fully-offline verification of an outcome receipt. Returns
- * `{ ok, reason?, decisionId?, status? }` — never throws.
+ * `{ ok, code?, reason?, decisionId?, status? }` — never throws.
+ *
+ * Every negative result carries a stable `code` next to its human `reason`:
+ *   "MALFORMED"           not an outcome receipt this function can check (shape, spec, sig fields)
+ *   "TAMPERED"            well-formed, but NOT authenticated under `verification`: the signature does
+ *                         not match, the kid is unknown or retired, or (with expectedDecisionReceipt)
+ *                         the outcome is bound to a different decision
+ *   "VERIFICATION_INPUT"  `verification` itself is missing or not an object (a caller error)
  *
  * @param {object} outcomeReceipt
  * @param {{ verification: Record<string,string>|{ spec: string, keys: Record<string,
@@ -216,33 +223,33 @@ export function verifyOutcomeReceipt(outcomeReceipt, opts = {}) {
   try {
     const verification = opts?.verification;
     const expectedDecisionReceipt = opts?.expectedDecisionReceipt;
-    if (!outcomeReceipt || typeof outcomeReceipt !== "object") return { ok: false, reason: "not an object" };
-    if (outcomeReceipt.spec !== OUTCOME_RECEIPT_SPEC) return { ok: false, reason: `not an outcome receipt (spec ${JSON.stringify(outcomeReceipt.spec)})` };
+    if (!outcomeReceipt || typeof outcomeReceipt !== "object") return { ok: false, code: "MALFORMED", reason: "not an object" };
+    if (outcomeReceipt.spec !== OUTCOME_RECEIPT_SPEC) return { ok: false, code: "MALFORMED", reason: `not an outcome receipt (spec ${JSON.stringify(outcomeReceipt.spec)})` };
     const { sig, ...unsigned } = outcomeReceipt;
-    if (!sig || sig.alg !== "ed25519" || !sig.kid || !sig.value) return { ok: false, reason: "missing or malformed sig" };
+    if (!sig || sig.alg !== "ed25519" || !sig.kid || !sig.value) return { ok: false, code: "MALFORMED", reason: "missing or malformed sig" };
     if (!unsigned.outcome || (unsigned.outcome.status !== "success" && unsigned.outcome.status !== "error")) {
-      return { ok: false, reason: "malformed outcome.status" };
+      return { ok: false, code: "MALFORMED", reason: "malformed outcome.status" };
     }
     if (!unsigned.decision || typeof unsigned.decision.id !== "string" || typeof unsigned.decision.hash !== "string") {
-      return { ok: false, reason: "malformed decision binding" };
+      return { ok: false, code: "MALFORMED", reason: "malformed decision binding" };
     }
     if (!verification || typeof verification !== "object" || Array.isArray(verification)) {
-      return { ok: false, reason: "missing or malformed verification data" };
+      return { ok: false, code: "VERIFICATION_INPUT", reason: "missing or malformed verification data" };
     }
 
     const message = signingBytes(unsigned);
     // The message and signature go to the resolver too: a RETIRED outcome kid is refused as retired
     // only when this signature is authentic, and a forgery naming it is an invalid signature.
     const resolved = resolveVerificationKey(canonicalize(verification), sig.kid, message, sig.value);
-    if (!resolved.ok) return { ok: false, reason: resolved.reason };
+    if (!resolved.ok) return { ok: false, code: "TAMPERED", reason: resolved.reason };
     const pub = resolved.publicKey;
-    if (!verifyEd25519(pub, message, sig.value)) return { ok: false, reason: "signature mismatch" };
+    if (!verifyEd25519(pub, message, sig.value)) return { ok: false, code: "TAMPERED", reason: "signature mismatch" };
     if (expectedDecisionReceipt) {
       if (
         unsigned.decision.id !== expectedDecisionReceipt.id ||
         unsigned.decision.hash !== expectedDecisionReceipt.chain?.hash
       ) {
-        return { ok: false, reason: "outcome is not bound to the expected decision receipt" };
+        return { ok: false, code: "TAMPERED", reason: "outcome is not bound to the expected decision receipt" };
       }
     }
     return { ok: true, decisionId: unsigned.decision.id, status: unsigned.outcome.status };
@@ -252,6 +259,6 @@ export function verifyOutcomeReceipt(outcomeReceipt, opts = {}) {
     // the catch block whose job is to convert a failure into `{ ok: false }`. A caller told
     // "verifyOutcomeReceipt never throws" had no handler, so an unverifiable receipt became an
     // unhandled rejection instead of a NEGATIVE VERIFICATION RESULT.
-    return { ok: false, reason: `verify threw: ${describeThrown(err)}` };
+    return { ok: false, code: "MALFORMED", reason: `verify threw: ${describeThrown(err)}` };
   }
 }

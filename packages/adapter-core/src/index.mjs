@@ -56,7 +56,16 @@ export {
   buildReceiptAsync,
   resolveVerificationKey,
   SIGNING_KEY_LIFECYCLE_SPEC,
+  // The kernel's own policy grammar check, so a CLI that loads an operator's policy FILE refuses it
+  // at startup with the same rules `evaluate` applies per call (mcp-proxy's --policy).
+  assertValidPolicy,
+  // The kernel's strict JSON boundary (duplicate keys refused), for CLIs that read signed documents.
+  parseDocument,
 } from "noa-receipt";
+
+// "Was this module the one Node was asked to run?", resolved through symlinks so a CLI launched via
+// an npm `.bin` link runs its body instead of silently exiting 0 (see entry-point.mjs).
+export { isEntryPoint } from "./entry-point.mjs";
 
 // BOUNDARY 2 — the ONE conversion from an arbitrary thrown value to a safe descriptor. Re-exported
 // from the package root as well as the `./safe-throw` subpath so no consumer has a reason to write

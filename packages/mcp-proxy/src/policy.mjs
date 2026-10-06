@@ -53,3 +53,55 @@ export const TRANSFER_GUARD_POLICY = {
 export const APPROVAL_RULES = [
   { id: "transfer-needs-human", match: { type: "exact", action: "transfer_funds" }, threshold: { path: "amountMinor", op: "ge", value: 5000 } },
 ];
+
+/**
+ * The placeholder tool names `noa-mcp-proxy init` writes into its starter files. They are
+ * deliberately names no real server is likely to expose, so an un-renamed starter policy matches
+ * nothing and every real tool stays denied (default-DENY) until the operator names their own.
+ */
+export const STARTER_TOOL_NAMES = Object.freeze({
+  allowed: "my_read_tool",
+  needsApproval: "my_payment_tool",
+  blocked: "my_delete_tool",
+});
+
+/**
+ * Builds a fresh starter `--policy` document, written by `init` as policy.json (a builder, not a
+ * shared module-level table, so no caller can change what the next one gets). One tool allowed,
+ * one allowed by the policy but held for a human by starterApprovalRules() (the policy decides IF a
+ * call may run; the approval rule decides that a human must say yes first), one blocked by an
+ * explicit DENY. Anything not named here is denied by the kernel's default. The rule ids carry the
+ * explanation because JSON has no comments and the policy grammar is closed (an extra "comment"
+ * key is refused).
+ *
+ * `names` defaults to the placeholders; `init --allow-tool/--approval-tool/--block-tool` passes the
+ * operator's own names, and the SAME object feeds starterApprovalRules(), so the two files can never
+ * disagree about which tool needs a human.
+ *
+ * @param {{ allowed: string, needsApproval: string, blocked: string }} [names]
+ */
+export function starterPolicy(names = STARTER_TOOL_NAMES) {
+  const { allowed, needsApproval, blocked } = names;
+  return {
+    spec: "noa.policy/0.2",
+    id: "my-tools-v1",
+    requiredPaths: ["action"],
+    rules: [
+      { id: `allow-${allowed}`, when: { op: "eq", path: "action", value: allowed }, then: "ALLOW" },
+      { id: `allow-${needsApproval}-after-human-approval`, when: { op: "eq", path: "action", value: needsApproval }, then: "ALLOW" },
+      { id: `block-${blocked}`, when: { op: "eq", path: "action", value: blocked }, then: "DENY" },
+    ],
+  };
+}
+
+/**
+ * Builds the starter approval-rules.json written by `init`: ONE rule that holds every call of the
+ * starter policy's approval tool for a human. Nothing else: a rule for a tool the starter policy
+ * does not name would be a dead rule, and the proxy refuses to start with one (see
+ * policy-file.mjs's requireApprovalRulesCovered).
+ *
+ * @param {{ needsApproval: string }} [names]
+ */
+export function starterApprovalRules(names = STARTER_TOOL_NAMES) {
+  return [{ id: `${names.needsApproval}-needs-human`, match: { type: "exact", action: names.needsApproval } }];
+}

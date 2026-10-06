@@ -8,9 +8,9 @@
  *   1. an MCP host's config actually launches `proxy.mjs` wrapping your real downstream, pointed at
  *      the files this command writes (see this package's README, "Human-approval gate (R4)" and
  *      "Run it yourself");
- *   2. the generated `approval-rules.json` actually matches YOUR tool/action ids — the starter rule
- *      below matches ONLY the bundled demo tool, and a rule that matches nothing you own holds
- *      nothing of yours; and
+ *   2. the generated `policy.json` and `approval-rules.json` name YOUR tools — pass them with
+ *      `--allow-tool`, `--approval-tool` and `--block-tool`; the default placeholders match nothing
+ *      you own, so until then every one of your tools is denied; and
  *   3. a real HUMAN runs `noa-approve` out-of-band for every held call, from a separate terminal,
  *      holding the approver private key this command mints — that human's judgment is the control;
  *      this package only proves, cryptographically, what they decided, after the fact; and
@@ -22,12 +22,19 @@
  * THREAT-MODEL.md before relying on any of it.
  *
  * Generates, under --dir (default "."):
- *   approval-rules.json     A starter rule set: this package's OWN demo transfer-guard fixture
- *                            (src/policy.mjs's `APPROVAL_RULES` — the exact array Scenario R in
- *                            test/smoke.mjs exercises). It holds `transfer_funds` calls of >= 5000
- *                            minor units from the BUNDLED demo-downstream.mjs. A real integration
- *                            MUST replace `match.action` (and, if used, `threshold.path`) with its
- *                            own tool/action ids before this protects anything of the operator's own.
+ *   policy.json             A STARTER `noa.policy/0.2` document for `--policy` (src/policy.mjs's
+ *                            `starterPolicy()`): one tool allowed, one tool allowed only after a human
+ *                            approves it (paired with the matching rule in approval-rules.json), one
+ *                            tool blocked, every other tool denied. The three tool names come from
+ *                            --allow-tool / --approval-tool / --block-tool; without them they are
+ *                            PLACEHOLDERS that match nothing, so every real tool is denied.
+ *                            JSON has no comments and the policy grammar is closed, so the
+ *                            explanation lives in the rule ids and in the printed next steps.
+ *   approval-rules.json     A starter rule set (src/policy.mjs's `starterApprovalRules()`): ONE rule
+ *                            holding every call of policy.json's approval tool, built from the SAME
+ *                            name, so the two files cannot disagree. (A hand edit that renames the
+ *                            tool in only one file leaves a dead approval rule, which the proxy
+ *                            refuses to start with — POLICY_APPROVAL_MISMATCH.)
  *   pending-store.jsonl      The empty JSONL operational index --pending-store points at. Empty and
  *                            "does not exist yet" fold to the identical state (see adapter-core's
  *                            pending-store.mjs) — creating it here is a real, inspectable starting
@@ -43,23 +50,23 @@
  *                            signature. Sharing this file is fine; sharing approver-key.json is the
  *                            same as handing over the approval seat itself.
  *
- * Refuses to silently overwrite: the pre-flight check runs as ONE BATCH, over all four paths,
- * BEFORE any write begins — so a directory where NONE of the four is occupied gets all four
- * written, and a directory where ANY of the four is already occupied (a regular file, a
+ * Refuses to silently overwrite: the pre-flight check runs as ONE BATCH, over all five paths,
+ * BEFORE any write begins — so a directory where NONE of the five is occupied gets all five
+ * written, and a directory where ANY of the five is already occupied (a regular file, a
  * directory, or a symlink — dangling or not; see the CWE-367 note below) refuses the run before
- * touching anything, unless --force is given, in which case all four are regenerated fresh
+ * touching anything, unless --force is given, in which case all five are regenerated fresh
  * (including a BRAND NEW approver identity — any approval-in-flight signed under the old one
  * stops verifying against the new keyring).
  *
  * Honest limit on that guarantee: the pre-flight check is atomic as a CHECK, not as a WRITE. Once
- * writing begins, the four files are still created one at a time; a failure partway through
- * (a disk error, or a file appearing at one of the four paths in the window between the
+ * writing begins, the five files are still created one at a time; a failure partway through
+ * (a disk error, or a file appearing at one of the five paths in the window between the
  * pre-flight check and that specific write — the same TOCTOU class CWE-367 names) can leave
  * earlier files in this run on disk and later ones missing. On any write failure this prints
- * exactly which of the four were confirmed written before the failure, rather than claiming
- * either "all four" or "none" by default.
+ * exactly which of the five were confirmed written before the failure, rather than claiming
+ * either "all five" or "none" by default.
  *
- * CWE-367 (symlink / TOCTOU): every one of the four writes below uses the SAME
+ * CWE-367 (symlink / TOCTOU): every one of the five writes below uses the SAME
  * `O_CREAT|O_EXCL|O_NOFOLLOW` guard, applied uniformly rather than only on the one file that
  * happens to hold key material. `O_EXCL` alone already makes the OS refuse to create through a
  * PRE-EXISTING symlink at the target path — dangling or not, per POSIX open(2) — independently of
@@ -75,8 +82,8 @@ import { mkdirSync, lstatSync, openSync, writeFileSync, closeSync, unlinkSync, r
 import { join, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { loadOrCreateKeyFile, generateKeyPair, validateApprovalRules, describeThrown, thrownCode, intrinsics } from "noa-mcp-adapter-core";
-import { APPROVAL_RULES } from "./policy.mjs";
+import { loadOrCreateKeyFile, generateKeyPair, validateApprovalRules, assertValidPolicy, describeThrown, thrownCode, isEntryPoint, intrinsics } from "noa-mcp-adapter-core";
+import { starterPolicy, starterApprovalRules, STARTER_TOOL_NAMES } from "./policy.mjs";
 
 // Builtins taken from the kernel's module-load capture rather than read live, matching every other
 // file in this TCB (see proxy.mjs's own REDTEAM 2026-08-03 note): a decision path — and refusing to
@@ -85,7 +92,7 @@ import { APPROVAL_RULES } from "./policy.mjs";
 // `objectSetPrototypeOf` + `INERT_ARRAY_PROTOTYPE` close the WRITE half of the same argument
 // (L11): capturing `push` protects the METHOD, not the RECEIVER, and push is defined as
 // Set(O, "0", v) — a [[Set]] that walks the receiver's chain to the mutable Object.prototype.
-const { jsonStringify, arrayPush, objectSetPrototypeOf, INERT_ARRAY_PROTOTYPE } = intrinsics;
+const { jsonStringify, arrayPush, objectSetPrototypeOf, objectFreeze, INERT_ARRAY_PROTOTYPE } = intrinsics;
 
 // Captured ONCE at module load — every `process.std*.write` inside a function called later reads
 // this local binding, never the live global. `process` itself has no wrapper in the shared
@@ -94,17 +101,23 @@ const { jsonStringify, arrayPush, objectSetPrototypeOf, INERT_ARRAY_PROTOTYPE } 
 // finishes evaluating can no longer be repointed by anything that runs after.
 const PROCESS = process;
 
-const GENERATED = Object.freeze(["approval-rules.json", "pending-store.jsonl", "approver-key.json", "approver-keyring.json"]);
+const GENERATED = Object.freeze(["policy.json", "approval-rules.json", "pending-store.jsonl", "approver-key.json", "approver-keyring.json"]);
 
-const HELP = `usage: noa-mcp-proxy init [--dir <path>] [--force]
+const HELP = `usage: noa-mcp-proxy init [--dir <path>] [--allow-tool <name>] [--approval-tool <name>]
+                          [--block-tool <name>] [--force]
 
-Scaffolds approval-rules.json, pending-store.jsonl, approver-key.json, and approver-keyring.json
-into --dir (default: the current directory) — the four inputs the human-approval gate
-(--approval-rules / --pending-store / --approver-keyring) needs to start. This is scaffolding, not
-activation: it does not wire an MCP host, does not adapt the starter rule to your own tools, and
-does not run any approval — see this package's README, "Human-approval gate (R4)".
+Scaffolds policy.json (a starter --policy: one allowed tool, one tool held for a human, one blocked
+tool, every other tool denied), plus approval-rules.json, pending-store.jsonl, approver-key.json and
+approver-keyring.json (the inputs the human-approval gate --approval-rules / --pending-store /
+--approver-keyring needs) into --dir (default: the current directory), then prints the one-line
+command that starts the proxy with them. This is scaffolding, not activation: it does not wire an
+MCP host and does not run any approval — see this package's README, "Use your own tools".
 
-  --dir <path>   target directory (created if missing; default ".")
+  --dir <path>             target directory (created if missing; default ".")
+  --allow-tool <name>      your tool the policy allows (default placeholder: ${STARTER_TOOL_NAMES.allowed})
+  --approval-tool <name>   your tool that runs only after a human approves it, written into BOTH
+                           policy.json and approval-rules.json (default placeholder: ${STARTER_TOOL_NAMES.needsApproval})
+  --block-tool <name>      your tool the policy blocks (default placeholder: ${STARTER_TOOL_NAMES.blocked})
   --force        overwrite existing generated files instead of refusing (regenerates the approver
                  identity too — anything approved under the old one stops verifying)
   --help, -h     print this message
@@ -193,10 +206,10 @@ export function createFileExclusive(path, content, mode = 0o644) {
 }
 
 /**
- * ROUND 2 / HIGH 4 FIX. `O_NOFOLLOW` on each of the four writes above protects only the FINAL path
+ * ROUND 2 / HIGH 4 FIX. `O_NOFOLLOW` on each of the five writes above protects only the FINAL path
  * component — `--dir root/parent-link/child` still resolves through `parent-link` if it is a
  * symlink, because `mkdirSync`/`openSync` follow every ANCESTOR component the same way a plain
- * shell `cd` would. An independent review measured this placing all four artifacts, including the private key,
+ * shell `cd` would. An independent review measured this placing all five artifacts, including the private key,
  * outside the requested tree while every message still printed the harmless-looking lexical path.
  *
  * Fails closed if the REAL (symlink-resolved) location of `dir` differs from its LEXICAL
@@ -337,11 +350,19 @@ function parseArgs(argv) {
   // at `Object.prototype.dir` swallows `opts.dir = value` and answers every later read with the
   // attacker's directory — the same class as the symlink-redirect this file already defends against,
   // reached through the option object instead of the filesystem.
-  const opts = { dir: ".", force: false, help: false };
+  const opts = { dir: ".", force: false, help: false, allowed: null, needsApproval: null, blocked: null };
   objectSetPrototypeOf(opts, null);
+  const TOOL_FLAGS = { "--allow-tool": "allowed", "--approval-tool": "needsApproval", "--block-tool": "blocked" };
+  objectSetPrototypeOf(TOOL_FLAGS, null);
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
-    if (flag === "--dir") {
+    const toolField = TOOL_FLAGS[flag];
+    if (toolField !== undefined) {
+      const value = argv[++i];
+      if (value === undefined || value.length === 0 || value[0] === "-") throw new Error(`noa-mcp-proxy init: "${flag}" requires a tool name`);
+      if (opts[toolField] !== null) throw new Error(`noa-mcp-proxy init: "${flag}" given more than once`);
+      opts[toolField] = value;
+    } else if (flag === "--dir") {
       const value = argv[++i];
       if (value === undefined) throw new Error('noa-mcp-proxy init: "--dir" requires a value');
       opts.dir = value;
@@ -353,14 +374,65 @@ function parseArgs(argv) {
       throw new Error(`noa-mcp-proxy init: unknown flag "${flag}" (see --help)`);
     }
   }
+  // One name per role: the same tool both allowed and blocked (or both held and allowed) would make
+  // the starter's meaning depend on rule order, which is not something a starter file should hide.
+  const names = {
+    allowed: opts.allowed ?? STARTER_TOOL_NAMES.allowed,
+    needsApproval: opts.needsApproval ?? STARTER_TOOL_NAMES.needsApproval,
+    blocked: opts.blocked ?? STARTER_TOOL_NAMES.blocked,
+  };
+  objectSetPrototypeOf(names, null);
+  if (names.allowed === names.needsApproval || names.allowed === names.blocked || names.needsApproval === names.blocked) {
+    throw new Error("noa-mcp-proxy init: --allow-tool, --approval-tool and --block-tool must name three different tools");
+  }
+  opts.names = objectFreeze(names);
   return opts;
 }
 
-function nextStepsMessage({ dir, rulesPath, pendingStorePath, approverKeyPath, approverKeyringPath }) {
-  return `noa-mcp-proxy init: wrote 4 files to "${dir}":
+function nextStepsMessage({ dir, names, policyPath, rulesPath, pendingStorePath, approverKeyPath, approverKeyringPath }) {
+  // Absolute paths in everything meant to be copied: an MCP host starts the proxy from its OWN
+  // working directory, not this one. The last four flags are not generated here: the proxy creates
+  // them on first start (its own signing key, kept across restarts so keyring.json stays valid, and
+  // the two receipt logs `verify-outcome` / `noa-receipt` check against that keyring).
+  const abs = {
+    policy: resolvePath(policyPath),
+    rules: resolvePath(rulesPath),
+    pending: resolvePath(pendingStorePath),
+    key: resolvePath(approverKeyPath),
+    keyring: resolvePath(approverKeyringPath),
+  };
+  const { allowed, needsApproval, blocked } = names;
+  const placeholders = allowed === STARTER_TOOL_NAMES.allowed || needsApproval === STARTER_TOOL_NAMES.needsApproval || blocked === STARTER_TOOL_NAMES.blocked;
+  // One list feeds both the shell line and the MCP config: flag/value pairs, then the downstream.
+  const flagPairs = [
+    "--policy", abs.policy,
+    "--approval-rules", abs.rules,
+    "--pending-store", abs.pending,
+    "--approver-keyring", abs.keyring,
+    "--key-file", resolvePath(join(dir, "proxy-key.json")),
+    "--keyring-file", resolvePath(join(dir, "keyring.json")),
+    "--receipt-log", resolvePath(join(dir, "decisions.jsonl")),
+    "--outcome-log", resolvePath(join(dir, "outcomes.jsonl")),
+  ];
+  const downstream = ["--", "node", "/path/to/your-server.js"];
+  let shellArgs = "";
+  const proxyArgs = [];
+  objectSetPrototypeOf(proxyArgs, INERT_ARRAY_PROTOTYPE);
+  for (let i = 0; i < flagPairs.length; i++) {
+    shellArgs += ` ${i % 2 === 1 ? shellQuote(flagPairs[i]) : flagPairs[i]}`;
+    arrayPush(proxyArgs, flagPairs[i]);
+  }
+  for (let i = 0; i < downstream.length; i++) {
+    shellArgs += ` ${downstream[i]}`;
+    arrayPush(proxyArgs, downstream[i]);
+  }
+  const configArgs = jsonStringify(proxyArgs);
+  return `noa-mcp-proxy init: wrote ${GENERATED.length} files to "${dir}":
+  ${policyPath}
+      starter policy: ${allowed} is allowed, ${needsApproval} needs a human's approval, ${blocked} is
+      blocked, every other tool is denied.${placeholders ? " Placeholder names match none of your tools:\n      re-run with --allow-tool/--approval-tool/--block-tool <your tool> (and --force)." : ""}
   ${rulesPath}
-      starter approval rule (matches the BUNDLED demo transfer_funds tool only — edit
-      match.action to your own tool/action id before this holds anything of yours)
+      approval rule: hold every ${needsApproval} call for a human (the same name as in policy.json)
   ${pendingStorePath}
       empty operational index for outstanding approvals
   ${approverKeyPath}
@@ -368,28 +440,29 @@ function nextStepsMessage({ dir, rulesPath, pendingStorePath, approverKeyPath, a
   ${approverKeyringPath}
       PUBLIC key derived from the file above — this is what --approver-keyring feeds the proxy
 
-This is SCAFFOLDING, not activation. Nothing is protected yet. To actually see the gate hold and
-release one call:
+Start the proxy in front of your MCP server (put your server's own command after --):
 
-  1. Point an MCP host (or this package's own demo) at the proxy with the gate on, e.g.:
-       node <path-to-proxy.mjs> \\
-         --approval-rules ${shellQuote(rulesPath)} \\
-         --pending-store ${shellQuote(pendingStorePath)} \\
-         --approver-keyring ${shellQuote(approverKeyringPath)} \\
-         -- node <path-to-your-downstream-server>
-  2. A call matching the starter rule (transfer_funds, amountMinor >= 5000, against the bundled
-     demo downstream) is HELD — the proxy returns an MCP error carrying the DEFERRED receipt id;
-     the downstream is never invoked.
-  3. From a SEPARATE terminal, a human holding approver-key.json resolves it out-of-band:
-       noa-approve approve --id <receiptId> --by you@example.com \\
-         --pending-store ${shellQuote(pendingStorePath)} --key-file ${shellQuote(approverKeyPath)}
-  4. The agent retries the IDENTICAL call. Only then does the proxy adopt the signed approval and
-     forward it — approving does not itself re-execute anything.
+  noa-mcp-proxy${shellArgs}
 
-No claim here is "unforgeable" or "cannot be bypassed". Read NON-CLAIMS.md and THREAT-MODEL.md
+Or add it to your agent's MCP config ("mcpServers"):
+
+  "my-tools": {
+    "command": "noa-mcp-proxy", "args": ${configArgs}
+  }
+
+When a ${needsApproval} call is held, the agent gets an error carrying a receipt id. A human approves
+it from a SEPARATE terminal, then the agent retries the IDENTICAL call (approving does not itself
+run anything):
+
+  noa-approve approve --id <receiptId> --by you@example.com --pending-store ${shellQuote(abs.pending)} --key-file ${shellQuote(abs.key)}
+
+This is scaffolding, not activation: nothing is protected until your MCP host launches the proxy
+with these files and the placeholder names are your real tool names. No claim here is "unforgeable"
+or "cannot be bypassed". Read NON-CLAIMS.md and THREAT-MODEL.md
 (https://github.com/NordenSoft/noa-mandate-core) before relying on this for anything that matters.
 `;
 }
+
 
 /**
  * Runs one `init` invocation. Returns an exit code (0/1) — NEVER throws, NEVER calls
@@ -410,11 +483,12 @@ export function runInitCli(argv) {
   }
 
   const dir = opts.dir;
+  const policyPath = join(dir, "policy.json");
   const rulesPath = join(dir, "approval-rules.json");
   const pendingStorePath = join(dir, "pending-store.jsonl");
   const approverKeyPath = join(dir, "approver-key.json");
   const approverKeyringPath = join(dir, "approver-keyring.json");
-  const targets = { rulesPath, pendingStorePath, approverKeyPath, approverKeyringPath };
+  const targets = { policyPath, rulesPath, pendingStorePath, approverKeyPath, approverKeyringPath };
 
   try {
     mkdirSync(dir, { recursive: true });
@@ -425,8 +499,8 @@ export function runInitCli(argv) {
 
   // ROUND 2 / HIGH 4 FIX: refuse if `dir` resolves through a symlinked ANCESTOR directory — see
   // assertNoAncestorSymlink's own doc-comment. Checked ONCE, right after the directory is known to
-  // exist, rather than re-derived per target below (the four target paths are already computed
-  // relative to this SAME `dir`, so one check here covers all four).
+  // exist, rather than re-derived per target below (the five target paths are already computed
+  // relative to this SAME `dir`, so one check here covers all five).
   try {
     assertNoAncestorSymlink(dir);
   } catch (err) {
@@ -443,7 +517,7 @@ export function runInitCli(argv) {
   // failure reaches the caller as a normal exit-1 report, honoring this function's own "never
   // throws" contract, rather than escaping uncaught. An index loop (not `.filter`) over a plain
   // array (not `for…of`) — both are prototype/iterator dispatches on this decision path.
-  const allTargets = [rulesPath, pendingStorePath, approverKeyPath, approverKeyringPath];
+  const allTargets = [policyPath, rulesPath, pendingStorePath, approverKeyPath, approverKeyringPath];
   // Inert before the first write (L11): `preexisting.length > 0` is the refusal, and a swallowed
   // FIRST element leaves the count intact while `joinLines` reports the attacker's getter value —
   // the refusal message would then name a file that was never in the way.
@@ -461,7 +535,7 @@ export function runInitCli(argv) {
     PROCESS.stderr.write(
       `noa-mcp-proxy init: refusing to overwrite ${preexisting.length} existing file(s) in "${dir}":\n` +
         joinLines(preexisting) +
-        `Pass --force to regenerate all four files (this MINTS A NEW approver identity — anything\n` +
+        `Pass --force to regenerate all ${GENERATED.length} files (this MINTS A NEW approver identity — anything\n` +
         `approved under the old one stops verifying against the new keyring), or move them aside first.\n`,
     );
     return 1;
@@ -490,11 +564,18 @@ export function runInitCli(argv) {
     }
   }
 
-  // Self-check the starter rules against the SAME validator the gate itself runs at load time —
-  // belt-and-suspenders: APPROVAL_RULES is an existing, already-tested fixture, but a generator
-  // that ships a rule set it has never validated is exactly the kind of "trust me" this package
-  // exists to replace.
-  const validation = validateApprovalRules(APPROVAL_RULES);
+  // Self-check the starter files against the SAME validators the proxy runs at load time
+  // (validateApprovalRules for --approval-rules, the kernel's assertValidPolicy for --policy) — a
+  // generator that ships a file it has never validated is exactly the kind of "trust me" this
+  // package exists to replace.
+  const policyText = jsonStringify(starterPolicy(opts.names), null, 2) + "\n";
+  try {
+    assertValidPolicy(policyText);
+  } catch (err) {
+    PROCESS.stderr.write(`noa-mcp-proxy init: internal error — this package's own starter policy failed validation (${describeThrown(err)})\n`);
+    return 1;
+  }
+  const validation = validateApprovalRules(starterApprovalRules(opts.names));
   if (!validation.ok) {
     PROCESS.stderr.write(
       `noa-mcp-proxy init: internal error — this package's own starter approval rules failed validation:\n${joinLines(validation.errors)}`,
@@ -503,21 +584,25 @@ export function runInitCli(argv) {
   }
 
   // Written one at a time (this is where the "checked as one batch, written sequentially" honest
-  // limit from the module doc-comment applies) — `confirmed` tracks exactly which of the four
+  // limit from the module doc-comment applies) — `confirmed` tracks exactly which of the five
   // landed before any failure, so a partial-write report never has to guess or overclaim.
   //
   // ROUND 2 / MEDIUM 6 FIX (part 2): under --force, each target's OLD file is removed IMMEDIATELY
-  // BEFORE that SAME target is recreated — never all four removed upfront. A failure at step N
-  // therefore leaves steps 1..N-1 holding their NEW content and steps N..4 holding their OLD
-  // (untouched, still-working) content — never "all four destroyed, nothing replaced".
+  // BEFORE that SAME target is recreated — never all five removed upfront. A failure at step N
+  // therefore leaves steps 1..N-1 holding their NEW content and steps N..5 holding their OLD
+  // (untouched, still-working) content — never "all five destroyed, nothing replaced".
   // Inert before the first write (L11): this list is the partial-progress report a failed scaffold
   // hands the operator. A swallowed element makes it name the wrong file, which is the one thing
   // this list exists to get right.
   const confirmed = [];
   objectSetPrototypeOf(confirmed, INERT_ARRAY_PROTOTYPE);
   try {
+    removeIfForced(policyPath, opts.force);
+    createFileExclusive(policyPath, policyText);
+    arrayPush(confirmed, policyPath);
+
     removeIfForced(rulesPath, opts.force);
-    createFileExclusive(rulesPath, jsonStringify(APPROVAL_RULES, null, 2) + "\n");
+    createFileExclusive(rulesPath, jsonStringify(starterApprovalRules(opts.names), null, 2) + "\n");
     arrayPush(confirmed, rulesPath);
 
     removeIfForced(pendingStorePath, opts.force);
@@ -541,21 +626,23 @@ export function runInitCli(argv) {
     PROCESS.stderr.write(
       `noa-mcp-proxy init: could not write generated files (${describeThrown(err)})\n` +
         (confirmed.length > 0
-          ? `${confirmed.length} of 4 file(s) WERE written before this failure (not all-or-nothing once writing starts — see init.mjs's doc-comment):\n${joinLines(confirmed)}`
-          : "0 of 4 files were written.\n"),
+          ? `${confirmed.length} of ${GENERATED.length} file(s) WERE written before this failure (not all-or-nothing once writing starts — see init.mjs's doc-comment):\n${joinLines(confirmed)}`
+          : `0 of ${GENERATED.length} files were written.\n`),
     );
     return 1;
   }
 
-  // Only reached once EVERY one of the four literal paths below was freshly created (never
+  // Only reached once EVERY one of the five literal paths below was freshly created (never
   // followed through a symlink — createFileExclusive would have thrown first) — so this message
   // is never printed for a run that actually wrote somewhere else.
-  PROCESS.stdout.write(nextStepsMessage({ dir, ...targets }));
+  PROCESS.stdout.write(nextStepsMessage({ dir, names: opts.names, ...targets }));
   return 0;
 }
 
 export const GENERATED_FILE_NAMES = GENERATED;
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Symlink-safe entry check (adapter-core's isEntryPoint): a raw `import.meta.url === file://argv[1]`
+// comparison never matches when this file is reached through a symlink, and the body was skipped.
+if (isEntryPoint(import.meta.url)) {
   process.exit(runInitCli(process.argv.slice(2)));
 }

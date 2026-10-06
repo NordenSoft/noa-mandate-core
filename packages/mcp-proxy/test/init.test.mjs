@@ -1,10 +1,10 @@
 /**
  * init.test.mjs — `noa-mcp-proxy init` (src/init.mjs): the scaffolding command that generates the
- * human-approval gate's four inputs (approval-rules.json, pending-store.jsonl, approver-key.json,
- * approver-keyring.json).
+ * starter --policy (policy.json) and the human-approval gate's inputs (approval-rules.json,
+ * pending-store.jsonl, approver-key.json, approver-keyring.json).
  *
  * Three things this covers, matched to the task's evidence gate:
- *   1. generated-file shape — each of the four files is exactly what proxy.mjs/noa-approve expect.
+ *   1. generated-file shape — each of the five files is exactly what proxy.mjs/noa-approve expect.
  *   2. the refuse-to-overwrite path — a second `init` in the same directory writes NOTHING and
  *      exits non-zero unless --force is given, in which case it regenerates (including a genuinely
  *      NEW approver identity, not a silent no-op).
@@ -18,12 +18,12 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { runInitCli, mintApproverIdentityExclusive, createFileExclusive } from "../src/init.mjs";
-import { APPROVAL_RULES } from "../src/policy.mjs";
-import { generateKeyPair } from "noa-mcp-adapter-core";
+import { starterPolicy, starterApprovalRules, STARTER_TOOL_NAMES } from "../src/policy.mjs";
+import { generateKeyPair, assertValidPolicy } from "noa-mcp-adapter-core";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROXY_CLI = path.join(__dirname, "..", "src", "proxy.mjs");
@@ -47,24 +47,34 @@ async function expectDeny(promise) {
   }
 }
 
-test("init writes all four generated files with the shape proxy.mjs/noa-approve expect", () => {
+test("init writes all five generated files with the shape proxy.mjs/noa-approve expect", () => {
   const dir = tmpDir();
   const exitCode = runInitCli(["--dir", dir]);
   assert.equal(exitCode, 0);
 
+  const policyPath = path.join(dir, "policy.json");
   const rulesPath = path.join(dir, "approval-rules.json");
   const pendingStorePath = path.join(dir, "pending-store.jsonl");
   const approverKeyPath = path.join(dir, "approver-key.json");
   const approverKeyringPath = path.join(dir, "approver-keyring.json");
-  for (const p of [rulesPath, pendingStorePath, approverKeyPath, approverKeyringPath]) {
+  for (const p of [policyPath, rulesPath, pendingStorePath, approverKeyPath, approverKeyringPath]) {
     assert.ok(fs.existsSync(p), `expected ${p} to exist`);
   }
 
-  // approval-rules.json — this package's own APPROVAL_RULES fixture (Scenario R's own rule set),
-  // byte-for-byte, and it is a JSON ARRAY (the shape matchApprovalRule/validateApprovalRules expect
-  // for --approval-rules, not an object).
+  // policy.json — the starter --policy: a valid noa.policy/0.2 document under the kernel's own
+  // validator, with one ALLOW, one ALLOW-held-for-approval and one DENY placeholder tool.
+  const policyText = fs.readFileSync(policyPath, "utf8");
+  assert.deepEqual(JSON.parse(policyText), starterPolicy());
+  assert.doesNotThrow(() => assertValidPolicy(policyText));
+  const verdicts = Object.fromEntries(starterPolicy().rules.map((r) => [r.when.value, r.then]));
+  assert.deepEqual(verdicts, { [STARTER_TOOL_NAMES.allowed]: "ALLOW", [STARTER_TOOL_NAMES.needsApproval]: "ALLOW", [STARTER_TOOL_NAMES.blocked]: "DENY" });
+
+  // approval-rules.json — the demo rule (Scenario R's own) plus a rule holding every call of the
+  // starter policy's approval tool, as a JSON ARRAY (the shape matchApprovalRule/
+  // validateApprovalRules expect for --approval-rules, not an object).
   const rules = JSON.parse(fs.readFileSync(rulesPath, "utf8"));
-  assert.deepEqual(rules, APPROVAL_RULES);
+  assert.deepEqual(rules, starterApprovalRules());
+  assert.ok(rules.some((r) => r.match.action === STARTER_TOOL_NAMES.needsApproval && r.threshold === undefined), "the approval tool must be held on every call");
   assert.ok(Array.isArray(rules));
 
   // pending-store.jsonl — empty (loadPendingIndex folds "missing" and "empty" identically; this is
@@ -129,7 +139,7 @@ test("init refuses to overwrite an existing scaffold without --force, and touche
   assert.equal(after.mtimeMs, before.mtimeMs, "the private key file must not even be re-written with identical content");
 });
 
-test("init --force regenerates all four files, including a genuinely NEW approver identity", () => {
+test("init --force regenerates all five files, including a genuinely NEW approver identity", () => {
   const dir = tmpDir();
   assert.equal(runInitCli(["--dir", dir]), 0);
   const approverKeyringPath = path.join(dir, "approver-keyring.json");
@@ -142,7 +152,7 @@ test("init --force regenerates all four files, including a genuinely NEW approve
   assert.notEqual(secondKid, firstKid, "--force must mint a FRESH approver identity, not silently reuse the old one");
 });
 
-test("init refuses a directory with only SOME of the four files present (never a mixed partial scaffold)", () => {
+test("init refuses a directory with only SOME of the five files present (never a mixed partial scaffold)", () => {
   const dir = tmpDir();
   fs.writeFileSync(path.join(dir, "pending-store.jsonl"), "", "utf8");
   const exitCode = runInitCli(["--dir", dir]);
@@ -152,7 +162,8 @@ test("init refuses a directory with only SOME of the four files present (never a
 
 test("the generated config actually starts the REAL proxy.mjs CLI with the human-approval gate ON (real child process, real stdio)", async () => {
   const dir = tmpDir();
-  assert.equal(runInitCli(["--dir", dir]), 0);
+  assert.equal(runInitCli(["--dir", dir, "--allow-tool", "echo", "--approval-tool", "transfer_funds", "--block-tool", "read_data"]), 0);
+  const policyPath = path.join(dir, "policy.json");
   const rulesPath = path.join(dir, "approval-rules.json");
   const pendingStorePath = path.join(dir, "pending-store.jsonl");
   const approverKeyringPath = path.join(dir, "approver-keyring.json");
@@ -160,28 +171,43 @@ test("the generated config actually starts the REAL proxy.mjs CLI with the human
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [
-      PROXY_CLI, "--session-id", "init-test-session",
+      PROXY_CLI, "--session-id", "init-test-session", "--policy", policyPath,
       "--approval-rules", rulesPath, "--pending-store", pendingStorePath, "--approver-keyring", approverKeyringPath,
       "--", process.execPath, DEMO_DOWNSTREAM,
     ],
   });
   const client = new Client({ name: "init-test-host", version: "1.0.0" }, { capabilities: {} });
   await client.connect(transport);
+  try {
+    // The gate is ON and SELECTIVE, not a blanket deny: the allowed tool is forwarded.
+    const echoed = await client.callTool({ name: "echo", arguments: { text: "through" } });
+    assert.match(echoed.content?.[0]?.text ?? "", /through/);
 
-  // The gate is ON and SELECTIVE, not a blanket deny: a transfer_funds call BELOW the generated
-  // rule's threshold (5000) is still forwarded and allowed.
-  const small = await client.callTool({ name: "transfer_funds", arguments: { amountMinor: 100, to: "vendor-1" } });
-  assert.match(small.content?.[0]?.text ?? "", /transferred 100/);
+    // The approval tool is HELD on every call — an MCP error carrying the DEFERRED receipt id,
+    // never a silent forward — because init wrote the SAME name into both files.
+    const held = await expectDeny(client.callTool({ name: "transfer_funds", arguments: { amountMinor: 1, to: "vendor-9" } }));
+    assert.ok(held.denied, "a call of the approval tool must be held, not forwarded");
+    assert.equal(held.code, -32600);
+    assert.ok(typeof held.data?.receiptId === "string" && held.data.receiptId.length > 0);
+  } finally {
+    await client.close();
+  }
+});
 
-  // A call AT/ABOVE the generated rule's threshold is HELD — an MCP error carrying the DEFERRED
-  // receipt id, never a silent forward. This is the SAME rule (policy.mjs's APPROVAL_RULES) and
-  // the SAME bundled demo tool that init's own printed next-steps message documents.
-  const held = await expectDeny(client.callTool({ name: "transfer_funds", arguments: { amountMinor: 7000, to: "vendor-9" } }));
-  assert.ok(held.denied, "a call matching the generated approval rule must be held, not forwarded");
-  assert.equal(held.code, -32600);
-  assert.ok(typeof held.data?.receiptId === "string" && held.data.receiptId.length > 0);
-
-  await client.close();
+test("init --allow-tool/--approval-tool/--block-tool refuse a missing value, a repeat, or one tool in two roles", () => {
+  for (const args of [["--approval-tool"], ["--approval-tool", "--force"], ["--approval-tool", "a", "--approval-tool", "b"], ["--allow-tool", "x", "--block-tool", "x"], ["--approval-tool", STARTER_TOOL_NAMES.allowed]]) {
+    const dir = tmpDir();
+    const errWrite = process.stderr.write;
+    process.stderr.write = () => true;
+    let code;
+    try {
+      code = runInitCli(["--dir", dir, ...args]);
+    } finally {
+      process.stderr.write = errWrite;
+    }
+    assert.equal(code, 1, `args ${JSON.stringify(args)} must be refused`);
+    assert.deepEqual(fs.readdirSync(dir), [], "nothing may be written");
+  }
 });
 
 test("the proxy fails closed at startup when --approver-keyring is missing (init's generated rules/pending-store alone are not enough)", async () => {
@@ -205,7 +231,7 @@ test("the proxy fails closed at startup when --approver-keyring is missing (init
 });
 
 // ---------------------------------------------------------------------------------------------
-// CVE-shaped regression: a DANGLING symlink planted at one of the four target paths, pointing at
+// CVE-shaped regression: a DANGLING symlink planted at one of the five target paths, pointing at
 // an attacker-chosen location OUTSIDE --dir. `fs.existsSync()` returns false for a dangling
 // symlink, so a pre-flight check built on it never sees the path as "occupied" — and a plain
 // `writeFileSync` then follows the link and writes THROUGH it to the attacker's path. Confirmed
@@ -214,10 +240,10 @@ test("the proxy fails closed at startup when --approver-keyring is missing (init
 // exit 0 and a "wrote 4 files" success message that was itself false (one of the four never
 // landed in --dir at all). One test per generated file: each must (a) refuse the whole run
 // (non-zero exit), (b) never write anything at the attacker's target path, and (c) never write
-// any of the OTHER three files either (the batch pre-flight check must catch this BEFORE writing
+// any of the OTHER generated files either (the batch pre-flight check must catch this BEFORE writing
 // starts, not mid-way through).
 // ---------------------------------------------------------------------------------------------
-const GENERATED_FILE_NAMES = ["approval-rules.json", "pending-store.jsonl", "approver-key.json", "approver-keyring.json"];
+const GENERATED_FILE_NAMES = ["policy.json", "approval-rules.json", "pending-store.jsonl", "approver-key.json", "approver-keyring.json"];
 
 for (const targetName of GENERATED_FILE_NAMES) {
   test(`init refuses when "${targetName}" is a DANGLING symlink to an attacker path — nothing lands at the target, nothing else is written`, () => {
@@ -236,8 +262,8 @@ for (const targetName of GENERATED_FILE_NAMES) {
     assert.ok(linkStat.isSymbolicLink(), `"${targetName}" must remain a symlink, not be replaced`);
     assert.equal(fs.readlinkSync(path.join(dir, targetName)), attackerTarget);
 
-    // None of the OTHER three generated files may have been written either — a symlink on ONE of
-    // the four must refuse the WHOLE batch before any of the four writes begin.
+    // None of the OTHER generated files may have been written either — a symlink on ONE of
+    // the five must refuse the WHOLE batch before any of the five writes begin.
     for (const other of GENERATED_FILE_NAMES) {
       if (other === targetName) continue;
       assert.equal(fs.existsSync(path.join(dir, other)), false, `"${other}" must not be written when "${targetName}" is a dangling symlink (whole run must refuse before any write)`);
@@ -408,4 +434,88 @@ test("the printed next-steps commands shell-quote generated paths (a --dir with 
   const rulesPath = path.join(nasty, "approval-rules.json");
   assert.ok(!captured.includes(`--approval-rules ${rulesPath} \\`), "the raw, unquoted path must not appear in the printed example command");
   assert.ok(captured.includes(`'${rulesPath.replace(/'/g, "'\\''")}'`), "the printed example command must shell-quote the generated path");
+});
+
+// ---------------------------------------------------------------------------------------------
+// The starter policy is usable as written: init prints ONE command line and ONE MCP config that
+// start the real proxy with it, and once a placeholder is renamed to a real tool, that tool is
+// governed exactly as the starter says — while every tool the file does not name stays denied.
+// ---------------------------------------------------------------------------------------------
+function captureStdout(fn) {
+  let captured = "";
+  const realWrite = process.stdout.write;
+  process.stdout.write = (chunk) => {
+    captured += chunk;
+    return true;
+  };
+  try {
+    return { result: fn(), out: captured };
+  } finally {
+    process.stdout.write = realWrite;
+  }
+}
+
+test("init prints a one-line start command and a pasteable MCP config, both pointing --policy at the generated policy.json", () => {
+  const dir = tmpDir();
+  const { result, out } = captureStdout(() => runInitCli(["--dir", dir]));
+  assert.equal(result, 0);
+  const policyPath = path.join(dir, "policy.json");
+  const startLine = out.split("\n").find((l) => l.trim().startsWith("noa-mcp-proxy --policy "));
+  assert.ok(startLine, `no one-line start command in:\n${out}`);
+  assert.ok(startLine.includes(`--policy '${policyPath}'`), startLine);
+  assert.ok(startLine.includes(" -- "), "the start command must show where the server's own command goes");
+  const argsLine = out.split("\n").find((l) => l.includes('"command": "noa-mcp-proxy", "args": '));
+  assert.ok(argsLine, `no MCP config in:\n${out}`);
+  const args = JSON.parse(argsLine.slice(argsLine.indexOf("[")));
+  assert.equal(args[args.indexOf("--policy") + 1], policyPath);
+  assert.equal(args[args.indexOf("--approver-keyring") + 1], path.join(dir, "approver-keyring.json"));
+});
+
+test("the generated policy.json drives the REAL proxy: a renamed placeholder runs, the blocked one and every unnamed tool are denied", async () => {
+  const dir = tmpDir();
+  assert.equal(runInitCli(["--dir", dir]), 0);
+  const policyPath = path.join(dir, "policy.json");
+  // The user's one edit: rename the allowed placeholder to a tool their server really has.
+  fs.writeFileSync(policyPath, fs.readFileSync(policyPath, "utf8").replaceAll(STARTER_TOOL_NAMES.allowed, "echo"));
+  const countsFile = path.join(dir, "counts.json");
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [
+      PROXY_CLI, "--policy", policyPath,
+      "--approval-rules", path.join(dir, "approval-rules.json"), "--pending-store", path.join(dir, "pending-store.jsonl"),
+      "--approver-keyring", path.join(dir, "approver-keyring.json"),
+      "--", "/usr/bin/env", `NOA_DEMO_COUNTS_FILE=${countsFile}`, process.execPath, DEMO_DOWNSTREAM,
+    ],
+    stderr: "pipe",
+  });
+  const stderrChunks = [];
+  transport.stderr?.on("data", (c) => stderrChunks.push(c));
+  const client = new Client({ name: "init-starter-policy-host", version: "1.0.0" }, { capabilities: {} });
+  await client.connect(transport);
+
+  try {
+    const echoed = await client.callTool({ name: "echo", arguments: { text: "renamed" } });
+    assert.match(echoed.content?.[0]?.text ?? "", /renamed/);
+    for (const name of ["read_data", "transfer_funds", STARTER_TOOL_NAMES.blocked]) {
+      const r = await expectDeny(client.callTool({ name, arguments: { key: "a", amountMinor: 1, to: "x" } }));
+      assert.ok(r.denied, `${name} is not allowed by the starter policy and must be denied`);
+    }
+  } finally {
+    await client.close();
+  }
+  const counts = JSON.parse(fs.readFileSync(countsFile, "utf8"));
+  assert.deepEqual({ echo: counts.echo, read_data: counts.read_data, transfer_funds: counts.transfer_funds }, { echo: 1, read_data: 0, transfer_funds: 0 });
+  assert.doesNotMatch(Buffer.concat(stderrChunks).toString("utf8"), /built-in DEMO policy/);
+});
+
+test("init run through a SYMLINK to init.mjs actually writes its files (the entry check resolves symlinks)", () => {
+  const dir = tmpDir();
+  const binDir = path.join(dir, "bin");
+  fs.mkdirSync(binDir);
+  const link = path.join(binDir, "noa-mcp-proxy-init");
+  fs.symlinkSync(path.join(__dirname, "..", "src", "init.mjs"), link);
+  const target = path.join(dir, "out");
+  const run = spawnSync(process.execPath, [link, "--dir", target], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(run.status, 0, run.stderr);
+  for (const name of GENERATED_FILE_NAMES) assert.ok(fs.existsSync(path.join(target, name)), `${name} must have been written`);
 });
