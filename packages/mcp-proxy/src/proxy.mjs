@@ -160,6 +160,10 @@ const DOWNSTREAM_INITIALIZE_TIMEOUT_MS = 30_000;
 // reaped; and the bound on the whole shutdown, whatever happens beneath it.
 const CHILD_REAP_WAIT_MS = 2_000;
 const SHUTDOWN_BACKSTOP_MS = 10_000;
+// How long a shutdown lets tools/call requests in flight settle: after the host closes stdin, before
+// the downstream is stopped; and on every path, after it is stopped, so a call it cut off still
+// answers the host with its error and records its outcome receipt.
+const CALL_SETTLE_WAIT_MS = 2_000;
 
 function parseArgs(argv) {
   const sepIndex = arrayIndexOf(argv, "--");
@@ -495,14 +499,18 @@ async function main() {
   //
   // The host closing stdin, SIGTERM/SIGINT/SIGHUP, the downstream connection closing, a downstream
   // that misses the initialize bound and a failed connect now all call shutdown(), which acts once.
-  // It stops reading the host, then closes the downstream through the SDK transport. That close()
+  // It stops reading the host. After the host closed stdin it first lets calls in flight finish (up to
+  // CALL_SETTLE_WAIT_MS); a signal or a closed downstream does not wait. It then closes the downstream
+  // through the SDK transport. That close()
   // drops the transport's process handle before anything else, so every later send is refused
-  // ("Not connected") and nothing is forwarded once shutdown has begun; it then ends the child's
+  // ("Not connected") and nothing is forwarded from then on; it then ends the child's
   // stdin, sends SIGTERM after 2 s and SIGKILL after 2 s more. The child is signalled only through
   // that transport's own ChildProcess handle, which Node stops using once the child is reaped, and
   // never by a bare pid, so no other process can be hit. The proxy exits after the child has been
-  // reaped (or the bound has passed): 0 after the host closed stdin, 128+n after signal n, 1 on
-  // every other path. No session state is ended here, so a --session-dir store keeps its on-disk
+  // reaped (or the bound has passed) and the calls it cut off have answered the host and recorded
+  // their outcome (bounded the same way), and stdout is flushed: 0 after the host closed stdin, 128+n
+  // after signal n, 1 on every other path. Never 0 when a call was still open when the downstream was
+  // stopped, did not settle, or ran without its outcome receipt being recorded. No session state is ended here, so a --session-dir store keeps its on-disk
   // position exactly as before and a restart still resumes the same chain segment.
   const downstreamTransport = makeDownstreamTransport();
   let shuttingDown = false;
@@ -512,20 +520,53 @@ async function main() {
   const downstreamClosed = new PROMISE((resolve) => {
     markDownstreamClosed = resolve;
   });
-  const shutdown = (line, exitCode) => {
+  let proxy;
+  const wait = (ms) => new PROMISE((resolve) => SET_TIMEOUT(resolve, ms));
+  // Polled rather than awaited on a promise from createProxyServer: no live global is read there.
+  const callsSettled = async () => {
+    for (let waited = 0; proxy !== undefined && proxy.openCalls() > 0 && waited < CALL_SETTLE_WAIT_MS; waited += 25) await wait(25);
+  };
+  const flushed = (stream) => new PROMISE((resolve) => stream.write("", () => resolve()));
+  const stop = async (exitCode, letCallsFinish) => {
+    let code = exitCode;
+    const notZero = () => {
+      if (code === 0) code = 1;
+    };
+    if (letCallsFinish) {
+      await callsSettled();
+      if (proxy !== undefined && proxy.openCalls() > 0) {
+        notZero();
+        console.error(`noa-mcp-proxy: ${proxy.openCalls()} call(s) still in flight after ${CALL_SETTLE_WAIT_MS} ms; stopping the downstream under them`);
+      }
+    }
+    // Read before close(), which clears it: null when no child was spawned or it has already closed.
+    const childRunning = downstreamTransport.pid !== null;
+    await downstreamTransport.close();
+    if (childRunning) await PROMISE.race([downstreamClosed, wait(CHILD_REAP_WAIT_MS)]);
+    // A call the closed downstream cut off now fails; let it answer the host and record its outcome.
+    await callsSettled();
+    if (proxy !== undefined) {
+      if (proxy.openCalls() > 0) {
+        notZero();
+        console.error(`noa-mcp-proxy: ${proxy.openCalls()} call(s) did not settle; exiting without their result`);
+      }
+      if (proxy.unrecordedOutcomes() > 0) notZero();
+    }
+    await flushed(PROCESS.stdout);
+    await flushed(PROCESS.stderr);
+    return code;
+  };
+  const shutdown = (line, exitCode, letCallsFinish = false) => {
     if (shuttingDown) return;
     shuttingDown = true;
     CLEAR_TIMEOUT(initializeTimer);
     console.error(line);
     PROCESS.stdin.pause();
-    SET_TIMEOUT(() => PROCESS.exit(exitCode), SHUTDOWN_BACKSTOP_MS);
-    // Read before close(), which clears it: null when no child was spawned or it has already closed.
-    const childRunning = downstreamTransport.pid !== null;
-    const exit = () => PROCESS.exit(exitCode);
-    downstreamTransport
-      .close()
-      .then(() => (childRunning ? PROMISE.race([downstreamClosed, new PROMISE((resolve) => SET_TIMEOUT(resolve, CHILD_REAP_WAIT_MS))]) : undefined))
-      .then(exit, exit);
+    SET_TIMEOUT(() => PROCESS.exit(exitCode === 0 ? 1 : exitCode), SHUTDOWN_BACKSTOP_MS);
+    stop(exitCode, letCallsFinish).then(
+      (code) => PROCESS.exit(code),
+      () => PROCESS.exit(exitCode === 0 ? 1 : exitCode),
+    );
   };
   // Defined BEFORE connect: the SDK's Protocol.connect keeps an onclose handler that is already on
   // the transport and calls it first whenever the child process closes, during connect or after it.
@@ -555,7 +596,6 @@ async function main() {
     DOWNSTREAM_INITIALIZE_TIMEOUT_MS,
   );
 
-  let proxy;
   try {
     proxy = await createProxyServer({
       sessionId,
@@ -575,7 +615,7 @@ async function main() {
   // The SDK's StdioServerTransport reads stdin but never reacts to its end, so the host closing
   // stdin (the MCP stdio way to ask a server to stop) is handled here. Registered before the
   // transport starts reading, so an end that is already pending is not missed.
-  PROCESS.stdin.once("end", () => shutdown("noa-mcp-proxy: the host closed stdin; stopping the downstream and exiting", 0));
+  PROCESS.stdin.once("end", () => shutdown("noa-mcp-proxy: the host closed stdin; stopping the downstream and exiting", 0, true));
   const frontTransport = new StdioServerTransport();
   await proxy.server.connect(frontTransport);
 }

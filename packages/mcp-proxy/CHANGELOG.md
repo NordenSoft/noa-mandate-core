@@ -17,9 +17,15 @@ request timeout; the proxy then exited and left that downstream running the same
 
 In stdio mode one shutdown path now handles the host closing stdin (exit `0`), `SIGTERM`, `SIGINT`
 and `SIGHUP` (exit `128+n`), the downstream connection closing (exit `1`) and a failed start (exit
-`1`). It stops reading the host, closes the downstream's stdin, sends `SIGTERM` after 2 s and
-`SIGKILL` after 2 s more, and exits once the downstream has been reaped. Nothing is forwarded after
-shutdown begins: from that moment the downstream transport refuses to send. The proxy signals only
+`1`). It stops reading the host. After the host closed stdin, calls already in flight get up to 2 s
+to finish; a signal or a closed downstream does not wait. It then closes the downstream's stdin,
+sends `SIGTERM` after 2 s and `SIGKILL` after 2 s more. Once the downstream transport is being closed
+it refuses to send, so no call is forwarded from then on. A call the stop cuts off still answers the
+host with the do-not-retry error (`safeToRetry: false`) and records its outcome receipt (up to 2 s
+more), stdout is flushed, and the proxy exits. The exit is never `0` when a call was still in flight
+when the downstream was stopped, did not settle, or ran without its outcome receipt being recorded.
+`createProxyServer` now also returns `openCalls()` and `unrecordedOutcomes()` for this.
+The proxy signals only
 the process it started, through that process's own handle and never by a bare pid. Session state is
 not ended on shutdown, so a `--session-dir` restart still resumes the same chain segment.
 

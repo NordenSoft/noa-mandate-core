@@ -11,6 +11,7 @@
  *                       servers do. Without it, closing the child's stdin alone would end it, and a
  *                       test could not tell "the proxy stopped its child" from "the child left".
  *   --ignore-sigterm    ignore SIGTERM, so only SIGKILL stops it.
+ *   --exit-on-eof       exit as soon as stdin closes, even with a call in flight, as some servers do.
  *   --never-answer      never start the MCP server: the proxy's initialize request is read by no one.
  *   --tag <value>       not read; it marks this process's command line so a test can confirm a pid
  *                       is still its own process before it signals it.
@@ -28,16 +29,20 @@ const valueOf = (flag) => {
 };
 
 if (has("--ignore-sigterm")) process.on("SIGTERM", () => {});
+if (has("--exit-on-eof")) process.stdin.on("end", () => process.exit(0));
 if (has("--stay-alive") || has("--never-answer")) setInterval(() => {}, 1000);
 
 if (!has("--never-answer")) {
   const server = new Server({ name: "lifecycle-downstream", version: "1.0.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [{ name: "echo", description: "Echo back the given text.", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } }],
+    tools: [{ name: "echo", description: "Echo back the given text.", inputSchema: { type: "object", properties: { text: { type: "string" }, delayMs: { type: "number" } }, required: ["text"] } }],
   }));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => ({
-    content: [{ type: "text", text: String(request.params.arguments?.text ?? "") }],
-  }));
+  // `delayMs` holds the answer back, so a test can act while a forwarded call is still in flight.
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const delayMs = Number(request.params.arguments?.delayMs ?? 0);
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return { content: [{ type: "text", text: String(request.params.arguments?.text ?? "") }] };
+  });
   await server.connect(new StdioServerTransport());
 }
 

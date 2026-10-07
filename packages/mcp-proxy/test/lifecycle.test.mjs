@@ -60,11 +60,11 @@ function isAlive(pid) {
   return stat !== "" && !stat.startsWith("Z");
 }
 
-function startProxy(downstreamFlags) {
+function startProxy(downstreamFlags, proxyArgsFor = () => []) {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "noa-mcp-proxy-lifecycle-")));
   const pidFile = path.join(dir, "downstream.pid");
   const tag = `lifecycle-${randomUUID()}`;
-  const proc = spawn(process.execPath, [PROXY_CLI, "--", process.execPath, FIXTURE, "--pid-file", pidFile, "--tag", tag, ...downstreamFlags], {
+  const proc = spawn(process.execPath, [PROXY_CLI, ...proxyArgsFor(dir), "--", process.execPath, FIXTURE, "--pid-file", pidFile, "--tag", tag, ...downstreamFlags], {
     stdio: ["pipe", "pipe", "pipe"],
   });
   const startedAt = Date.now();
@@ -222,6 +222,148 @@ test(`a downstream that never answers MCP initialize: the proxy exits 1 at the $
     assert.ok(result.at - p.startedAt >= INITIALIZE_TIMEOUT_MS - 1_000, `the proxy gave up after ${result.at - p.startedAt} ms, before the documented ${INITIALIZE_TIMEOUT_MS} ms`);
     const lines = p.stderr().split("\n").filter((l) => l.length > 0 && !l.includes("WARNING — no --policy given"));
     assert.deepEqual(lines, [`noa-mcp-proxy: fatal — the downstream did not answer MCP initialize within ${INITIALIZE_TIMEOUT_MS} ms; stopping it (fail closed, nothing was served)`]);
+  } finally {
+    await stopEverything(p, child);
+  }
+});
+
+// ── calls in flight when the proxy stops ─────────────────────────────────────────────────────────
+const withOutcomeLog = (dir) => ["--outcome-log", path.join(dir, "outcomes.jsonl")];
+
+function outcomes(p) {
+  const file = path.join(p.dir, "outcomes.jsonl");
+  return fs.existsSync(file) ? fs.readFileSync(file, "utf8").split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l)) : [];
+}
+
+// The answer to an in-flight call, or null when none arrived by the time the proxy had exited.
+async function answerBeforeExit(p, call) {
+  const late = p.exited.then(() => sleep(500)).then(() => null);
+  return Promise.race([call, late]);
+}
+
+function killOwnDownstream(p, child) {
+  assert.ok(ps("command", child).includes(p.tag) && Number(ps("ppid", child)) === p.proc.pid, "about to signal a process that is not this test's downstream");
+  process.kill(child, "SIGKILL");
+}
+
+test("the downstream dying mid-call: the call answers with a do-not-retry error, its outcome is recorded, exit 1", async () => {
+  const p = startProxy(["--stay-alive"], withOutcomeLog);
+  let child;
+  try {
+    child = await handshake(p);
+    const call = p.request("tools/call", { name: "echo", arguments: { text: "slow", delayMs: 5_000 } });
+    await sleep(300);
+    killOwnDownstream(p, child);
+    const answer = await answerBeforeExit(p, call);
+    assert.ok(answer, `the call in flight got no answer before the proxy exited; proxy stderr:\n${p.stderr()}`);
+    assert.equal(answer.error?.code, -32603, JSON.stringify(answer));
+    assert.match(answer.error.message, /MAY ALREADY HAVE TAKEN EFFECT/);
+    assert.deepEqual(
+      { safeToRetry: answer.error.data?.safeToRetry, sideEffectState: answer.error.data?.sideEffectState },
+      { safeToRetry: false, sideEffectState: "SIDE_EFFECT_UNCONFIRMED" },
+    );
+    const result = await exitWithin(p, 10_000);
+    assert.ok(result, "the proxy was still running 10 s after its downstream died");
+    assert.equal(result.code, 1, `exit code ${result.code}, signal ${result.signal}`);
+    assert.deepEqual(outcomes(p).map((o) => o.outcome?.status), ["error"], "the outcome receipt of the cut-off call was not recorded");
+  } finally {
+    await stopEverything(p, child);
+  }
+});
+
+test("stdin EOF with a call in flight: the call finishes before the downstream is stopped, exit 0", async () => {
+  // This downstream exits the moment its stdin closes, so the call can only finish if the proxy
+  // waits for it before stopping the downstream.
+  const p = startProxy(["--exit-on-eof"], withOutcomeLog);
+  let child;
+  try {
+    child = await handshake(p);
+    const call = p.request("tools/call", { name: "echo", arguments: { text: "finished", delayMs: 1_000 } });
+    await sleep(300);
+    p.proc.stdin.end();
+    const answer = await answerBeforeExit(p, call);
+    assert.ok(answer, `the call in flight got no answer before the proxy exited; proxy stderr:\n${p.stderr()}`);
+    assert.equal(answer.result?.content?.[0]?.text, "finished", `the call in flight at stdin EOF did not complete: ${JSON.stringify(answer)}`);
+    const result = await exitWithin(p, 10_000);
+    assert.ok(result, "the proxy was still running 10 s after the host closed its stdin");
+    assert.equal(result.code, 0, `exit code ${result.code}, signal ${result.signal}; proxy stderr:\n${p.stderr()}`);
+    assert.deepEqual(outcomes(p).map((o) => o.outcome?.status), ["success"], "the finished call's outcome receipt was not recorded");
+  } finally {
+    await stopEverything(p, child);
+  }
+});
+
+test("stdin EOF with a call that outlasts the wait: the call ends as a do-not-retry error with its outcome recorded, exit 1", async () => {
+  const p = startProxy([], withOutcomeLog);
+  let child;
+  try {
+    child = await handshake(p);
+    const call = p.request("tools/call", { name: "echo", arguments: { text: "slow", delayMs: 6_000 } });
+    await sleep(300);
+    p.proc.stdin.end();
+    const answer = await answerBeforeExit(p, call);
+    assert.ok(answer, `the call in flight got no answer before the proxy exited; proxy stderr:\n${p.stderr()}`);
+    assert.equal(answer.error?.data?.safeToRetry, false, JSON.stringify(answer));
+    const result = await exitWithin(p, 10_000);
+    assert.ok(result, "the proxy was still running 10 s after the host closed its stdin");
+    assert.ok(await waitUntil(() => !isAlive(child), 3_000), `downstream ${child} was still alive after the proxy exited`);
+    assert.equal(result.code, 1, `a call cut off by the shutdown must not end in exit 0 (got ${result.code}); proxy stderr:\n${p.stderr()}`);
+    assert.match(p.stderr(), /1 call\(s\) still in flight after 2000 ms; stopping the downstream under them/);
+    assert.deepEqual(outcomes(p).map((o) => o.outcome?.status), ["error"], "the outcome receipt of the cut-off call was not recorded");
+  } finally {
+    await stopEverything(p, child);
+  }
+});
+
+test("a call whose outcome receipt could not be recorded: stdin EOF ends in exit 1, never 0", async () => {
+  // The outcome log path is a directory, so appending the outcome receipt fails.
+  const p = startProxy(["--stay-alive"], (dir) => { fs.mkdirSync(path.join(dir, "outcomes-dir")); return ["--outcome-log", path.join(dir, "outcomes-dir")]; });
+  let child;
+  try {
+    child = await handshake(p);
+    const answer = await p.request("tools/call", { name: "echo", arguments: { text: "ran" } });
+    assert.equal(answer.result?.content?.[0]?.text, "ran");
+    assert.match(p.stderr(), /outcome receipt for tool "echo" \(success\) could not be built\/recorded/);
+    p.proc.stdin.end();
+    const result = await exitWithin(p, 10_000);
+    assert.ok(result, "the proxy was still running 10 s after the host closed its stdin");
+    assert.equal(result.code, 1, `a call that ran without a recorded outcome must not end in exit 0 (got ${result.code})`);
+  } finally {
+    await stopEverything(p, child);
+  }
+});
+
+test("SIGTERM while the downstream is still starting: exit 143 at once and the downstream is stopped", async () => {
+  const p = startProxy(["--never-answer"]);
+  let child;
+  try {
+    child = await downstreamPid(p);
+    p.proc.kill("SIGTERM");
+    const result = await exitWithin(p, 8_000);
+    assert.ok(result, "the proxy was still running 8 s after SIGTERM during initialize");
+    assert.ok(await waitUntil(() => !isAlive(child), 3_000), `downstream ${child} was still alive after the proxy exited on SIGTERM during initialize (parent pid now ${ps("ppid", child)})`);
+    assert.equal(result.code, 143, `exit code ${result.code}, signal ${result.signal}; proxy stderr:\n${p.stderr()}`);
+  } finally {
+    await stopEverything(p, child);
+  }
+});
+
+test("a second and third signal during shutdown change nothing: one shutdown, exit 143, downstream stopped", async () => {
+  const p = startProxy(["--stay-alive", "--ignore-sigterm"]);
+  let child;
+  try {
+    child = await handshake(p);
+    p.proc.kill("SIGTERM");
+    await sleep(150);
+    p.proc.kill("SIGINT");
+    await sleep(150);
+    p.proc.kill("SIGHUP");
+    const result = await exitWithin(p, 12_000);
+    assert.ok(result, "the proxy was still running 12 s after SIGTERM");
+    assert.ok(await waitUntil(() => !isAlive(child), 3_000), `downstream ${child} was still alive after the proxy exited`);
+    const received = p.stderr().split("\n").filter((l) => l.includes("received SIG"));
+    assert.deepEqual(received, ["noa-mcp-proxy: received SIGTERM; stopping the downstream and exiting"], "a later signal started a second shutdown");
+    assert.equal(result.code, 143, `exit code ${result.code}, signal ${result.signal}`);
   } finally {
     await stopEverything(p, child);
   }
