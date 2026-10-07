@@ -30,10 +30,11 @@ would have spawned it directly. The proxy:
 - (stdio) stops the downstream it started before it exits: when the host closes the proxy's stdin
   (exit `0`), on `SIGTERM`/`SIGINT`/`SIGHUP` (exit `128+n`), and when the downstream connection
   closes (exit `1`). After the host closes stdin, calls already in flight get up to 2 s to finish
-  first; a call the stop cuts off still answers with its do-not-retry error and its outcome receipt,
-  and the exit is then `1`. The downstream's stdin is closed first, then `SIGTERM` follows after 2 s
-  and `SIGKILL` after 2 s more. Processes the downstream starts itself (for example through an `npx`
-  or `uvx` wrapper) are not tracked;
+  first; a call the stop cuts off still answers with its do-not-retry error and its outcome receipt.
+  After stdin EOF the exit is then `1`; after a signal it stays `128+n`. The downstream's stdin is
+  closed first, then `SIGTERM` follows after 2 s and `SIGKILL` after 2 s more. Processes the
+  downstream starts itself (for example through an `npx` or `uvx` wrapper) are not tracked: the
+  proxy does not stop them;
 - gives the policy visibility into the FULL tool-call arguments (not just `action`/`amountMinor`),
   under an `args.*` scalar-path prefix — see [`noa-mcp-adapter-core`](../adapter-core)'s README;
 - bounds session-state growth: an idle session is dropped after a TTL, a session's chain state is

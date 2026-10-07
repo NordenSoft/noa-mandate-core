@@ -12,10 +12,14 @@
  *                       test could not tell "the proxy stopped its child" from "the child left".
  *   --ignore-sigterm    ignore SIGTERM, so only SIGKILL stops it.
  *   --exit-on-eof       exit as soon as stdin closes, even with a call in flight, as some servers do.
+ *   --spawn-holder      start a long-running process of its own that inherits this server's stdout,
+ *                       as a wrapper (npx, uvx) can leave behind; its pid goes to <pid-file>.holder
+ *                       and it carries the same --tag.
  *   --never-answer      never start the MCP server: the proxy's initialize request is read by no one.
  *   --tag <value>       not read; it marks this process's command line so a test can confirm a pid
  *                       is still its own process before it signals it.
  */
+import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -47,4 +51,8 @@ if (!has("--never-answer")) {
 }
 
 const pidFile = valueOf("--pid-file");
+if (has("--spawn-holder")) {
+  const holder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "holder", String(valueOf("--tag"))], { stdio: ["ignore", "inherit", "ignore"] });
+  writeFileSync(`${pidFile}.holder`, String(holder.pid), "utf8");
+}
 if (pidFile) writeFileSync(pidFile, String(process.pid), "utf8");

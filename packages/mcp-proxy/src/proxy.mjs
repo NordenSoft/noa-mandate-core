@@ -517,6 +517,7 @@ async function main() {
   let connected = false;
   let initializeTimer;
   let markDownstreamClosed;
+  let downstreamCloseSeen = false;
   const downstreamClosed = new PROMISE((resolve) => {
     markDownstreamClosed = resolve;
   });
@@ -543,6 +544,11 @@ async function main() {
     const childRunning = downstreamTransport.pid !== null;
     await downstreamTransport.close();
     if (childRunning) await PROMISE.race([downstreamClosed, wait(CHILD_REAP_WAIT_MS)]);
+    // A process the downstream started can hold its stdout pipe open after the downstream is gone;
+    // the SDK then never reports the close and the calls it cut off would never fail. The transport
+    // is closed from this side, so report that close: the SDK fails those calls as it does for any
+    // closed downstream, and each answers with its do-not-retry error and records its outcome.
+    if (!downstreamCloseSeen && proxy !== undefined && proxy.openCalls() > 0) downstreamTransport.onclose?.();
     // A call the closed downstream cut off now fails; let it answer the host and record its outcome.
     await callsSettled();
     if (proxy !== undefined) {
@@ -574,6 +580,7 @@ async function main() {
   // because Protocol.connect then replaces it with its wrapper.
   objectDefineProperty(downstreamTransport, "onclose", {
     value: () => {
+      downstreamCloseSeen = true;
       markDownstreamClosed();
       shutdown(
         connected

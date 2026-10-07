@@ -368,3 +368,49 @@ test("a second and third signal during shutdown change nothing: one shutdown, ex
     await stopEverything(p, child);
   }
 });
+
+test("SIGTERM while a call is in flight: the call answers with a do-not-retry error, its outcome is recorded, exit 143", async () => {
+  const p = startProxy(["--stay-alive"], withOutcomeLog);
+  let child;
+  try {
+    child = await handshake(p);
+    const call = p.request("tools/call", { name: "echo", arguments: { text: "slow", delayMs: 8_000 } });
+    await sleep(300);
+    p.proc.kill("SIGTERM");
+    const answer = await answerBeforeExit(p, call);
+    assert.ok(answer, `the call in flight got no answer before the proxy exited; proxy stderr:\n${p.stderr()}`);
+    assert.equal(answer.error?.code, -32603, JSON.stringify(answer));
+    assert.equal(answer.error.data?.safeToRetry, false, JSON.stringify(answer));
+    const result = await exitWithin(p, 12_000);
+    assert.ok(result, "the proxy was still running 12 s after SIGTERM");
+    assert.equal(result.code, 143, `exit code ${result.code}, signal ${result.signal}`);
+    assert.deepEqual(outcomes(p).map((o) => o.outcome?.status), ["error"], "the outcome receipt of the cut-off call was not recorded");
+  } finally {
+    await stopEverything(p, child);
+  }
+});
+
+test("a process the downstream started holds its output pipe open: a call cut off by SIGTERM still answers and records its outcome", async () => {
+  const p = startProxy(["--spawn-holder"], withOutcomeLog);
+  let child;
+  let holder;
+  try {
+    child = await handshake(p);
+    holder = Number(fs.readFileSync(`${p.pidFile}.holder`, "utf8"));
+    assert.ok(ps("command", holder).includes(p.tag), "the holder pid must name this test's own process");
+    const call = p.request("tools/call", { name: "echo", arguments: { text: "slow", delayMs: 20_000 } });
+    await sleep(300);
+    p.proc.kill("SIGTERM");
+    const answer = await answerBeforeExit(p, call);
+    assert.ok(answer, `the call cut off while a process the downstream started held its pipe got no answer; proxy stderr:\n${p.stderr()}`);
+    assert.equal(answer.error?.data?.safeToRetry, false, JSON.stringify(answer));
+    const result = await exitWithin(p, 12_000);
+    assert.ok(result, "the proxy was still running 12 s after SIGTERM");
+    assert.equal(result.code, 143, `exit code ${result.code}, signal ${result.signal}; proxy stderr:\n${p.stderr()}`);
+    assert.deepEqual(outcomes(p).map((o) => o.outcome?.status), ["error"], "the outcome receipt of the cut-off call was not recorded");
+  } finally {
+    await stopEverything(p, child);
+    // Only this test's own holder: its tag is checked right before the signal.
+    if (holder && isAlive(holder) && ps("command", holder).includes(p.tag)) process.kill(holder, "SIGKILL");
+  }
+});
