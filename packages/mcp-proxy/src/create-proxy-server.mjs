@@ -110,7 +110,10 @@ import { buildOutcomeReceipt, buildOutcomeReceiptAsync } from "./outcome-receipt
  *   non-empty `approverKeyring` (trusted approver `{ kid: publicKey }`) is REQUIRED; the optional
  *   `approverIdentityManifest` (`{ agentId: kid[] }`) additionally pins which kid may sign for the
  *   approval seat.
- * @returns {Promise<{ server: Server, downstream: Client }>}
+ * @returns {Promise<{ server: Server, downstream: Client, openCalls: () => number, unrecordedOutcomes: () => number }>}
+ *   `openCalls()` counts tools/call requests still being handled and `unrecordedOutcomes()` counts
+ *   executed calls whose outcome receipt could not be recorded. A process that stops this proxy reads
+ *   them to let calls in flight finish and to choose its exit code.
  */
 export async function createProxyServer({
   sessionId,
@@ -288,6 +291,7 @@ export async function createProxyServer({
       const persisted = onOutcome(sessionId, outcomeReceipt);
       if (persisted && typeof persisted.then === "function") await persisted;
     } catch (err) {
+      unrecordedOutcomeCount++;
       console.error(
         `noa-mcp-proxy: session "${sessionId}" — outcome receipt for tool "${tool}" (${outcome}) could not be built/recorded (${describeThrown(err)}); the decision receipt still stands as the authoritative governance record`,
       );
@@ -304,7 +308,11 @@ export async function createProxyServer({
     }
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  // Calls in flight, so a process that stops this proxy can let them settle (send their result or
+  // error, record their outcome receipt) before it exits, instead of cutting them off unanswered.
+  let openCallCount = 0;
+  let unrecordedOutcomeCount = 0;
+  const handleCallTool = async (request) => {
     // `agentId` is STATIC, proxy-config-supplied (falling back to sessionId when the caller
     // configures none — the prior default) — NEVER read from `request.params.arguments`. A tool
     // call whose arguments happen to contain a key literally named "agentId" has zero effect on
@@ -610,7 +618,21 @@ export async function createProxyServer({
     // handing the real result back to the host.
     await emitOutcome(receipt, request.params.name, "success", null);
     return downstreamResult;
+  };
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    openCallCount++;
+    try {
+      return await handleCallTool(request);
+    } finally {
+      openCallCount--;
+    }
   });
 
-  return { server, downstream };
+  return {
+    server,
+    downstream,
+    openCalls: () => openCallCount,
+    unrecordedOutcomes: () => unrecordedOutcomeCount,
+  };
 }

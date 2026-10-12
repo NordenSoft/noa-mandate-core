@@ -1,5 +1,59 @@
 # Changelog — `noa-mcp-proxy`
 
+## [0.5.1] - 2026-10-06
+
+> This entry describes version `0.5.1`. Registry publication is separate from repository state;
+> check `npm view noa-mcp-proxy version` for the current published version. Patch: a lifecycle fix
+> and a dependency update ([VERSIONING.md](../../VERSIONING.md) §1: a patch is a fix). No flag,
+> subcommand or receipt format changed.
+
+### Fixed — the stdio proxy stops the downstream it started
+
+Measured on 0.5.0 (Node 22, the bundled demo server after a full MCP handshake): the proxy was still
+running 8 s after the host closed its stdin, and so was its downstream. After `SIGTERM` the proxy
+died, and a downstream that does not exit when its stdin closes kept running with parent pid 1. A
+downstream that never answered MCP `initialize` held the proxy for the MCP SDK's implicit 60 s
+request timeout; the proxy then exited and left that downstream running the same way.
+
+In stdio mode one shutdown path now handles the host closing stdin (exit `0`), `SIGTERM`, `SIGINT`
+and `SIGHUP` (exit `128+n`), the downstream connection closing (exit `1`) and a failed start (exit
+`1`). It stops reading the host. After the host closed stdin, calls already in flight get up to 2 s
+to finish; a signal or a closed downstream does not wait. It then closes the downstream's stdin,
+sends `SIGTERM` after 2 s and `SIGKILL` after 2 s more. Once the downstream transport is being closed
+it refuses to send, so no call is forwarded from then on. A call the stop cuts off still answers the
+host with the do-not-retry error (`safeToRetry: false`) and records its outcome receipt (up to 2 s
+more), also when a process the downstream started keeps its output pipe open; stdout is flushed, and
+the proxy exits. The exit is never `0` when a call was still in flight when the downstream was
+stopped, did not settle, or ran without its outcome receipt being recorded: after stdin EOF it is
+then `1`, and a signal keeps `128+n`.
+`createProxyServer` now also returns `openCalls()` and `unrecordedOutcomes()` for this.
+The proxy signals only
+the process it started, through that process's own handle and never by a bare pid. Session state is
+not ended on shutdown, so a `--session-dir` restart still resumes the same chain segment.
+
+The downstream must now answer MCP `initialize` within a fixed 30 s. Otherwise the proxy prints one
+line, `noa-mcp-proxy: fatal — the downstream did not answer MCP initialize within 30000 ms; stopping
+it (fail closed, nothing was served)`, stops the downstream and exits `1` without serving the host.
+30 s is half the SDK client's own default request timeout, so a host built on that SDK sees this
+refusal instead of its own generic timeout, and it leaves room for a server that a package runner
+fetches on its first start. A downstream that needed between 30 s and 60 s to answer, which 0.5.0
+waited for, is now refused. There is no flag for the bound.
+
+Limits: while the downstream is still starting, the proxy does not read its own stdin, so a stdin
+closed in that window is noticed when the start completes or the 30 s bound passes; a signal is
+handled at once. Processes that the downstream starts itself are not tracked; stopping them is the
+downstream's job. `--http-port` mode is unchanged.
+
+### Dependency update — `@modelcontextprotocol/sdk` 1.32.0 (GHSA-6qxp-vccf-f47h)
+
+The MCP SDK moves from 1.30.1 to 1.32.0, outside the affected range of
+[GHSA-6qxp-vccf-f47h](https://github.com/advisories/GHSA-6qxp-vccf-f47h) (high, published
+2026-10-06: the SDK's OAuth client could send credentials to an authorization server chosen by the MCP
+server; affected `>= 1.12.0, < 1.31.0`). This package imports neither the SDK's OAuth module nor an
+HTTP client transport (its SDK imports are the client and server cores, the stdio client and server
+transports, the Streamable HTTP server transport and the types module), so it did not run the
+affected code; installs that resolve the SDK through this package now get a fixed version.
+
 ## [0.5.0] - 2026-10-05
 
 > This entry describes version `0.5.0`. Registry publication is separate from repository state;
