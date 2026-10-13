@@ -4929,7 +4929,7 @@ const SETUP_NODE_RC_BYTES =
  * that program it was read at. Bump the action and this stops matching, which is the point: the
  * contract has to be re-read from the new source rather than assumed to have survived.
  */
-export const SETUP_NODE_ATTESTED_REVISION = "820762786026740c76f36085b0efc47a31fe5020";
+export const SETUP_NODE_ATTESTED_REVISION = "949feb2413d6458794dcd2491c4babbbce0c15c1";
 
 /**
  * Anything that reaches a log is quoted, stripped of control characters and bounded.

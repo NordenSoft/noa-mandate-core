@@ -813,15 +813,15 @@ const LEGACY_PUBLISHER_WORKFLOWS = ["publish.yml", "publish-mcp.yml", "publish-t
 // A partial lexer cannot safely decide which hash begins YAML prose, so this quarantine ignores
 // nothing. Any material or prose change requires explicit re-review of the whole tiny workflow.
 const CLOSED_WORKFLOW_SHA256 = Object.freeze({
-  "boundary.yml": "f630fe249a7cd32c2c13d135767913f57f3a85b0d3b8dc75c2a30326e7d4e94d",
+  "boundary.yml": "226d648f13bc468017813b375d2f2437db248a44318a7f77942a90f5224cb0cb",
   "publish.yml": "95a5c267c674326e90ca97b1abe8c9b5b1628b7ca05a820851bbdb852795d5c3",
   "publish-mcp.yml": "7a38cf1cd331d2a61a2890f1430b422996e7c85d7aa892a18c2a8760bbcbc0e7",
   "publish-tsa.yml": "91745dac92651660718868884d203af96f7bcc42f5986ce9f319087c4b38716e",
   // The release controller is pinned whole as well; its controls are ALSO measured structurally
   // below, because a digest alone would make every knockout arm on the file vacuous.
-  "release-npm-noa-receipt.yml": "3c623c2856bdaad4d9fa760f9ac1ff5bbb63ac72aa9d95af57c556eef1bfa02d",
+  "release-npm-noa-receipt.yml": "3009e5e00930527c0659ac57596d9ce6f543b73cda91a44b51df44f623a4eec6",
   // The MCP release controller is pinned whole the same way, and measured structurally below.
-  "release-npm-mcp.yml": "be25c7e77d1ce45b139a668a3a2aab7c76af8b8ee096703b5b6602aa248cc2aa",
+  "release-npm-mcp.yml": "9b080a5e2d543233b25bac9f73b5be095e386c21a0a26a24198e2d6e38b7d6ff",
 });
 
 // Only LF is a line separator in the canonical production representation. Reject every other
@@ -1013,8 +1013,8 @@ const RELEASE_MINIMUM_CHECK_COUNT = 43;
 const RELEASE_MINIMUM_CHECKS_SHA256 = "f381da99f7c0365a4e19305a0545c064e489cd3ebbc6df5b8ff294aef528cd96";
 // Parsed `uses:` values are SHA pins; the trailing version comment is YAML prose, not the value.
 const RELEASE_SETUP_NODE = `actions/setup-node@${SETUP_NODE_ATTESTED_REVISION}`;
-const RELEASE_DOWNLOAD_ARTIFACT = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c";
-const RELEASE_UPLOAD_ARTIFACT = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a";
+const RELEASE_DOWNLOAD_ARTIFACT = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
+const RELEASE_UPLOAD_ARTIFACT = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9";
 const RELEASE_CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
 
 // Two release controllers share the structural reader below. A profile names the only places where
@@ -2919,7 +2919,7 @@ check("MCP release controller stage refuses a dependency that is not a plain reg
 function releaseControllerMutations(base, fileExpression, expandedFileExpression) {
   // Mutation subjects are the file's literal text, version comments included.
   const CHECKOUT_TEXT = `${RELEASE_CHECKOUT} # v7.0.1`;
-  const SETUP_NODE_TEXT = `${RELEASE_SETUP_NODE} # v7.0.0`;
+  const SETUP_NODE_TEXT = `${RELEASE_SETUP_NODE} # v7.1.0`;
   const setupNodeStep = [
     `      - uses: ${SETUP_NODE_TEXT}`,
     "        with:",

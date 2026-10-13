@@ -64,7 +64,7 @@ const GITHUB_API_VERSION = "2022-11-28";
 // `run: |` it remains content whose GitHub expressions are expanded before the shell sees it.
 // Exact bytes also reject CR, NEL, LS, PS, and mixed-separator parser differentials.
 const CANONICAL_WORKFLOW_SHA256 =
-  "25b1d7d92770a7e15d1181e6b5ee7a9a68146305a4c6209b227c623e1e13c4e2";
+  "055465ba02e824755bdc0731b8505f5c3b8fb71902547b32ace8a2b0a0cb801c";
 const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const GITHUB_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u;
 const ORIGIN_URL_COMMAND = Object.freeze(["remote", "get-url", "--all", "origin"]);
