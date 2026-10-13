@@ -1,0 +1,58 @@
+#!/usr/bin/env node
+/**
+ * lifecycle-downstream.mjs — a real stdio MCP tool server for test/lifecycle.test.mjs. It speaks MCP
+ * through the official SDK exactly like a user's own server; the switches below only change how it
+ * behaves when it is asked to stop. They are read from the command line, because the proxy starts its
+ * downstream with the SDK's filtered environment.
+ *
+ *   --pid-file <path>   write this process's pid to <path> once it is serving, so the test can find
+ *                       the process the proxy started.
+ *   --stay-alive        keep running after stdin closes (a timer holds the event loop), as many real
+ *                       servers do. Without it, closing the child's stdin alone would end it, and a
+ *                       test could not tell "the proxy stopped its child" from "the child left".
+ *   --ignore-sigterm    ignore SIGTERM, so only SIGKILL stops it.
+ *   --exit-on-eof       exit as soon as stdin closes, even with a call in flight, as some servers do.
+ *   --spawn-holder      start a long-running process of its own that inherits this server's stdout,
+ *                       as a wrapper (npx, uvx) can leave behind; its pid goes to <pid-file>.holder
+ *                       and it carries the same --tag.
+ *   --never-answer      never start the MCP server: the proxy's initialize request is read by no one.
+ *   --tag <value>       not read; it marks this process's command line so a test can confirm a pid
+ *                       is still its own process before it signals it.
+ */
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+
+const argv = process.argv.slice(2);
+const has = (flag) => argv.includes(flag);
+const valueOf = (flag) => {
+  const i = argv.indexOf(flag);
+  return i === -1 ? undefined : argv[i + 1];
+};
+
+if (has("--ignore-sigterm")) process.on("SIGTERM", () => {});
+if (has("--exit-on-eof")) process.stdin.on("end", () => process.exit(0));
+if (has("--stay-alive") || has("--never-answer")) setInterval(() => {}, 1000);
+
+if (!has("--never-answer")) {
+  const server = new Server({ name: "lifecycle-downstream", version: "1.0.0" }, { capabilities: { tools: {} } });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [{ name: "echo", description: "Echo back the given text.", inputSchema: { type: "object", properties: { text: { type: "string" }, delayMs: { type: "number" } }, required: ["text"] } }],
+  }));
+  // `delayMs` holds the answer back, so a test can act while a forwarded call is still in flight.
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const delayMs = Number(request.params.arguments?.delayMs ?? 0);
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return { content: [{ type: "text", text: String(request.params.arguments?.text ?? "") }] };
+  });
+  await server.connect(new StdioServerTransport());
+}
+
+const pidFile = valueOf("--pid-file");
+if (has("--spawn-holder")) {
+  const holder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "holder", String(valueOf("--tag"))], { stdio: ["ignore", "inherit", "ignore"] });
+  writeFileSync(`${pidFile}.holder`, String(holder.pid), "utf8");
+}
+if (pidFile) writeFileSync(pidFile, String(process.pid), "utf8");
