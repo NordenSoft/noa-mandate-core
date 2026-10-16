@@ -180,7 +180,7 @@ func verifyHistoricalChain(receipts, receiptRoot, checkpoint, checkpointRoot, id
 
 	// CONTROL G2-RETIREMENT-INTEGRITY-GO: a historical-only static projection feeds the unchanged
 	// verifier without a checkpoint. It authenticates retained bytes and grants no current authority.
-	status := verifyChain(receipts, receiptTrust.keyring, identity, nil)
+	status := verifyChain(receipts, receiptTrust.keyring, identity, nil, nil)
 	if status != statusValid {
 		if status == statusTampered {
 			return histResult("INVALID", "RECEIPT_INTEGRITY_FAILURE", histDimensions("BROKEN", "UNANSWERED", "UNATTRIBUTABLE", retirement, witness, availability), chain, count, nil, nil)

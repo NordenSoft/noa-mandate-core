@@ -1,0 +1,119 @@
+[
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "toleapday_0",
+    "ts": "2028-02-29T23:59:59Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "ts-order-toleapday"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "POLICY"
+    },
+    "action": {
+      "id": "email.send",
+      "canonical": "email.send",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:1039f4444937bfcc44d6a6635039cd09db195ebe0b618146280cb8ff107d4329",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 0,
+      "prevHash": null,
+      "hash": "sha256:a7191b1461cd3845fda8a80eed0ded22476a32b5eb611a19048388ad73c72275"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "HFRT+d9r9BzDq37/DupYx7al6cilnug7ocE5nUHL464NyhOI1I48LAcu4UfatlqwN51xakdja3KWwJK6WXA2Ag=="
+    }
+  },
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "toleapday_1",
+    "ts": "2028-03-01T05:29:59.5+05:30",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "ts-order-toleapday"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "POLICY"
+    },
+    "action": {
+      "id": "email.send",
+      "canonical": "email.send",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:1039f4444937bfcc44d6a6635039cd09db195ebe0b618146280cb8ff107d4329",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 1,
+      "prevHash": "sha256:a7191b1461cd3845fda8a80eed0ded22476a32b5eb611a19048388ad73c72275",
+      "hash": "sha256:c1b0f789d122744acbd4266faa123dc5ee68d000c54816d22c4e73c4bc5de5ac"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "B5+L84IINjWxJa96MK9AvkrJI8h/CcZKHI0esmGG+jexCcd88QK4Gio2EM/90HLoEfGjGG/nrXsv4ExyoiUCAw=="
+    }
+  },
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "toleapday_2",
+    "ts": "2028-02-29T23:59:59.75Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "ts-order-toleapday"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "POLICY"
+    },
+    "action": {
+      "id": "email.send",
+      "canonical": "email.send",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:1039f4444937bfcc44d6a6635039cd09db195ebe0b618146280cb8ff107d4329",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 2,
+      "prevHash": "sha256:c1b0f789d122744acbd4266faa123dc5ee68d000c54816d22c4e73c4bc5de5ac",
+      "hash": "sha256:2f7760a191d5cd04266ead846744f8e2c1e6b4cebbedd8e9f763b75d6deb3f8e"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "GeYWig0GCgrkdnMTeDGI9n8/SqYFQEyMqKk+jHFOxF+GA0N5GVcG1L2h5+uGN2+FPAEBu1aKGXF3/eKy+cr8AA=="
+    }
+  }
+]

@@ -649,6 +649,69 @@ expect("USAGE (--identity is the last token, no keyring) [PY verifier]", pyVerif
   stage("corpus key, not a low-order pubkey", keyOf(join(VEC, "keyring.json")), "accepted");
 }
 
+// ── ts-order/ (scripts/gen-vectors.ts 10c) and independent-fields/ (10d): WARNING PARITY on the SHARED
+// file corpus Go, Rust and C# also run. Spec §5: consecutive `ts` values are compared at full precision
+// after offset normalization; a receipt earlier than its predecessor under both readings of a second 60
+// is reported as "ts-backwards: seq N", one earlier under exactly one reading as "ts-not-comparable:
+// seq N". The independent-fields/ chains (spec §2 "Independent fields") combine fields this version
+// deliberately does not couple, so they carry no such warning. Every chain is genuine and stays VALID
+// (a warning never changes a verdict). This block pins the EXPECTED status and warnings for TS and for
+// the Python ground truth the other three runners compare theirs with. Warning parity is not a verdict
+// class, so these lines stay out
+// of the verdict-line grammar scripts/conformance-matrix.mjs reads (they never end in a "(want …)"
+// clause); a mismatch still fails this script.
+{
+  const VEC = join(import.meta.dirname, "..", "conformance", "vectors");
+  const KR = join(VEC, "keyring.json");
+  const tsOrderOnly = (list) =>
+    (Array.isArray(list) ? list : []).filter((w) => /^ts-(backwards|not-comparable): seq \d+$/.test(w)).join(" | ");
+  // [vector, expected ts-order warnings, keyring supplied]. Without a keyring the run is UNVERIFIED
+  // and still reports its warnings (exit 1), exactly as with one (VALID, exit 0).
+  const cases = [
+    ["ts-order/backwards-one-second", "ts-backwards: seq 1", true],
+    ["ts-order/backwards-one-nanosecond", "ts-backwards: seq 1", true],
+    ["ts-order/backwards-after-offset", "ts-backwards: seq 1", true],
+    ["ts-order/equal-instant", "", true],
+    ["ts-order/second-60-ordered", "", true],
+    ["ts-order/not-comparable-second-60", "ts-not-comparable: seq 1", true],
+    ["ts-order/backwards-one-second", "ts-backwards: seq 1", false],
+    ["ts-order/second-60-then-next-minute", "", true],
+    ["ts-order/not-comparable-second-60-equal", "ts-not-comparable: seq 1", true],
+    ["ts-order/not-comparable-real-leap-second", "ts-not-comparable: seq 1", true],
+    ["ts-order/year-boundary-positive-offset", "ts-backwards: seq 4", true],
+    ["ts-order/month-boundary-negative-offset", "ts-backwards: seq 3", true],
+    ["ts-order/leap-day-positive-offset", "", true],
+    // Two warnings in one run, in seq order; the shuffled file holds the same receipts in the array
+    // order seq 1, seq 2, seq 0, and verifiers order by chain.seq, so the expected list is the same.
+    ["ts-order/backwards-twice", "ts-backwards: seq 1 | ts-backwards: seq 2", true],
+    ["ts-order/backwards-twice-shuffled", "ts-backwards: seq 1 | ts-backwards: seq 2", true],
+    ["independent-fields/risk-class-vs-reversible", "", true],
+    ["independent-fields/mode-vs-verdict-and-approval", "", true],
+    ["independent-fields/compliance-deny-vs-executed", "", true],
+    ["independent-fields/approval-at-after-ts", "", true],
+  ];
+  for (const [name, want, withKeyring] of cases) {
+    const file = join(VEC, `${name}.json`);
+    const ts = verifyChain(bytesOf(file), withKeyring ? { keyring: bytesOf(KR) } : {});
+    const tsGot = tsOrderOnly(ts.warnings);
+    const tsOk = ts.status === (withKeyring ? "VALID" : "UNVERIFIED") && tsGot === want;
+    console.log(`${tsOk ? "✓" : "✗"} WARNING PARITY ${name}${withKeyring ? "" : " (no keyring)"} [TS verifyChain]: ${ts.status}, [${tsGot}] expected [${want}]`);
+    if (!tsOk) failures++;
+    const py = pyVerify(withKeyring ? [file, KR] : [file]);
+    let pyWarnings = null;
+    let pyParsed = true;
+    try {
+      pyWarnings = JSON.parse(py.out).warnings;
+    } catch {
+      pyParsed = false;
+    }
+    const pyGot = pyParsed ? tsOrderOnly(pyWarnings) : "unparseable output";
+    const pyOk = py.code === (withKeyring ? 0 : 1) && pyParsed && pyGot === want;
+    console.log(`${pyOk ? "✓" : "✗"} WARNING PARITY ${name}${withKeyring ? "" : " (no keyring)"} [PY verifier]: exit ${py.code}, [${pyGot}] expected [${want}]`);
+    if (!pyOk) failures++;
+  }
+}
+
 // ── Knockout proof (signature-R rule), TS + Python: a fresh key signs a genuine receipt with a chosen R
 // at test time (S = r + k*a with its own private scalar; nothing committed as bytes). The control
 // signature must verify; R = identity, R = identity with the sign bit and R = rB + a small-order point

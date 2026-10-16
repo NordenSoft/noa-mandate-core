@@ -1,0 +1,119 @@
+[
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "ifmode_0",
+    "ts": "2026-06-20T09:00:00.000Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "independent-fields-ifmode"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "SERVICE"
+    },
+    "action": {
+      "id": "payment.refund",
+      "canonical": "payment.refund",
+      "riskClass": "HIGH",
+      "paramsHash": "sha256:9c10250f78b359d3c3abdf2dcd91a50af8aa4f7529cfbf3cfead14cf2500eac6",
+      "reversible": false,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "approvals_on",
+      "verdict": "EXECUTED",
+      "ruleId": "approved-out-of-band",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 0,
+      "prevHash": null,
+      "hash": "sha256:78f29c28adae1b1522d01bed9cbb1cd4883e4e5d04c991b82cfd781b1bc31e1b"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "Zdn23e/2fYL3ZURM+fO44ibVQ3WUaS3SwsLgXV3FvTMTIWukC36Isd6hfEuYWICbERtlRNsB/xkOpikjBtO5BQ=="
+    }
+  },
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "ifmode_1",
+    "ts": "2026-06-20T09:01:00.000Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "independent-fields-ifmode"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "SERVICE"
+    },
+    "action": {
+      "id": "payment.refund",
+      "canonical": "payment.refund",
+      "riskClass": "HIGH",
+      "paramsHash": "sha256:9c10250f78b359d3c3abdf2dcd91a50af8aa4f7529cfbf3cfead14cf2500eac6",
+      "reversible": false,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "off",
+      "verdict": "BLOCKED",
+      "ruleId": "blocked-mode-off",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 1,
+      "prevHash": "sha256:78f29c28adae1b1522d01bed9cbb1cd4883e4e5d04c991b82cfd781b1bc31e1b",
+      "hash": "sha256:8f3202a1deeedbd95427d509af8210f60d5e6400c7347a95110f68c3523fdcd7"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "hCZ0GU9q0DCs93Je/8rWhf4VnFqSCVVfbnwy63gQyGif3SptkJDk9W5FOp8nS8XSDycxs/Lo9jJiz3U0+MB1Ag=="
+    }
+  },
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "ifmode_2",
+    "ts": "2026-06-20T09:02:00.000Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "independent-fields-ifmode"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "SERVICE"
+    },
+    "action": {
+      "id": "payment.refund",
+      "canonical": "payment.refund",
+      "riskClass": "HIGH",
+      "paramsHash": "sha256:9c10250f78b359d3c3abdf2dcd91a50af8aa4f7529cfbf3cfead14cf2500eac6",
+      "reversible": false,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "shadow",
+      "verdict": "BLOCKED",
+      "ruleId": "blocked-mode-shadow",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 2,
+      "prevHash": "sha256:8f3202a1deeedbd95427d509af8210f60d5e6400c7347a95110f68c3523fdcd7",
+      "hash": "sha256:bcdd678d9d50bfafa2282d8a04b6396f6220125e5a6eeb95127730a43c239882"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "WsMhg/15iLDKS+2x0jqyhmnquKkpCtmrJGVgttdV0OoNZCZFMZnxUb9bsqwsOXYr9fwjaKYqkDlxXDsXR0IqBw=="
+    }
+  }
+]

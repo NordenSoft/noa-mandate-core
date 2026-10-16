@@ -3,7 +3,7 @@
 
 use crate::json::Json;
 use crate::keys::spki_to_raw;
-use crate::schema::is_rfc3339_instant;
+use crate::schema::{days_from_civil, is_rfc3339_instant};
 use crate::verify::{checkpoint_shape_ok, verify_chain, verify_checkpoint, Status};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -60,20 +60,6 @@ fn result(
         "attributedThroughSeq": attributed_through_seq,
         "asOf": as_of
     })
-}
-
-fn days_from_civil(mut year: i64, month: i64, day: i64) -> i64 {
-    year -= if month <= 2 { 1 } else { 0 };
-    let era = if year >= 0 {
-        year / 400
-    } else {
-        (year - 399) / 400
-    };
-    let yoe = year - era * 400;
-    let mp = month + if month > 2 { -3 } else { 9 };
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
 }
 
 fn decimal(bytes: &[u8]) -> Option<i64> {
@@ -258,7 +244,7 @@ pub fn verify_historical_chain(
 
     // CONTROL G2-RETIREMENT-INTEGRITY-RUST: only this historical side API projects retained keys
     // into the unchanged current verifier, and it never forwards a checkpoint through receipt trust.
-    let (status, _) = verify_chain(receipts, Some(&receipt_trust.keyring), identity, None);
+    let (status, _) = verify_chain(receipts, Some(&receipt_trust.keyring), identity, None, None);
     if status != Status::Valid {
         return match status {
             Status::Tampered => result(

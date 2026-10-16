@@ -40,6 +40,32 @@ All notable changes to `noa-receipt` are documented here. The format follows
   `ATOMIC-BLOCK` tags in the source, and `scripts/lint-doc-truth.mjs` (rule 9) refuses a citation
   that no longer names exactly those lines. NC-S9.1's citation of the effect owner's in-process commit
   had drifted and is corrected.
+- Receipt verification, all five verifiers: the backwards-time warning that `docs/receipt-spec.md` §5
+  documents is now reported consistently. Consecutive `ts` values are compared to the nanosecond after
+  offset normalization, with two stable codes: `ts-backwards: seq N` when the receipt is earlier than
+  its predecessor under both readings of a second `60` (a leap second, or second `00` of the next
+  minute), and `ts-not-comparable: seq N` when it is earlier under exactly one (a correctly ordered
+  pair across a real leap second can receive it). Before, the TypeScript reference compared
+  milliseconds (`Date.parse`) and skipped a second `60` without a report, its message was
+  `non-monotonic timestamp at seq N (ts went backwards)`, and the Python, Go, Rust and C# verifiers
+  compared no timestamps. Their CLIs print an additive `warnings` array, and the conformance runners now
+  check warning parity on `conformance/vectors/ts-order/`, including a chain that steps back twice (two
+  warnings in `seq` order, also when the file stores its receipts out of `seq` order), the second-`60`
+  boundaries, a real leap second, and month, year and leap-day boundaries crossed through positive and
+  negative offsets. The Go, Rust and C# runners read each CLI's result with a JSON parser
+  (`conformance/warning-parity.py`): a case fails when `warnings` is not an array of strings or a
+  timestamp-order code appears anywhere else in the result, and each runner first checks that a string
+  in place of the array fails its comparison.
+  The specification also states rules the verifiers already applied or never coupled: fractional
+  seconds are 1 to 9 digits; tenant consistency is a normative verification step; `riskClass`,
+  `reversible`, `mode`, the recorded policy decision, the operational outcome and `approval.at` are
+  independent fields (`VALID` never means the operation complied with the recorded policy), and
+  `conformance/vectors/independent-fields/` pins that every verifier accepts them as written; a
+  verifier MAY warn about an `approval.at` later than `ts`, but this version defines no code for it;
+  and the range rule accepts second `60` in any minute without establishing that it was a real leap
+  second. Sections 5 and 6 also say which verifiers report the opener-scoped checkpoint caveat and the
+  missing-checkpoint caveat. Verdicts and accepted inputs are unchanged; only warnings, documentation
+  and conformance vectors change.
 
 ### Security
 

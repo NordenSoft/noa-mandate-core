@@ -30,7 +30,8 @@ deferred → approved/rejected → rolled_back). Receipts for one `scope.chain` 
 - ✅ Proves: *this exact record was produced under these rules and signed by this key, and
   the sequence has not been edited in the middle.*
 - ❌ Does NOT prove: that the real-world action actually succeeded, that it was *wise*, that
-  the agent didn't hallucinate the intent, or (without a checkpoint, §6) that recent records
+  the agent didn't hallucinate the intent, that the recorded operation complied with a recorded
+  policy decision (§2, "Independent fields"), or (without a checkpoint, §6) that recent records
   weren't **deleted from the tail**. See [THREAT-MODEL.md](../THREAT-MODEL.md).
 
 ---
@@ -73,12 +74,20 @@ Canonicalized per **RFC 8785 (JCS)** — with NOA hardening (§4) — before has
 - **`paramsHash`** is `sha256:<hex>` or, recommended for low-entropy params,
   `hmac-sha256:<hex>` with a tenant-scoped key (plain SHA-256 of an amount/id/bool is
   brute-forceable and identical across tenants → correlation; see THREAT-MODEL §params).
-- **`ts` and `approval.at` MUST denote a real instant**, not merely match the RFC 3339 shape.
-  Month `01`-`12`; day within the real length of that month in that year (leap years included);
-  hour ≤ `23`; minute ≤ `59`; second ≤ `60`; offset ≤ `23:59`. **Second `60` is ACCEPTED** — a leap
-  second is a real instant, and refusing one would refuse a truthful receipt; which UTC days carry
-  one is an IERS table, not a property of the string, so the range is what a verifier enforces.
-  `2026-13-45T99:99:99.000Z` matches the pattern and is **`MALFORMED`**.
+- **`ts` and `approval.at` MUST pass the real-instant range rule**, not merely match the RFC 3339
+  shape: month `01`-`12`; day within the real length of that month in that year (leap years
+  included); hour ≤ `23`; minute ≤ `59`; second ≤ `60`; offset ≤ `23:59`.
+  `2026-13-45T99:99:99.000Z` matches the pattern and is **`MALFORMED`**. Fractional seconds are
+  optional; when present they are **1 to 9 ASCII digits** (nanosecond precision at most), so
+  `2026-06-20T07:30:54.1234567890Z`, valid RFC 3339, is **`MALFORMED`** here (the schema's `pattern`
+  states the same bound).
+- **Second `60` is ACCEPTED by the range rule, in any minute and at any offset** — a leap second is
+  a real instant, and refusing one would refuse a truthful receipt. Which UTC minutes really carried
+  one is an IERS table, not a property of the string, so the rule does **not** establish that a given
+  second `60` was a real leap second: `2026-06-20T07:45:60Z` passes it although no leap second falls
+  there. That needs external evidence. A stricter rule (for example, second `60` only at `23:59` UTC
+  on the last day of a month) would refuse inputs this version accepts, so it can only come with a
+  later format version.
 
 ### Coherence rules (cross-field)
 
@@ -105,6 +114,37 @@ path. The same placement means a conformant *producer* cannot sign one either. R
 real-instant rule above is **not** expressible in JSON Schema and is enforced only by the normative
 validators. Pinned by `conformance/vectors/attack/coherence-*.json` (reject) and
 `conformance/vectors/coherence-*.json` + `conformance/vectors/ts-leap-second.json` (must stay valid).
+
+### Independent fields (what R1-R4 deliberately do not couple)
+
+R1-R4 are the only cross-field rules of structural validation (§5 step 1). The chain checks of §5
+(steps 2-7) also read several fields, within one receipt and across consecutive receipts, but none of
+them relates the two fields of a pair below. The pairs below are independent by design: a verifier
+MUST NOT reject a receipt because of how they combine, and a reader MUST NOT infer one field from the
+other.
+
+- **`action.riskClass` and `action.reversible`.** `riskClass` is an authorization-risk tier — how
+  much scrutiny the action needs before it may run, a tier a policy may raise. `reversible` (with
+  `rollbackRef`) carries the undo-capability claim. `riskClass: "IRREVERSIBLE"` beside
+  `reversible: true` is accepted as written; reversibility is read from `reversible` only.
+- **`governance.mode` and `governance.verdict` / `governance.approval`.** The mode labels the
+  producer's enforcement mode. It does not establish that approval evidence is carried inline — a
+  receipt under `approvals_on` may record `EXECUTED` with `approval: null`, the approval being
+  evidenced outside the receipt — and it prescribes no further verdict combinations: `BLOCKED` under
+  `off` or `shadow` is accepted as written.
+- **`governance.compliance.verdict` and `governance.verdict`.** The first records the policy decision
+  (`ALLOW` / `DENY`, §9); the second records the operational outcome. A receipt may truthfully record
+  `EXECUTED` beside `DENY` — an execution despite a policy denial is evidence worth keeping. `VALID`
+  means the bytes are intact, linked and signed by trusted keys; it never means the recorded
+  operation complied with the recorded policy.
+- **`governance.approval.at` and `ts`.** They may come from different clocks, and this version
+  defines no common clock or required order between them. A verifier MUST NOT reject a receipt as an
+  integrity failure because `approval.at` is later than `ts`; it MAY report it as a chronology
+  warning. This version defines no stable code for such a warning, so none of the five verifiers in
+  this repository reports one; a later revision may define a code.
+
+Pinned by `conformance/vectors/independent-fields/`: genuine chains carrying each combination above,
+which every verifier must accept as `VALID` with the keyring and without a timestamp-order warning.
 
 ### Hashing rule (frozen)
 
@@ -178,6 +218,8 @@ verify(receipts, { keyring?, checkpoint?, identityManifest? }):
      enforce the §2 coherence rules R1-R4 and the real-instant `ts` rule
      — all decidable with no key material)
   2. single chain partition; seqs contiguous 0..n-1, unique             -> else TAMPERED
+  2b. tenant consistency, in seq order: every PRESENT scope.tenant      -> else TAMPERED
+      equals the last present one; absence is allowed and never resets the comparison
   for each receipt in seq order:
   3. recompute hash = sha256(JCS(receipt \ chain.hash \ sig.value)); assert == chain.hash
   4. pin sig.kid per agent.id (reject mid-chain key swap)
@@ -196,6 +238,8 @@ verify(receipts, { keyring?, checkpoint?, identityManifest? }):
                                                            this agent.id). No manifest => kid-level
                                                            attribution + an explicit warning.
   6. linkage: seq 0 => prevHash null; else prevHash == prev.hash && seq == prev.seq+1
+  6b. timestamp order (a WARNING, never a verdict): ts vs the previous receipt's ts at full
+       precision after offset normalization -> ts-backwards / ts-not-comparable (see below)
   7. if checkpoint: assert head matches checkpoint (tail-truncation); and (if identityManifest
        supplied) the checkpoint sig.kid MUST be authorized for the GENESIS agent.id (the chain
        OPENER, seq 0) — NOT the mutable head — else UNTRUSTED (closes the re-heading attack); warn
@@ -209,9 +253,49 @@ verify(receipts, { keyring?, checkpoint?, identityManifest? }):
 CLI exit codes: `0` VALID · `1` UNVERIFIED (no keyring supplied) · `2` TAMPERED · `3` MALFORMED
 · `4` usage · `5` UNTRUSTED (identity binding failed) · `9` KEY_RETIRED. **CI rule: treat any non-zero exit as failure** (do not special-case `==2`). Honest
 by design: without a keyring, signatures are reported UNVERIFIED, never VALID; without a
-checkpoint, the verifier emits an explicit tail-truncation warning; and it always emits a
-fork/equivocation caveat (an offline verifier sees only the branch it was given) plus a
-non-monotonic-timestamp warning if `ts` goes backwards.
+checkpoint, the reference verifier emits an explicit tail-truncation warning; and it always emits a
+fork/equivocation caveat (an offline verifier sees only the branch it was given). Every verifier
+reports the timestamp-order warnings (see "Timestamp-order warnings" below).
+
+**Tenant consistency (step 2b).** `scope.tenant` is optional, but within one `scope.chain` every
+present value MUST equal the last present one in `seq` order; a different present value is a
+cross-tenant splice and the chain is `TAMPERED`. An absent value is allowed and never resets the
+comparison, so `acme -> absent -> globex` is refused exactly like `acme -> globex`, while
+`acme -> absent -> acme` and `absent -> acme` stay valid. Pinned by
+`conformance/vectors/attack/tenant-splice-via-absent*.json` and `conformance/vectors/tenant-*.json`.
+Separately from this rule, the reference library offers `requireTenantConsistency: false`, which
+reports the drift as a `tenant-drift:` warning instead of refusing; the CLIs and the other four
+verifiers always apply step 2b.
+
+**Timestamp-order warnings (stable codes).** For each receipt after the first, in `seq` order, a
+verifier compares its `ts` with the previous receipt's `ts` at full precision — every fractional
+digit, to the nanosecond — after normalizing both offsets to UTC. A millisecond clock, or a parser
+that refuses second `60`, cannot do this. The result is a warning, never a verdict: it changes no
+status and no accepted input. A second `60`, which the range rule (§2) admits in any minute, has two
+readings: a leap second, after second `59` of its own minute, or an overflow, second `00` of the
+next minute. Without a second `60` the two readings are the same comparison. Every conformant
+verifier uses exactly these two codes:
+
+- `ts-backwards: seq N` — under both readings, the `ts` of the receipt at `seq` N is strictly earlier
+  than that of `seq` N-1.
+- `ts-not-comparable: seq N` — exactly one reading puts it strictly earlier, so the bytes cannot
+  order the pair: `10:01:00.1Z` then `10:00:60.5Z`, or `10:01:00Z` then `10:00:60Z`.
+
+Otherwise the pair gets no warning: equal instants, however spelled, get none, and neither does a
+pair that one reading puts later and the other makes equal (`10:00:60Z` then `10:01:00Z`). An
+accepted timestamp is never skipped without a report.
+
+`ts-not-comparable` says that the bytes cannot order the pair, not that a clock is wrong. A
+correctly ordered pair across a real leap second can receive it: `2016-12-31T23:59:60.5Z` then
+`2017-01-01T00:00:00.2Z` is in order as a leap second and backwards as an overflow.
+
+The reference library returns the codes in `warnings`; every CLI prints them, in `seq` order, in the
+`warnings` array of its JSON result, which the Python, Go, Rust and C# CLIs add only when it is
+non-empty. These two codes are the only warnings that every verifier reports in the same form. Other
+warnings differ between implementations: only the reference reports the tail-truncation and
+fork/equivocation caveats in `warnings`, and the Go and Rust verifiers do not report the
+opener-scoped checkpoint caveat. A consumer that compares verifiers compares these two codes only.
+Pinned for all five verifiers by `conformance/vectors/ts-order/`.
 
 **Retired keys (optional lifecycle trust root).** The static keyring above has no notion of
 retirement. A verifier that also accepts the `noa.signing-key-lifecycle/0.1` trust root (the
@@ -274,13 +358,15 @@ attacker's checkpoint against the attacker's OWN authorized `agent.id` → `VALI
 tail is erased. The opener cannot be re-written by an appended tail, so genesis-binding rejects the
 re-heading checkpoint as `UNTRUSTED` and strictly subsumes the legitimate opener-checkpoint case
 (when the opener also heads, genesis == head). **Multi-agent caveat:** the checkpoint completeness it
-proves is *opener-scoped*. When a chain holds more than one distinct `agent.id`, the verifier **warns**
-that a co-agent's tail is not separately certified by the opener's checkpoint. **Residual (needs the
+proves is *opener-scoped*. When this check runs (a keyring, an `identityManifest` and a checkpoint are
+supplied, and the checkpoint passes) and the chain holds more than one distinct `agent.id`, the
+reference, Python and C# verifiers **warn** that a co-agent's tail is not separately certified by the
+opener's checkpoint; the Go and Rust verifiers do not report this caveat (§5). **Residual (needs the
 v1.0 external anchor):** the opener itself dropping a co-agent's tail, and the no-`identityManifest`
 case (kid-level only — any keyring-trusted key can forge a checkpoint over any head). Without a
-checkpoint the verifier **warns** that
-tail-truncation is undetectable offline. Stronger completeness claims need separately trusted,
-externally obtained evidence; this specification does not provide it.
+checkpoint, only the reference verifier **warns** that tail-truncation is undetectable offline; the
+Python, Go, Rust and C# verifiers do not report it (§5). Stronger completeness claims need separately
+trusted, externally obtained evidence; this specification does not provide it.
 
 ---
 

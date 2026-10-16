@@ -32,6 +32,7 @@ dotnet run --project "$SCRIPT_DIR/selfcheck/selfcheck.csproj" -c Release -- conf
   || { echo "KEY-LOAD SELF-CHECK FAILED"; exit 1; }
 
 TOTAL=0; PASS=0; FAIL=0
+WARN_SEEN=0 # warning-parity cases on which impl-py printed at least one timestamp-order warning
 
 run_case() {
   label="$1"; shift
@@ -58,6 +59,75 @@ run_case() {
   else
     FAIL=$((FAIL+1))
     printf '  FAIL  py=%s cs=%s  %s\n' "$py_code" "$cs_code" "$label"
+  fi
+}
+
+# WARNING PARITY (scripts/gen-vectors.ts 10c and 10d, spec §5 and §2). run_case compares exit codes only,
+# so it cannot see a missing or different warning. For each ts-order/ and independent-fields/ chain both
+# verifiers must exit with the same code AND print the same timestamp-order warnings ("ts-backwards:
+# seq N" / "ts-not-comparable: seq N"), in the same order; impl-py/conformance.mjs pins impl-py's exit
+# code and expected list. conformance/warning-parity.py reads each JSON result with a JSON parser: a
+# "warnings" member that is not an array of strings, or a code anywhere else in the result, fails the
+# case on either side. These lines start with "WARN-" on purpose: warning parity is not a verdict class
+# and scripts/conformance-matrix.mjs counts only PASS/FAIL verdict lines. A mismatch still fails this run.
+WARN_PARITY="conformance/warning-parity.py"
+WARN_REF=""
+WARN_PORT=""
+
+# warn_agree <reference output> <port output>: 0 only when conformance/warning-parity.py reads both
+# results as the documented shape and they carry the same codes in the same order. Leaves each side's
+# reading (the codes as a JSON array, or "INVALID: <reason>") in WARN_REF and WARN_PORT for the report.
+warn_agree() {
+  local rv pv
+  WARN_REF="$(python3 "$WARN_PARITY" codes "$1" 2>&1)"; rv=$?
+  WARN_PORT="$(python3 "$WARN_PARITY" codes "$2" 2>&1)"; pv=$?
+  [ "$rv" -eq 0 ] && [ "$pv" -eq 0 ] && [ "$WARN_REF" = "$WARN_PORT" ]
+}
+
+# GATE SELF-TEST, run before the cases: the decision above must be able to fail. The helper's own table
+# of wrong shapes must read as expected, two identical correct results must agree, and a result carrying
+# the code as a bare string in place of the "warnings" array must not agree with a correct one.
+warn_selftest() {
+  local good='{"status":"VALID","warnings":["ts-backwards: seq 1"]}'
+  local bad='{"status":"VALID","warnings":"ts-backwards: seq 1"}'
+  local out
+  TOTAL=$((TOTAL+1))
+  if ! out="$(python3 "$WARN_PARITY" --selftest 2>&1)"; then
+    printf '%s\n' "$out"
+    FAIL=$((FAIL+1)); printf '  WARN-FAIL  self-test: conformance/warning-parity.py --selftest failed\n'
+  elif ! warn_agree "$good" "$good"; then
+    FAIL=$((FAIL+1)); printf '  WARN-FAIL  self-test: two identical correct results did not agree [%s] [%s]\n' "$WARN_REF" "$WARN_PORT"
+  elif warn_agree "$good" "$bad"; then
+    FAIL=$((FAIL+1)); printf '  WARN-FAIL  self-test: a string in place of the warnings array was accepted [%s]\n' "$WARN_PORT"
+  else
+    PASS=$((PASS+1)); printf '  WARN-PASS  self-test: a string in place of the warnings array fails the comparison [%s]\n' "$WARN_PORT"
+  fi
+}
+
+run_warn_case() {
+  local label="$1"; shift
+  local __arg py_out cs_out py_code cs_code agree
+  for __arg in "$@"; do
+    case "$__arg" in
+      --*) continue ;;
+    esac
+    if [ ! -f "$__arg" ]; then
+      TOTAL=$((TOTAL+1)); FAIL=$((FAIL+1))
+      printf '  WARN-FAIL  MISSING VECTOR FILE: %s  (%s)\n' "$__arg" "$label"
+      return
+    fi
+  done
+  py_out="$(python3 "$PY" "$@" 2>/dev/null)"; py_code=$?
+  cs_out="$(dotnet "$EXE" "$@" 2>/dev/null)"; cs_code=$?
+  warn_agree "$py_out" "$cs_out"; agree=$?
+  case "$WARN_REF" in '["'*) WARN_SEEN=$((WARN_SEEN+1)) ;; esac
+  TOTAL=$((TOTAL+1))
+  if [ "$py_code" = "$cs_code" ] && [ "$agree" -eq 0 ]; then
+    PASS=$((PASS+1))
+    printf '  WARN-PASS  py=%s cs=%s  %s  %s\n' "$py_code" "$cs_code" "$WARN_REF" "$label"
+  else
+    FAIL=$((FAIL+1))
+    printf '  WARN-FAIL  py=%s %s  cs=%s %s  %s\n' "$py_code" "$WARN_REF" "$cs_code" "$WARN_PORT" "$label"
   fi
 }
 
@@ -136,6 +206,43 @@ run_case "strict-ed25519/y=p+1 non-canonical pubkey (TAMPERED)" "conformance/vec
 run_case "strict-ed25519/off-curve pubkey y=2 (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-off-curve-y-2.json"
 run_case "strict-ed25519/mixed-order pubkey (TAMPERED)" "conformance/vectors/valid-chain.json" "$SE/keyring-mixed-order.json"
 run_case "strict-ed25519/s-not-canonical malleability + kr (TAMPERED)" "$SE/chain-s-not-canonical.json" "$KR"
+echo
+echo "== conformance/vectors/ts-order (warning parity; every chain stays VALID) =="
+warn_selftest
+TO="conformance/vectors/ts-order"
+run_warn_case "ts-order/backwards-one-second + kr"     "$TO/backwards-one-second.json" "$KR"
+run_warn_case "ts-order/backwards-one-nanosecond + kr" "$TO/backwards-one-nanosecond.json" "$KR"
+run_warn_case "ts-order/backwards-after-offset + kr"   "$TO/backwards-after-offset.json" "$KR"
+run_warn_case "ts-order/equal-instant + kr"            "$TO/equal-instant.json" "$KR"
+run_warn_case "ts-order/second-60-ordered + kr"        "$TO/second-60-ordered.json" "$KR"
+run_warn_case "ts-order/not-comparable-second-60 + kr" "$TO/not-comparable-second-60.json" "$KR"
+run_warn_case "ts-order/backwards-one-second (no keyring)" "$TO/backwards-one-second.json"
+run_warn_case "ts-order/second-60-then-next-minute + kr"      "$TO/second-60-then-next-minute.json" "$KR"
+run_warn_case "ts-order/not-comparable-second-60-equal + kr"  "$TO/not-comparable-second-60-equal.json" "$KR"
+run_warn_case "ts-order/not-comparable-real-leap-second + kr" "$TO/not-comparable-real-leap-second.json" "$KR"
+run_warn_case "ts-order/year-boundary-positive-offset + kr"   "$TO/year-boundary-positive-offset.json" "$KR"
+run_warn_case "ts-order/month-boundary-negative-offset + kr"  "$TO/month-boundary-negative-offset.json" "$KR"
+run_warn_case "ts-order/leap-day-positive-offset + kr"        "$TO/leap-day-positive-offset.json" "$KR"
+# Two warnings in one run, in seq order; the shuffled file stores the same receipts in the array order
+# seq 1, seq 2, seq 0, and verifiers order by chain.seq, so both must print the same two codes.
+run_warn_case "ts-order/backwards-twice + kr"                 "$TO/backwards-twice.json" "$KR"
+run_warn_case "ts-order/backwards-twice-shuffled + kr"        "$TO/backwards-twice-shuffled.json" "$KR"
+# ANTI-VACUITY: if the extraction matched nothing anywhere, every case above would "agree" on an
+# empty list. Eleven of those cases must carry an impl-py warning, so zero is a broken runner.
+if [ "$WARN_SEEN" -eq 0 ]; then
+  TOTAL=$((TOTAL+1)); FAIL=$((FAIL+1))
+  printf '  WARN-FAIL  vacuous: impl-py printed no timestamp-order warning on any ts-order case\n'
+fi
+echo
+echo "== conformance/vectors/independent-fields (accepted as written; exit-code and warning parity) =="
+# Spec §2 "Independent fields" (scripts/gen-vectors.ts 10d): field combinations this version deliberately
+# does not couple. impl-py/conformance.mjs pins impl-py at VALID with no timestamp-order warning; parity
+# holds impl-csharp to the same. WARN- lines, like the ts-order cases, so the verdict matrix is unchanged.
+IND="conformance/vectors/independent-fields"
+run_warn_case "independent-fields/risk-class-vs-reversible + kr"     "$IND/risk-class-vs-reversible.json" "$KR"
+run_warn_case "independent-fields/mode-vs-verdict-and-approval + kr" "$IND/mode-vs-verdict-and-approval.json" "$KR"
+run_warn_case "independent-fields/compliance-deny-vs-executed + kr"  "$IND/compliance-deny-vs-executed.json" "$KR"
+run_warn_case "independent-fields/approval-at-after-ts + kr"         "$IND/approval-at-after-ts.json" "$KR"
 echo
 echo "== conformance/vectors/malformed (parser/structural rejects) =="
 for f in deep-nest duplicate-key float-number lone-high-surrogate lone-low-surrogate pii-smuggle proto-pollution reversed-surrogate-pair trailing-garbage; do

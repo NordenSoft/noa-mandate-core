@@ -1,0 +1,83 @@
+[
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "ifappr_0",
+    "ts": "2026-06-20T09:00:00.000Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "independent-fields-ifappr"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "SERVICE"
+    },
+    "action": {
+      "id": "payment.refund",
+      "canonical": "payment.refund",
+      "riskClass": "HIGH",
+      "paramsHash": "sha256:9c10250f78b359d3c3abdf2dcd91a50af8aa4f7529cfbf3cfead14cf2500eac6",
+      "reversible": false,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "human-approved",
+      "approval": {
+        "by": "HUMAN:hmac-sha256:ef5b31ebb954ff5a109e51c22c06ddb662d7725ceda4eb42739dd375528519b3",
+        "at": "2026-06-20T09:05:00.000Z"
+      },
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 0,
+      "prevHash": null,
+      "hash": "sha256:6d39d4f34b023c155b84837dba06589648cbf2bc369208f5654a42dab7e2c5ac"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "aKcGDahsLna+aIRSFbLqM/hLwVNM8TbCK3T7zLNY6eHochxKKZXfQgq60eltRxDYP0zVNTcGmLJqF/mWtSeAAw=="
+    }
+  },
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "ifappr_1",
+    "ts": "2026-06-20T09:01:00.000Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "independent-fields-ifappr"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "SERVICE"
+    },
+    "action": {
+      "id": "payment.refund",
+      "canonical": "payment.refund",
+      "riskClass": "HIGH",
+      "paramsHash": "sha256:9c10250f78b359d3c3abdf2dcd91a50af8aa4f7529cfbf3cfead14cf2500eac6",
+      "reversible": false,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 1,
+      "prevHash": "sha256:6d39d4f34b023c155b84837dba06589648cbf2bc369208f5654a42dab7e2c5ac",
+      "hash": "sha256:659eb9854e17fc417c3be837c9e1143a105e53a203cf1d914b4fde7d40592a93"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "dSiGod7fO+Ai1u6Aay10GoWBePOY6/OsrrBivPtp73ic0B5F3/yaTZMm5xFD70koiLTr8brmp+SaexLbHOLxAA=="
+    }
+  }
+]
