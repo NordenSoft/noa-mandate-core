@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"regexp"
+	"strconv"
 	"unicode/utf8"
 )
 
@@ -92,6 +93,82 @@ func rfc3339Instant(s string) bool {
 		return true
 	}
 	return two(s, n-5) <= 23 && two(s, n-2) <= 59
+}
+
+// Timestamp order (spec §5, warnings `ts-backwards` / `ts-not-comparable`). Mirrors src/scan.ts
+// tsOrder exactly. It feeds a WARNING only: no result accepts or refuses a receipt.
+const (
+	tsOrderOK            = 0
+	tsOrderBackwards     = 1
+	tsOrderNotComparable = 2
+)
+
+// utcMinute is the UTC minute s names, with its offset applied, counted from a fixed origin
+// (proleptic Gregorian, March-based year, shifted 400 years so every term is non-negative).
+// Offsets are whole minutes, so normalizing one never changes the seconds field. s already passed
+// rfc3339Instant.
+func utcMinute(s string) int64 {
+	month := two(s, 5)
+	y := int64(int(s[0]-'0')*1000 + int(s[1]-'0')*100 + int(s[2]-'0')*10 + int(s[3]-'0') + 400)
+	if month <= 2 {
+		y--
+	}
+	m := int64((month + 9) % 12) // March = 0 ... February = 11
+	days := 365*y + y/4 - y/100 + y/400 + (153*m+2)/5 + int64(two(s, 8)) - 1
+	local := days*1440 + int64(two(s, 11))*60 + int64(two(s, 14))
+	n := len(s)
+	if s[n-1] == 'Z' || s[n-1] == 'z' {
+		return local
+	}
+	offset := int64(two(s, n-5))*60 + int64(two(s, n-2))
+	if s[n-6] == '+' {
+		return local - offset
+	}
+	return local + offset
+}
+
+// fractionNanos is the fractional second in nanoseconds: its 1-9 digits right-padded with zeros,
+// 0 when absent.
+func fractionNanos(s string) int64 {
+	if len(s) < 21 || s[19] != '.' {
+		return 0
+	}
+	var value int64
+	digits := 0
+	for i := 20; i < len(s) && s[i] >= '0' && s[i] <= '9'; i++ {
+		value = value*10 + int64(s[i]-'0')
+		digits++
+	}
+	for ; digits < 9; digits++ {
+		value *= 10
+	}
+	return value
+}
+
+// tsOrder orders two consecutive receipt timestamps at full precision (nanoseconds) after offset
+// normalization. Second 60 has two readings — a leap second after second 59 of its own minute, or
+// an overflow into second 0 of the next minute (the range rule admits it in any minute) — and when
+// they disagree about "backwards" the pair is not comparable. An input that is not an RFC 3339
+// instant is also not comparable: never a silent skip.
+func tsOrder(earlier, later string) int {
+	if !rfc3339Instant(earlier) || !rfc3339Instant(later) {
+		return tsOrderNotComparable
+	}
+	minuteA, minuteB := utcMinute(earlier), utcMinute(later)
+	secondA, secondB := int64(two(earlier, 17)), int64(two(later, 17))
+	nanosA, nanosB := fractionNanos(earlier), fractionNanos(later)
+	// Reading 1: second 60 is a leap second, after second 59 of its own minute.
+	backAsLeap := minuteB < minuteA || (minuteB == minuteA && (secondB < secondA || (secondB == secondA && nanosB < nanosA)))
+	// Reading 2: second 60 is second 0 of the next minute.
+	elapsedA, elapsedB := minuteA*60+secondA, minuteB*60+secondB
+	backAsNextMinute := elapsedB < elapsedA || (elapsedB == elapsedA && nanosB < nanosA)
+	if backAsLeap && backAsNextMinute {
+		return tsOrderBackwards
+	}
+	if backAsLeap != backAsNextMinute {
+		return tsOrderNotComparable
+	}
+	return tsOrderOK
 }
 
 // checkExactKeys enforces additionalProperties:false (no unknown fields) + presence of every
@@ -455,8 +532,10 @@ func verifyCheckpoint(cp *Value, keyring *Value) string {
 // verifyChain is the verdict-equivalent port of impl-py verify_chain / src/verify.ts verifyChain:
 // structural validation → single chain partition + contiguous unique seq → per-receipt hash / key
 // continuity / signature / identity binding / linkage → checkpoint tail-truncation + §5b binding.
-// Any nil optional argument means "not supplied". Returns a status constant.
-func verifyChain(receipts, keyring, identity, checkpoint *Value) string {
+// Any nil optional argument means "not supplied". Returns a status constant. When warnings is not
+// nil, a VALID/UNVERIFIED run appends its warnings to it in order (the timestamp-order codes,
+// spec §5); a refusal appends nothing, like the TS reference.
+func verifyChain(receipts, keyring, identity, checkpoint *Value, warnings *[]string) string {
 	if receipts == nil || receipts.Kind != KindArray || len(receipts.Arr) == 0 {
 		return statusMalformed
 	}
@@ -533,6 +612,7 @@ func verifyChain(receipts, keyring, identity, checkpoint *Value) string {
 
 	pinned := make(map[string]string)
 	var prev *Value
+	var runWarnings []string
 	n := int64(len(receipts.Arr))
 	for s := int64(0); s < n; s++ {
 		r, ok := bySeq[s]
@@ -583,6 +663,14 @@ func verifyChain(receipts, keyring, identity, checkpoint *Value) string {
 		} else if !link.isStr() || link.Str != prev.get("chain").get("hash").Str {
 			return statusTampered // broken linkage
 		}
+		if prev != nil { // timestamp order: a warning, never a verdict (spec §5)
+			switch tsOrder(prev.get("ts").Str, r.get("ts").Str) {
+			case tsOrderBackwards:
+				runWarnings = append(runWarnings, "ts-backwards: seq "+strconv.FormatInt(s, 10))
+			case tsOrderNotComparable:
+				runWarnings = append(runWarnings, "ts-not-comparable: seq "+strconv.FormatInt(s, 10))
+			}
+		}
 		prev = r
 	}
 
@@ -614,6 +702,9 @@ func verifyChain(receipts, keyring, identity, checkpoint *Value) string {
 		}
 	}
 
+	if warnings != nil {
+		*warnings = append(*warnings, runWarnings...)
+	}
 	if haveKeyring {
 		return statusValid
 	}

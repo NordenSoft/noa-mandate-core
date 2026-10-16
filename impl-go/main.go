@@ -34,7 +34,7 @@ func run(argv []string) (code int) {
 	// matching impl-py's "never throws out of the verifier" contract.
 	defer func() {
 		if r := recover(); r != nil {
-			printResult(statusMalformed, fmt.Sprintf("internal error: %v", r))
+			printResult(statusMalformed, fmt.Sprintf("internal error: %v", r), nil)
 			code = exitCodes[statusMalformed]
 		}
 	}()
@@ -163,8 +163,9 @@ func run(argv []string) (code int) {
 		}
 	}
 
-	status := verifyChain(receipts, keyring, identity, checkpoint)
-	printResult(status, "")
+	var warnings []string
+	status := verifyChain(receipts, keyring, identity, checkpoint, &warnings)
+	printResult(status, "", warnings)
 	return exitCodes[status]
 }
 
@@ -177,14 +178,19 @@ func loadFile(path string) (*Value, error) {
 }
 
 func malformed(detail string) int {
-	printResult(statusMalformed, detail)
+	printResult(statusMalformed, detail, nil)
 	return exitCodes[statusMalformed]
 }
 
-func printResult(status, detail string) {
-	out := map[string]string{"status": status}
+// printResult prints the one-line JSON result. "warnings" is an additive key, present only when
+// the run reported a warning (the timestamp-order codes, spec §5).
+func printResult(status, detail string, warnings []string) {
+	out := map[string]any{"status": status}
 	if detail != "" {
 		out["detail"] = detail
+	}
+	if len(warnings) > 0 {
+		out["warnings"] = warnings
 	}
 	b, _ := json.Marshal(out)
 	fmt.Println(string(b))

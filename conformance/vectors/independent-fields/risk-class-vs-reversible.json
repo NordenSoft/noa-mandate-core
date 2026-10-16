@@ -1,0 +1,41 @@
+[
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "ifrisk_0",
+    "ts": "2026-06-20T09:00:00.000Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "independent-fields-ifrisk"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "SERVICE"
+    },
+    "action": {
+      "id": "payment.refund",
+      "canonical": "payment.refund",
+      "riskClass": "IRREVERSIBLE",
+      "paramsHash": "sha256:9c10250f78b359d3c3abdf2dcd91a50af8aa4f7529cfbf3cfead14cf2500eac6",
+      "reversible": true,
+      "rollbackRef": "snap_before_refund"
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "irreversible-tier-review",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 0,
+      "prevHash": null,
+      "hash": "sha256:38d4588696532518420ae0a66d3bfe934dc0f457b84044429b05ee92d1e35b1c"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "gPg2EBUGfW4PO6/Q4Zn2czpPYz8r0shMGpaf+KSiIUnLMs0kTV8eykfisWnXgFY4Q+jYGMA7nYdrVX7jcvFsBQ=="
+    }
+  }
+]

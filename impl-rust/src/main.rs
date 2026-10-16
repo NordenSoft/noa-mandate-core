@@ -201,16 +201,26 @@ fn run() -> i32 {
         };
     }
 
+    let mut warnings: Vec<String> = Vec::new();
     let (status, detail) = verify_chain(
         &receipts,
         keyring.as_ref(),
         identity.as_ref(),
         checkpoint.as_ref(),
+        Some(&mut warnings),
     );
+    // "warnings" is an additive key, present only when the run reported a warning (spec §5).
+    let warnings_json = if warnings.is_empty() {
+        String::new()
+    } else {
+        let items: Vec<String> = warnings.iter().map(|w| format!("\"{}\"", esc(w))).collect();
+        format!(",\n  \"warnings\": [{}]", items.join(", "))
+    };
     println!(
-        "{{\n  \"status\": \"{}\",\n  \"detail\": \"{}\"\n}}",
+        "{{\n  \"status\": \"{}\",\n  \"detail\": \"{}\"{}\n}}",
         status.label(),
-        esc(&detail)
+        esc(&detail),
+        warnings_json
     );
     status.exit_code()
 }

@@ -1,0 +1,119 @@
+[
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "toeq_0",
+    "ts": "2026-06-20T10:00:00Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "ts-order-toeq"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "POLICY"
+    },
+    "action": {
+      "id": "email.send",
+      "canonical": "email.send",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:1039f4444937bfcc44d6a6635039cd09db195ebe0b618146280cb8ff107d4329",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 0,
+      "prevHash": null,
+      "hash": "sha256:0a5275ff31e147354275b2dd4971e888c7429a8d51571fee2342853886c39b6f"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "TkXhq6it6R1l4ZKfwii+OW60RpiAxLupywM18KwaKpLwYyKcfDzqIWK2cZ6NfqOItYWOIKky7x/wYEH40uKmAw=="
+    }
+  },
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "toeq_1",
+    "ts": "2026-06-20t10:00:00z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "ts-order-toeq"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "POLICY"
+    },
+    "action": {
+      "id": "email.send",
+      "canonical": "email.send",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:1039f4444937bfcc44d6a6635039cd09db195ebe0b618146280cb8ff107d4329",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 1,
+      "prevHash": "sha256:0a5275ff31e147354275b2dd4971e888c7429a8d51571fee2342853886c39b6f",
+      "hash": "sha256:04510bd91ae2d0f4d141340504e73cdd05a11de7c87ba0afa78e4f818ea68080"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "nrX6RQsrarKyPHj/trAXlxjte45ii8D0tgqRTyD8iKDY4BKl5mdvYVTOODxU5cxW1kWxuNnt1z2dIRN3kDE+DA=="
+    }
+  },
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "toeq_2",
+    "ts": "2026-06-20T12:00:00.000+02:00",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "ts-order-toeq"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "POLICY"
+    },
+    "action": {
+      "id": "email.send",
+      "canonical": "email.send",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:1039f4444937bfcc44d6a6635039cd09db195ebe0b618146280cb8ff107d4329",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 2,
+      "prevHash": "sha256:04510bd91ae2d0f4d141340504e73cdd05a11de7c87ba0afa78e4f818ea68080",
+      "hash": "sha256:5a8870c60b7e9fe690cbbe47972ad943181bb5abe08dea86ff6989fa23c0ccb3"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "uOjLnOkXrARJSgtZJeerp4gbmUfqIlOiwWv7brxD4k/q/UMzvD2AHgziYcF3OeoGbrg4kMygq1CoOe6aunMZAA=="
+    }
+  }
+]

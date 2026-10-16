@@ -7,8 +7,8 @@ import { signingMessage, RECEIPT_SIG_DOMAIN, CHECKPOINT_SIG_DOMAIN } from "./sig
 import { nonNfcPaths, isNFC } from "./nfc.js";
 import { parseDocument } from "./bytes.js";
 import { inertOptions, type OptionSchema } from "./opts.js";
-import { arrayPush, arrayIncludes, arrayEvery, arrayLength, arrayJoin, publishArray, bufferFrom, dateParse, mapHas, mapGet, mapSet, newMap, newSet, objectCreateNull, objectKeys, objectGetOwnPropertyNames, isSafeInteger, arraySlice, setAdd, setSize, isArray, isNaNValue, jsonStringify } from "./intrinsics.js";
-import { isSha256Hash, isRfc3339Instant } from "./scan.js";
+import { arrayPush, arrayIncludes, arrayEvery, arrayLength, arrayJoin, publishArray, bufferFrom, mapHas, mapGet, mapSet, newMap, newSet, objectCreateNull, objectKeys, objectGetOwnPropertyNames, isSafeInteger, arraySlice, setAdd, setSize, isArray, jsonStringify } from "./intrinsics.js";
+import { isSha256Hash, isRfc3339Instant, tsOrder, TS_ORDER_BACKWARDS, TS_ORDER_NOT_COMPARABLE } from "./scan.js";
 import { frozenTable } from "./inert.js";
 import { lifecycleInstantNanos, parseVerificationKeyring, type ParsedVerificationKeyring } from "./verification-keyring.js";
 
@@ -768,15 +768,15 @@ function verifyParsedChain(receipts: unknown, o: InertVerifyOptions): VerifyResu
       return fail("TAMPERED", `broken linkage at seq ${seq}`, chainId, list.length, seq);
     }
 
-    // 4e. Timestamp monotonicity (soft — clocks are not a security primitive, but a regression is suspicious).
+    // 4e. Timestamp order (soft — clocks are not a security primitive, but a regression is suspicious).
+    // Spec §5: compared at full precision (nanoseconds) after offset normalization, by the hand-written
+    // `tsOrder` (src/scan.ts) — never `Date.parse`, which keeps milliseconds only and returns NaN for
+    // an accepted second 60, so that comparison used to be skipped without a word. A pair the bytes
+    // cannot order is reported as such. Stable codes, identical in all five verifiers; never a verdict.
     if (prev) {
-      // PRISTINE TIME (review #6, C1): a monotonicity comparison is a verdict input, so it must not
-      // dispatch through the globally-mutable `Date.parse`.
-      const a = dateParse(prev.ts);
-      const b = dateParse(r.ts);
-      if (!isNaNValue(a) && !isNaNValue(b) && b < a) {
-        arrayPush(warnings, `non-monotonic timestamp at seq ${seq} (ts went backwards)`);
-      }
+      const order = tsOrder(prev.ts, r.ts);
+      if (order === TS_ORDER_BACKWARDS) arrayPush(warnings, `ts-backwards: seq ${seq}`);
+      else if (order === TS_ORDER_NOT_COMPARABLE) arrayPush(warnings, `ts-not-comparable: seq ${seq}`);
     }
     prev = r;
   }

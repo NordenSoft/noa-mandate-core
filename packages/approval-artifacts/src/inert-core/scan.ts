@@ -218,8 +218,9 @@ function daysInMonth(year: number, month: number): number {
  * RFC 3339 §5.6 `date-time` — the LEXICAL form of `isRfc3339` **plus** the field ranges the ABNF's
  * own comments impose (`date-month` 01-12, `date-mday` 01-28/29/30/31 by month and year,
  * `time-hour` 00-23, `time-minute` 00-59, `time-second` 00-60, `time-numoffset` hours 00-23 /
- * minutes 00-59). A string that passes this DENOTES AN INSTANT; a string that only passes
- * `isRfc3339` merely has the shape of one.
+ * minutes 00-59). A string that passes this satisfies every field range: with a second of 00-59 it
+ * denotes an instant, and a second of 60 is admitted by the range alone (see below); a string that
+ * only passes `isRfc3339` merely has the shape of one.
  *
  * WHY THE SHAPE CHECK ALONE WAS A SECURITY DEFECT, not a strictness preference. `ts` is inside the
  * signed body and is the only ordering evidence a receipt carries. All five verifiers accepted
@@ -235,7 +236,9 @@ function daysInMonth(year: number, month: number): number {
  * one is a table published by the IERS, not a property of the string — a verifier that shipped that
  * table would go wrong the moment the table changed, so the range, not the calendar of leap
  * seconds, is what is enforced. `test/scan-parity.test.ts` pins this acceptance so a later
- * "tightening" cannot quietly remove it.
+ * "tightening" cannot quietly remove it. The range admits second 60 in any minute and at any
+ * offset, so passing it does not establish that the string names a real leap second: that needs
+ * external evidence. A stricter rule could only come with a later format version.
  */
 export function isRfc3339Instant(s: string): boolean {
   if (!isRfc3339(s)) return false;
@@ -256,4 +259,93 @@ export function isRfc3339Instant(s: string): boolean {
   if (num2(s, n - 5) > 23) return false; // time-numoffset hours
   if (num2(s, n - 2) > 59) return false; // time-numoffset minutes
   return true;
+}
+
+// ── TIMESTAMP ORDER (docs/receipt-spec.md §5, warnings `ts-backwards` / `ts-not-comparable`) ─────
+// What a chain walk reports when it compares one receipt's `ts` with the next one's. It feeds a
+// WARNING only: no result of this comparison accepts or refuses a receipt.
+
+/** The later timestamp is not earlier than the one before it. */
+export const TS_ORDER_OK = 0;
+/** The later timestamp is earlier than the one before it (`ts-backwards`). */
+export const TS_ORDER_BACKWARDS = 1;
+/** The bytes alone cannot order the pair (`ts-not-comparable`). */
+export const TS_ORDER_NOT_COMPARABLE = 2;
+
+/** Floor division for a NON-NEGATIVE dividend, with plain operators (no `Math` dispatch). */
+function divFloor(a: number, b: number): number {
+  return (a - (a % b)) / b;
+}
+
+/**
+ * The UTC minute `s` names, with its offset applied, counted from a fixed origin. Proleptic
+ * Gregorian, from a March-based year so the leap day is the last day of its year; the 400-year
+ * shift keeps every term non-negative for years 0000-9999, so `divFloor` is exact. Offsets are whole
+ * minutes, so normalizing one never changes the seconds field. The caller has proven `s` passes
+ * `isRfc3339Instant`.
+ */
+function utcMinute(s: string): number {
+  const month = num2(s, 5);
+  const y = num4(s, 0) - (month <= 2 ? 1 : 0) + 400;
+  const m = (month + 9) % 12; // March = 0 ... February = 11
+  const days = 365 * y + divFloor(y, 4) - divFloor(y, 100) + divFloor(y, 400) + divFloor(153 * m + 2, 5) + num2(s, 8) - 1;
+  const local = days * 1440 + num2(s, 11) * 60 + num2(s, 14);
+  const n = s.length;
+  const last = at(s, n - 1);
+  if (last === Z_UPPER || last === Z_LOWER) return local;
+  const offset = num2(s, n - 5) * 60 + num2(s, n - 2);
+  return at(s, n - 6) === PLUS ? local - offset : local + offset;
+}
+
+/** The fractional second in nanoseconds: its 1-9 digits right-padded with zeros, 0 when absent. */
+function fractionNanos(s: string): number {
+  if (at(s, 19) !== DOT) return 0;
+  let value = 0;
+  let digits = 0;
+  let i = 20;
+  while (isDigit(at(s, i))) {
+    value = value * 10 + (at(s, i) - ZERO);
+    digits++;
+    i++;
+  }
+  while (digits < 9) {
+    value = value * 10;
+    digits++;
+  }
+  return value;
+}
+
+/**
+ * Orders two consecutive receipt timestamps at full precision (nanoseconds) after offset
+ * normalization. Returns `TS_ORDER_BACKWARDS` when `later` is earlier than `earlier`, `TS_ORDER_OK`
+ * when it is not, and `TS_ORDER_NOT_COMPARABLE` when the bytes cannot decide.
+ *
+ * SECOND 60 HAS TWO READINGS. `isRfc3339Instant` admits second 60 in any minute (a leap second is
+ * real only where the IERS table says so, which is not a property of the string). As a leap second it
+ * comes after second 59 of its own minute; read as an overflow, it is second 0 of the next minute.
+ * The pair is compared under both readings: when they agree, that is the answer;
+ * when one says "backwards" and the other does not, the bytes cannot order the pair and the result
+ * is `TS_ORDER_NOT_COMPARABLE`. Without a second 60 the two readings are the same comparison.
+ *
+ * An input that is not an RFC 3339 instant cannot be ordered at all and is also
+ * `TS_ORDER_NOT_COMPARABLE` — never a silent skip. (A chain walk has already refused such a receipt
+ * as MALFORMED, so on that path this branch is a guard, not an outcome.)
+ */
+export function tsOrder(earlier: string, later: string): number {
+  if (!isRfc3339Instant(earlier) || !isRfc3339Instant(later)) return TS_ORDER_NOT_COMPARABLE;
+  const minuteA = utcMinute(earlier);
+  const minuteB = utcMinute(later);
+  const secondA = num2(earlier, 17);
+  const secondB = num2(later, 17);
+  const nanosA = fractionNanos(earlier);
+  const nanosB = fractionNanos(later);
+  // Reading 1: second 60 is a leap second, after second 59 of its own minute.
+  const backAsLeap = minuteB < minuteA || (minuteB === minuteA && (secondB < secondA || (secondB === secondA && nanosB < nanosA)));
+  // Reading 2: second 60 is second 0 of the next minute.
+  const elapsedA = minuteA * 60 + secondA;
+  const elapsedB = minuteB * 60 + secondB;
+  const backAsNextMinute = elapsedB < elapsedA || (elapsedB === elapsedA && nanosB < nanosA);
+  if (backAsLeap && backAsNextMinute) return TS_ORDER_BACKWARDS;
+  if (backAsLeap !== backAsNextMinute) return TS_ORDER_NOT_COMPARABLE;
+  return TS_ORDER_OK;
 }

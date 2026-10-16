@@ -360,6 +360,65 @@ def _is_rfc3339_instant(s):
     return int(s[-5:-3]) <= 23 and int(s[-2:]) <= 59
 
 
+# ── Timestamp order (spec §5, warnings `ts-backwards` / `ts-not-comparable`) ────────────────────
+# Mirrors src/scan.ts tsOrder exactly. It feeds a WARNING only: no result accepts or refuses a receipt.
+TS_ORDER_OK = 0
+TS_ORDER_BACKWARDS = 1
+TS_ORDER_NOT_COMPARABLE = 2
+
+
+def _utc_minute(s):
+    """The UTC minute `s` names, with its offset applied, counted from a fixed origin (proleptic
+    Gregorian, March-based year, shifted 400 years so every term is non-negative). Offsets are whole
+    minutes, so normalizing one never changes the seconds field. `s` already passed
+    _is_rfc3339_instant."""
+    month = int(s[5:7])
+    y = int(s[0:4]) - (1 if month <= 2 else 0) + 400
+    m = (month + 9) % 12  # March = 0 ... February = 11
+    days = 365 * y + y // 4 - y // 100 + y // 400 + (153 * m + 2) // 5 + int(s[8:10]) - 1
+    local = days * 1440 + int(s[11:13]) * 60 + int(s[14:16])
+    if s[-1] in ("Z", "z"):
+        return local
+    offset = int(s[-5:-3]) * 60 + int(s[-2:])
+    return local - offset if s[-6] == "+" else local + offset
+
+
+def _fraction_nanos(s):
+    """The fractional second in nanoseconds: its 1-9 digits right-padded with zeros, 0 when absent."""
+    if len(s) < 21 or s[19] != ".":
+        return 0
+    i = 20
+    while i < len(s) and "0" <= s[i] <= "9":
+        i += 1
+    return int(s[20:i].ljust(9, "0"))
+
+
+def ts_order(earlier, later):
+    """Order two consecutive receipt timestamps at full precision (nanoseconds) after offset
+    normalization: TS_ORDER_BACKWARDS when `later` is earlier, TS_ORDER_OK when it is not, and
+    TS_ORDER_NOT_COMPARABLE when the bytes cannot decide.
+
+    Second 60 has two readings: a leap second after second 59 of its own minute, or an overflow into
+    second 0 of the next minute (the range rule admits it in any minute; a real leap second is an IERS
+    fact, not a property of the string). When the two readings disagree about "backwards", the pair is
+    not comparable. An input that is not an RFC 3339 instant is also not comparable — never a silent
+    skip."""
+    if not (_is_rfc3339_instant(earlier) and _is_rfc3339_instant(later)):
+        return TS_ORDER_NOT_COMPARABLE
+    minute_a, minute_b = _utc_minute(earlier), _utc_minute(later)
+    second_a, second_b = int(earlier[17:19]), int(later[17:19])
+    nanos_a, nanos_b = _fraction_nanos(earlier), _fraction_nanos(later)
+    # Reading 1: second 60 is a leap second, after second 59 of its own minute.
+    back_as_leap = (minute_b, second_b, nanos_b) < (minute_a, second_a, nanos_a)
+    # Reading 2: second 60 is second 0 of the next minute.
+    back_as_next_minute = (minute_b * 60 + second_b, nanos_b) < (minute_a * 60 + second_a, nanos_a)
+    if back_as_leap and back_as_next_minute:
+        return TS_ORDER_BACKWARDS
+    if back_as_leap != back_as_next_minute:
+        return TS_ORDER_NOT_COMPARABLE
+    return TS_ORDER_OK
+
+
 # JS Number.isSafeInteger upper bound — chain.seq must be a non-negative safe integer (parity with schema maximum).
 _SAFE_INT_MAX = 2**53 - 1
 
@@ -649,10 +708,13 @@ def _verify_checkpoint(cp, keyring):
 def _authorized(manifest, agent_id, kid):
     return agent_id in manifest and kid in manifest[agent_id]
 
-def verify_chain(receipts, keyring=None, identity_manifest=None, checkpoint=None):
+def verify_chain(receipts, keyring=None, identity_manifest=None, checkpoint=None, warnings_out=None):
     """Returns (status, detail). status in VALID/UNVERIFIED/UNTRUSTED/TAMPERED/MALFORMED.
     Verdict-equivalent to the TS reference: hash-chain, Ed25519 sig, key-continuity, identity binding
-    (UNTRUSTED), and checkpoint tail-truncation + §5b checkpoint identity binding."""
+    (UNTRUSTED), and checkpoint tail-truncation + §5b checkpoint identity binding.
+
+    warnings_out: optional list. On VALID/UNVERIFIED the run's warnings are appended to it in order
+    (they are also joined into `detail`, as before); a refusal appends nothing, like the TS reference."""
     if not isinstance(receipts, list) or not receipts:
         return "MALFORMED", "input is not a non-empty array"
     # Fail-closed on a non-object keyring (JSON list/number/string) — never crash with a traceback.
@@ -719,6 +781,7 @@ def verify_chain(receipts, keyring=None, identity_manifest=None, checkpoint=None
 
     pinned = {}
     prev = None
+    warnings = []
     for s in range(len(receipts)):
         if s not in by_seq: return "TAMPERED", f"seq gap: missing {s}"
         r = by_seq[s]
@@ -751,9 +814,14 @@ def verify_chain(receipts, keyring=None, identity_manifest=None, checkpoint=None
             if link is not None: return "TAMPERED", "genesis prevHash must be null"
         elif link != prev["chain"].get("hash"):
             return "TAMPERED", f"broken linkage at seq {s}"
+        if prev is not None:                        # 4e timestamp order: a warning, never a verdict
+            order = ts_order(prev["ts"], r["ts"])
+            if order == TS_ORDER_BACKWARDS:
+                warnings.append(f"ts-backwards: seq {s}")
+            elif order == TS_ORDER_NOT_COMPARABLE:
+                warnings.append(f"ts-not-comparable: seq {s}")
         prev = r
     head = by_seq[len(receipts) - 1]                 # 5 tail-truncation
-    warnings = []
     if checkpoint is not None:
         cpv = _verify_checkpoint(checkpoint, keyring)
         if cpv == "bad": return "TAMPERED", "checkpoint invalid"
@@ -778,6 +846,8 @@ def verify_chain(receipts, keyring=None, identity_manifest=None, checkpoint=None
     detail = f"{len(receipts)} receipts, chain {chain_id}"
     if warnings:
         detail += " | " + " | ".join(warnings)
+    if warnings_out is not None:
+        warnings_out.extend(warnings)
     return ("VALID" if have_keyring else "UNVERIFIED"), detail
 
 # ── Versioned survivable historical verification ────────────────────────────
@@ -1061,8 +1131,12 @@ def _main(argv):
         if result["classification"] in ("PARTIAL", "UNVERIFIED"): return 1
         if result["classification"] == "CONFLICT": return 7
         return 8 if result["code"] in ("RECEIPT_INTEGRITY_FAILURE", "WITNESS_INTEGRITY_FAILURE") else 3
-    status, detail = verify_chain(receipts, keyring, identity, checkpoint)
-    print(json.dumps({"status": status, "detail": detail}, indent=2))
+    warnings = []
+    status, detail = verify_chain(receipts, keyring, identity, checkpoint, warnings_out=warnings)
+    result = {"status": status, "detail": detail}
+    if warnings:  # additive key, present only when the run reported a warning
+        result["warnings"] = warnings
+    print(json.dumps(result, indent=2))
     return _EXIT[status]
 
 if __name__ == "__main__":

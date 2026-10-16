@@ -1,0 +1,80 @@
+[
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "tonc_0",
+    "ts": "2026-06-20T10:01:00.1Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "ts-order-tonc"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "POLICY"
+    },
+    "action": {
+      "id": "email.send",
+      "canonical": "email.send",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:1039f4444937bfcc44d6a6635039cd09db195ebe0b618146280cb8ff107d4329",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 0,
+      "prevHash": null,
+      "hash": "sha256:8d4094c45c7339f27c87ee1b49f661cb0ff66254e614fb3aac52cf22de624962"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "B5cBBuOq8PGuDPHyRjrh3BJS8l4U3IutlDcPlCxVaaPxrR/NsFLuxBKngGRuOKmCOVFaEd3kX5qNBYTxcG1VDQ=="
+    }
+  },
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "tonc_1",
+    "ts": "2026-06-20T10:00:60.5Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "ts-order-tonc"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "POLICY"
+    },
+    "action": {
+      "id": "email.send",
+      "canonical": "email.send",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:1039f4444937bfcc44d6a6635039cd09db195ebe0b618146280cb8ff107d4329",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 1,
+      "prevHash": "sha256:8d4094c45c7339f27c87ee1b49f661cb0ff66254e614fb3aac52cf22de624962",
+      "hash": "sha256:ffd2d38dd5b47871fad41607347cdc34107ca53fb0e2915df4e20f82511bba33"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "D9t/hSK/FHR8J/iuRYJ1cKXhlcg7Fwub6mpMq2d7sT2fO01hrN5ZPM9v1sQLaIHhDUphNG6LUkmIR7BUm9TfBQ=="
+    }
+  }
+]

@@ -328,6 +328,178 @@ write("ts-leap-second.json", [
   ),
 ]);
 
+// 10c. TIMESTAMP ORDER — WARNINGS, NEVER VERDICTS (ts-order/). Spec §5 promises a warning when `ts`
+//      goes backwards between consecutive receipts, compared at full precision (nanoseconds) after
+//      offset normalization. Every chain below is genuine and MUST stay VALID with the keyring in
+//      every verifier; what each pins is the run's timestamp-order warnings ("ts-backwards: seq N",
+//      "ts-not-comparable: seq N"). impl-py/conformance.mjs pins the expected warnings for TS and
+//      Python; the Go, Rust and C# runners compare theirs with Python's.
+function tsOrderChain(stamps: string[], idPrefix: string): Receipt[] {
+  const out: Receipt[] = [];
+  let prev: Receipt | null = null;
+  stamps.forEach((ts, i) => {
+    const r = buildReceipt(
+      { ...inputs[2]!, id: `${idPrefix}_${i}`, ts, scope: { tenant: "store_demo", chain: `ts-order-${idPrefix}` } },
+      prev,
+      signer,
+    );
+    out.push(r);
+    prev = r;
+  });
+  return out;
+}
+// One second back.
+write("ts-order/backwards-one-second.json", tsOrderChain(["2026-06-20T10:00:01Z", "2026-06-20T10:00:00Z"], "tob1s"));
+// One nanosecond back: equal at millisecond precision, so a millisecond comparison misses it.
+write(
+  "ts-order/backwards-one-nanosecond.json",
+  tsOrderChain(["2026-06-20T10:00:00.000000002Z", "2026-06-20T10:00:00.000000001Z"], "tob1n"),
+);
+// Forwards as written, backwards after offset normalization: 11:30+02:00 is 09:30Z.
+write("ts-order/backwards-after-offset.json", tsOrderChain(["2026-06-20T10:00:00Z", "2026-06-20T11:30:00+02:00"], "toboff"));
+// One instant spelled three ways (as is, lowercase t/z, +02:00 with a zero fraction): no warning.
+write(
+  "ts-order/equal-instant.json",
+  tsOrderChain(["2026-06-20T10:00:00Z", "2026-06-20t10:00:00z", "2026-06-20T12:00:00.000+02:00"], "toeq"),
+);
+// A second 60 that both readings (a leap second; second 0 of the next minute) order the same way:
+// no warning. Whether 2026-06-30 carried a leap second is irrelevant to the order rule.
+write(
+  "ts-order/second-60-ordered.json",
+  tsOrderChain(["2026-06-30T23:59:59.5Z", "2026-06-30T23:59:60.2Z", "2026-07-01T00:00:01Z"], "to60"),
+);
+// A second 60 whose order depends on the reading: as a leap second 10:00:60.5 is before 10:01:00.1,
+// read as 10:01:00.5 it is after it. The bytes cannot decide, so the pair is not comparable.
+write("ts-order/not-comparable-second-60.json", tsOrderChain(["2026-06-20T10:01:00.1Z", "2026-06-20T10:00:60.5Z"], "tonc"));
+// The equality boundary of the two readings. 10:00:60 then 10:01:00 is later as a leap second and
+// equal as an overflow: neither reading puts it earlier, so no warning. The reverse order is earlier as
+// a leap second and equal as an overflow: exactly one reading puts it earlier, so not comparable.
+write("ts-order/second-60-then-next-minute.json", tsOrderChain(["2026-06-20T10:00:60Z", "2026-06-20T10:01:00Z"], "to60n"));
+write("ts-order/not-comparable-second-60-equal.json", tsOrderChain(["2026-06-20T10:01:00Z", "2026-06-20T10:00:60Z"], "tonce"));
+// A correctly ordered pair across a real leap second (the one at the end of 2016): in order as a leap
+// second, backwards as an overflow, so not comparable. The code says the bytes cannot order the pair,
+// not that a clock is wrong. It also pins the year boundary: the result holds only if 2017-01-01T00:00
+// is the minute right after 2016-12-31T23:59.
+write(
+  "ts-order/not-comparable-real-leap-second.json",
+  tsOrderChain(["2016-12-31T23:59:60.5Z", "2017-01-01T00:00:00.2Z"], "toleap"),
+);
+// CALENDAR AND OFFSET BRANCHES. Each chain puts a receipt whose LOCAL date lies across a boundary from
+// its UTC date between two neighbours a fraction of a second away, so a calendar or offset error of a
+// minute or more in either direction turns one of the expected results around.
+// Year boundary through a positive offset: 2027-01-01T00:59:59.5+01:00 is 2026-12-31T23:59:59.5Z, and
+// the last step goes back 0.1 s across the boundary.
+write(
+  "ts-order/year-boundary-positive-offset.json",
+  tsOrderChain(
+    ["2026-12-31T23:59:59Z", "2027-01-01T00:59:59.5+01:00", "2026-12-31T23:59:59.75Z", "2027-01-01T00:00:00Z", "2027-01-01T00:59:59.9+01:00"],
+    "toyear",
+  ),
+);
+// Month boundary of a common year through a negative offset with minutes: 2027-02-28T20:30:00.5-03:30
+// is 2027-03-01T00:00:00.5Z, and the last step goes back 0.1 s.
+write(
+  "ts-order/month-boundary-negative-offset.json",
+  tsOrderChain(["2027-03-01T00:00:00Z", "2027-02-28T20:30:00.5-03:30", "2027-03-01T00:00:01Z", "2027-02-28T20:30:00.9-03:30"], "tomonth"),
+);
+// Leap day through a positive offset with minutes: 2028-03-01T05:29:59.5+05:30 is 2028-02-29T23:59:59.5Z.
+// In order throughout: no warning.
+write(
+  "ts-order/leap-day-positive-offset.json",
+  tsOrderChain(["2028-02-29T23:59:59Z", "2028-03-01T05:29:59.5+05:30", "2028-02-29T23:59:59.75Z"], "toleapday"),
+);
+// Two steps back in one chain: the run reports both, in seq order ("ts-backwards: seq 1", then seq 2).
+// A run that kept one of them, or reported them in another order, differs from this pin. The second
+// file stores the same three receipts in the array order seq 1, seq 2, seq 0, a fixed permutation that
+// moves every receipt (a random one would make the corpus irreproducible). Verifiers order receipts by
+// chain.seq (spec §5), so its result and its warnings, in the same order, are those of the first file;
+// a verifier that compared array neighbours instead would report one warning, not two.
+const backwardsTwice = tsOrderChain(["2026-06-20T10:00:02Z", "2026-06-20T10:00:01Z", "2026-06-20T10:00:00Z"], "tob2");
+write("ts-order/backwards-twice.json", backwardsTwice);
+write("ts-order/backwards-twice-shuffled.json", [backwardsTwice[1]!, backwardsTwice[2]!, backwardsTwice[0]!]);
+
+// 10d. INDEPENDENT FIELDS — these MUST STAY VALID (independent-fields/). Spec §2 "Independent fields":
+//      R1-R4 are one-directional, and the pairs below are deliberately not coupled, so a verifier that
+//      refused any of these receipts would refuse an input this version accepts. Every chain is genuine,
+//      stays VALID with the keyring and carries no timestamp-order warning; impl-py/conformance.mjs pins
+//      that for TS and Python, and the Go, Rust and C# runners compare theirs with Python's.
+function independentChain(idPrefix: string, receipts: Array<Pick<BuildInput, "ts" | "action" | "governance">>): Receipt[] {
+  const out: Receipt[] = [];
+  let prev: Receipt | null = null;
+  receipts.forEach((r, i) => {
+    const built = buildReceipt(
+      {
+        id: `${idPrefix}_${i}`,
+        ts: r.ts,
+        scope: { tenant: "store_demo", chain: `independent-fields-${idPrefix}` },
+        agent: inputs[0]!.agent,
+        action: r.action,
+        governance: r.governance,
+      },
+      prev,
+      signer,
+    );
+    out.push(built);
+    prev = built;
+  });
+  return out;
+}
+// The highest authorization-risk tier beside an action that can be undone: reversibility is read from
+// `reversible` (and `rollbackRef`) only.
+write(
+  "independent-fields/risk-class-vs-reversible.json",
+  independentChain("ifrisk", [
+    {
+      ts: "2026-06-20T09:00:00.000Z",
+      action: { id: "payment.refund", canonical: "payment.refund", riskClass: "IRREVERSIBLE", paramsHash: ph("amount=4200;currency=DKK"), reversible: true, rollbackRef: "snap_before_refund" },
+      governance: { mode: "on", verdict: "EXECUTED", ruleId: "irreversible-tier-review", approval: null, sandboxed: false },
+    },
+  ]),
+);
+// The mode labels the producer's enforcement mode and prescribes no verdict: EXECUTED under approvals_on
+// with the approval evidenced outside the receipt, then BLOCKED under off and under shadow.
+write(
+  "independent-fields/mode-vs-verdict-and-approval.json",
+  independentChain("ifmode", [
+    { ts: "2026-06-20T09:00:00.000Z", action: inputs[0]!.action, governance: { mode: "approvals_on", verdict: "EXECUTED", ruleId: "approved-out-of-band", approval: null, sandboxed: false } },
+    { ts: "2026-06-20T09:01:00.000Z", action: inputs[0]!.action, governance: { mode: "off", verdict: "BLOCKED", ruleId: "blocked-mode-off", approval: null, sandboxed: false } },
+    { ts: "2026-06-20T09:02:00.000Z", action: inputs[0]!.action, governance: { mode: "shadow", verdict: "BLOCKED", ruleId: "blocked-mode-shadow", approval: null, sandboxed: false } },
+  ]),
+);
+// An execution recorded beside a recorded policy denial (an execution despite a DENY is evidence worth
+// keeping). The three digests are shape-correct stand-ins: chain verification checks the commitment's
+// shape only, and the offline L2 check (spec §9) needs the policy and inputs out of band.
+write(
+  "independent-fields/compliance-deny-vs-executed.json",
+  independentChain("ifdeny", [
+    {
+      ts: "2026-06-20T09:00:00.000Z",
+      action: inputs[0]!.action,
+      governance: {
+        mode: "on",
+        verdict: "EXECUTED",
+        ruleId: "executed-despite-deny",
+        approval: null,
+        sandboxed: false,
+        compliance: { policyHash: ph("policy:refund-guard"), readSetHash: ph("read-set:action,amountMinor"), inputsHash: ph("inputs:payment.refund,4200"), verdict: "DENY" },
+      },
+    },
+  ]),
+);
+// An approval stamped after its receipt's `ts`, by another clock. The first approval.at is also later
+// than the second receipt's ts, so a verifier that ordered receipts by approval.at would warn here.
+write(
+  "independent-fields/approval-at-after-ts.json",
+  independentChain("ifappr", [
+    {
+      ts: "2026-06-20T09:00:00.000Z",
+      action: inputs[0]!.action,
+      governance: { mode: "on", verdict: "EXECUTED", ruleId: "human-approved", approval: { by: inputs[1]!.governance.approval!.by, at: "2026-06-20T09:05:00.000Z" }, sandboxed: false },
+    },
+    { ts: "2026-06-20T09:01:00.000Z", action: inputs[0]!.action, governance: { mode: "on", verdict: "EXECUTED", ruleId: "low-risk-auto", approval: null, sandboxed: false } },
+  ]),
+);
+
 // 11. STRICT Ed25519 KEY AND SCALAR VALIDATION (strict-ed25519/). Every verifier refuses
 //     non-canonical, small-order and mixed-order public-key encodings at key load (RFC 8032 §5.1.3
 //     decoding + small-order rejection + prime-order subgroup) and a non-canonical signature scalar

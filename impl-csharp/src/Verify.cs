@@ -16,10 +16,15 @@ public readonly struct VerifyResult
 {
     public readonly VerifyStatus Status;
     public readonly string Detail;
-    public VerifyResult(VerifyStatus status, string detail)
+    /// <summary>The run's warnings in order (the timestamp-order codes, spec §5); empty on a
+    /// refusal, like the TS reference.</summary>
+    public readonly IReadOnlyList<string> Warnings;
+    public VerifyResult(VerifyStatus status, string detail) : this(status, detail, Array.Empty<string>()) { }
+    public VerifyResult(VerifyStatus status, string detail, IReadOnlyList<string> warnings)
     {
         Status = status;
         Detail = detail;
+        Warnings = warnings;
     }
 }
 
@@ -196,6 +201,7 @@ public static class Verifier
 
         var pinned = new Dictionary<string, string>(StringComparer.Ordinal);
         JObj? prev = null;
+        var warnings = new List<string>();
         for (int s = 0; s < receipts.Count; s++)
         {
             if (!bySeq.TryGetValue(s, out JObj? r))
@@ -266,11 +272,18 @@ public static class Verifier
                 if (linkStr != ChainHash(prev!))
                     return new VerifyResult(VerifyStatus.Tampered, $"broken linkage at seq {s}");
             }
+
+            // Timestamp order: a warning, never a verdict (spec §5).
+            if (prev is not null)
+            {
+                TsOrderResult order = Schema.TsOrder(StrOf(prev, "ts") ?? "", StrOf(r, "ts") ?? "");
+                if (order == TsOrderResult.Backwards) warnings.Add($"ts-backwards: seq {s}");
+                else if (order == TsOrderResult.NotComparable) warnings.Add($"ts-not-comparable: seq {s}");
+            }
             prev = r;
         }
 
         JObj head = bySeq[receipts.Count - 1];
-        var warnings = new List<string>();
 
         if (checkpointVal is not null)
         {
@@ -306,7 +319,7 @@ public static class Verifier
         string detail = $"{receipts.Count} receipts, chain {chainId}";
         if (warnings.Count > 0)
             detail += " | " + string.Join(" | ", warnings);
-        return new VerifyResult(haveKeyring ? VerifyStatus.Valid : VerifyStatus.Unverified, detail);
+        return new VerifyResult(haveKeyring ? VerifyStatus.Valid : VerifyStatus.Unverified, detail, warnings);
     }
 
     // ── field accessors (structural validation already guarantees presence/shape) ──
