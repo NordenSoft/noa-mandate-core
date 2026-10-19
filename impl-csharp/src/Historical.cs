@@ -97,17 +97,6 @@ public static class HistoricalVerifier
         return value;
     }
 
-    private static long DaysFromCivil(long year, long month, long day)
-    {
-        year -= month <= 2 ? 1 : 0;
-        long era = year >= 0 ? year / 400 : (year - 399) / 400;
-        long yoe = year - era * 400;
-        long mp = month + (month > 2 ? -3 : 9);
-        long doy = (153 * mp + 2) / 5 + day - 1;
-        long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-        return era * 146097 + doe - 719468;
-    }
-
     /// UTC nanoseconds. Leap-second checkpoints return null, matching the TypeScript Date.parse gate.
     private static BigInteger? ParseInstant(string value)
     {
@@ -131,7 +120,7 @@ public static class HistoricalVerifier
             long sign = value[index] == '+' ? 1 : -1;
             offsetSeconds = sign * (Decimal(value, index + 1, 2) * 3600 + Decimal(value, index + 4, 2) * 60);
         }
-        long seconds = DaysFromCivil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second - offsetSeconds;
+        long seconds = Schema.DaysFromCivil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second - offsetSeconds;
         return new BigInteger(seconds) * 1_000_000_000 + nanos;
     }
 

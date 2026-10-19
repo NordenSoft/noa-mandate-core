@@ -1,0 +1,47 @@
+[
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "ifdeny_0",
+    "ts": "2026-06-20T09:00:00.000Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "independent-fields-ifdeny"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "SERVICE"
+    },
+    "action": {
+      "id": "payment.refund",
+      "canonical": "payment.refund",
+      "riskClass": "HIGH",
+      "paramsHash": "sha256:9c10250f78b359d3c3abdf2dcd91a50af8aa4f7529cfbf3cfead14cf2500eac6",
+      "reversible": false,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "executed-despite-deny",
+      "approval": null,
+      "sandboxed": false,
+      "compliance": {
+        "policyHash": "sha256:9a2a1a59756867fdaa364c41936e63fcfe5dfbe57b1f72012552138942899edf",
+        "readSetHash": "sha256:206ba0100a6f2a0a453bd64ed6f86b9f9b4db4b5e9b24295b3dc9b05a09bddef",
+        "inputsHash": "sha256:43b35beaa261106c0fd56c7e2e06875eada2ba1bddeca0d77a735773e0c8e318",
+        "verdict": "DENY"
+      }
+    },
+    "chain": {
+      "seq": 0,
+      "prevHash": null,
+      "hash": "sha256:527121d4216e53768772633d2fccfa51e88b1f0d7b948b633a0434b6cd3739a8"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "2guPDGbCbL/YnVaUY5AxXLUdwZaqspVL+mimfvKe2D/SCnCkdH0EjpBZukqE0/gkji1A+ywuXizwPspITnefDw=="
+    }
+  }
+]

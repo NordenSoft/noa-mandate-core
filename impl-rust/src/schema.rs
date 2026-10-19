@@ -151,6 +151,22 @@ fn days_in_month(year: u32, month: u32) -> u32 {
     }
 }
 
+/// Days from 1970-01-01 to the proleptic Gregorian date `year`-`month`-`day` (negative before it).
+/// Shared by the historical instant parser and the timestamp-order check.
+pub(crate) fn days_from_civil(mut year: i64, month: i64, day: i64) -> i64 {
+    year -= if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 {
+        year / 400
+    } else {
+        (year - 399) / 400
+    };
+    let yoe = year - era * 400;
+    let mp = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
 /// The two ASCII digits at `i` as a number. The caller has already proven they ARE digits.
 fn two(b: &[u8], i: usize) -> u32 {
     (b[i] - b'0') as u32 * 10 + (b[i + 1] - b'0') as u32
@@ -189,6 +205,89 @@ pub fn is_rfc3339_instant(s: &str) -> bool {
         return true;
     }
     two(b, n - 5) <= 23 && two(b, n - 2) <= 59
+}
+
+/// Result of [`ts_order`] (spec §5, warnings `ts-backwards` / `ts-not-comparable`). It feeds a
+/// WARNING only: no result accepts or refuses a receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TsOrder {
+    /// The later timestamp is not earlier than the one before it.
+    Ok,
+    /// The later timestamp is earlier than the one before it.
+    Backwards,
+    /// The bytes alone cannot order the pair.
+    NotComparable,
+}
+
+/// The UTC minute `s` names, with its offset applied, counted from 1970-01-01T00:00Z. Offsets are
+/// whole minutes, so normalizing one never changes the seconds field. `s` already passed
+/// [`is_rfc3339_instant`].
+fn utc_minute(s: &str) -> i64 {
+    let b = s.as_bytes();
+    let year = i64::from(two(b, 0) * 100 + two(b, 2));
+    let days = days_from_civil(year, i64::from(two(b, 5)), i64::from(two(b, 8)));
+    let local = days * 1440 + i64::from(two(b, 11)) * 60 + i64::from(two(b, 14));
+    let n = b.len();
+    if b[n - 1] == b'Z' || b[n - 1] == b'z' {
+        return local;
+    }
+    let offset = i64::from(two(b, n - 5)) * 60 + i64::from(two(b, n - 2));
+    if b[n - 6] == b'+' {
+        local - offset
+    } else {
+        local + offset
+    }
+}
+
+/// The fractional second in nanoseconds: its 1-9 digits right-padded with zeros, 0 when absent.
+fn fraction_nanos(s: &str) -> i64 {
+    let b = s.as_bytes();
+    if b.len() < 21 || b[19] != b'.' {
+        return 0;
+    }
+    let mut value = 0i64;
+    let mut digits = 0;
+    let mut i = 20;
+    while i < b.len() && b[i].is_ascii_digit() {
+        value = value * 10 + i64::from(b[i] - b'0');
+        digits += 1;
+        i += 1;
+    }
+    while digits < 9 {
+        value *= 10;
+        digits += 1;
+    }
+    value
+}
+
+/// Orders two consecutive receipt timestamps at full precision (nanoseconds) after offset
+/// normalization. Mirrors `src/scan.ts tsOrder` exactly.
+///
+/// Second 60 has two readings: a leap second after second 59 of its own minute, or an overflow
+/// into second 0 of the next minute (the range rule admits it in any minute; a real leap second
+/// is an IERS fact, not a property of the string). When the two readings disagree about
+/// "backwards", the pair is not comparable. An input that is not an RFC 3339 instant is also not
+/// comparable: never a silent skip.
+pub fn ts_order(earlier: &str, later: &str) -> TsOrder {
+    if !is_rfc3339_instant(earlier) || !is_rfc3339_instant(later) {
+        return TsOrder::NotComparable;
+    }
+    let minute_a = utc_minute(earlier);
+    let minute_b = utc_minute(later);
+    let second_a = i64::from(two(earlier.as_bytes(), 17));
+    let second_b = i64::from(two(later.as_bytes(), 17));
+    let nanos_a = fraction_nanos(earlier);
+    let nanos_b = fraction_nanos(later);
+    // Reading 1: second 60 is a leap second, after second 59 of its own minute.
+    let back_as_leap = (minute_b, second_b, nanos_b) < (minute_a, second_a, nanos_a);
+    // Reading 2: second 60 is second 0 of the next minute.
+    let back_as_next_minute =
+        (minute_b * 60 + second_b, nanos_b) < (minute_a * 60 + second_a, nanos_a);
+    match (back_as_leap, back_as_next_minute) {
+        (true, true) => TsOrder::Backwards,
+        (false, false) => TsOrder::Ok,
+        _ => TsOrder::NotComparable,
+    }
 }
 
 /// `additionalProperties:false` + required presence at one object level.

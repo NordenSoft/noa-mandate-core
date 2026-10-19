@@ -1,0 +1,158 @@
+[
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "tomonth_0",
+    "ts": "2027-03-01T00:00:00Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "ts-order-tomonth"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "POLICY"
+    },
+    "action": {
+      "id": "email.send",
+      "canonical": "email.send",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:1039f4444937bfcc44d6a6635039cd09db195ebe0b618146280cb8ff107d4329",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 0,
+      "prevHash": null,
+      "hash": "sha256:b540e6f7c18b11102cbf996b3b91e099623255deb1e4a5d28891315a294d3983"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "u7g69+m2va0C1yv6Sr/3ZEAx0wmO72ekz0+hB2qxA12C3ZD+4jnukxDqbFSQXYmv+0v574jI89bmox7aNIxrAQ=="
+    }
+  },
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "tomonth_1",
+    "ts": "2027-02-28T20:30:00.5-03:30",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "ts-order-tomonth"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "POLICY"
+    },
+    "action": {
+      "id": "email.send",
+      "canonical": "email.send",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:1039f4444937bfcc44d6a6635039cd09db195ebe0b618146280cb8ff107d4329",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 1,
+      "prevHash": "sha256:b540e6f7c18b11102cbf996b3b91e099623255deb1e4a5d28891315a294d3983",
+      "hash": "sha256:130364d6f8b83779128050c0fbb16f5f331aef74dab8b724548b7519a90392eb"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "QPFQ6z014a0wRwZBPnMVtY+fXIftiqDSZNuVUTU86jGy01cXHw7w/D8rERY0IngSD729IvPtGceO/Cs6SILbDw=="
+    }
+  },
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "tomonth_2",
+    "ts": "2027-03-01T00:00:01Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "ts-order-tomonth"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "POLICY"
+    },
+    "action": {
+      "id": "email.send",
+      "canonical": "email.send",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:1039f4444937bfcc44d6a6635039cd09db195ebe0b618146280cb8ff107d4329",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 2,
+      "prevHash": "sha256:130364d6f8b83779128050c0fbb16f5f331aef74dab8b724548b7519a90392eb",
+      "hash": "sha256:22336205c5425a73d16637985bffb4f247699dc961d6da13219d3471e19a4a6c"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "v0E3OS7cPZV1E3KZcZwdjjp8L7UOZVHw8AlrlHbPmv7SMc7qdwuPsmCUvfQp7fC9AhVER+WGN+Wqo1U/KGRFAQ=="
+    }
+  },
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "tomonth_3",
+    "ts": "2027-02-28T20:30:00.9-03:30",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "ts-order-tomonth"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "POLICY"
+    },
+    "action": {
+      "id": "email.send",
+      "canonical": "email.send",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:1039f4444937bfcc44d6a6635039cd09db195ebe0b618146280cb8ff107d4329",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 3,
+      "prevHash": "sha256:22336205c5425a73d16637985bffb4f247699dc961d6da13219d3471e19a4a6c",
+      "hash": "sha256:83b4f2405a3d70a7d19e0275cf6a0c3d1775aa417f1b661a934a996ff9e4bace"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "Dxf35WUNqj2qf4I+NG+IVOWRZIDh7IHn1gMwB24eHC9AfiYj0py7Z/wTvQB/RIMAPjK1uXQOfPt4DEV3yCZ8DQ=="
+    }
+  }
+]

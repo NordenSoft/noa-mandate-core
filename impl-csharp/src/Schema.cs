@@ -2,6 +2,18 @@ using System.Text.RegularExpressions;
 
 namespace NoaReceipt;
 
+/// <summary>Result of <see cref="Schema.TsOrder"/> (spec §5, warnings ts-backwards /
+/// ts-not-comparable). It feeds a WARNING only: no result accepts or refuses a receipt.</summary>
+public enum TsOrderResult
+{
+    /// <summary>The later timestamp is not earlier than the one before it.</summary>
+    Ok,
+    /// <summary>The later timestamp is earlier than the one before it.</summary>
+    Backwards,
+    /// <summary>The bytes alone cannot order the pair.</summary>
+    NotComparable,
+}
+
 /// <summary>
 /// STRICT structural validation of a single NOA Receipt v0.1 — a faithful port of impl-py's
 /// validate_receipt_shape / src/schema.ts validateReceiptShape. Runs BEFORE any hashing so a
@@ -49,6 +61,19 @@ public static class Schema
         _ => 0,
     };
 
+    /// <summary>Days from 1970-01-01 to the proleptic Gregorian date (negative before it). Shared
+    /// by the historical instant parser and the timestamp-order check.</summary>
+    internal static long DaysFromCivil(long year, long month, long day)
+    {
+        year -= month <= 2 ? 1 : 0;
+        long era = year >= 0 ? year / 400 : (year - 399) / 400;
+        long yoe = year - era * 400;
+        long mp = month + (month > 2 ? -3 : 9);
+        long doy = (153 * mp + 2) / 5 + day - 1;
+        long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        return era * 146097 + doe - 719468;
+    }
+
     /// <summary>The two ASCII digits at <paramref name="i"/> as a number. The caller has already
     /// proven they ARE digits (Rfc3339Re matched).</summary>
     private static int Two(string s, int i) => (s[i] - '0') * 10 + (s[i + 1] - '0');
@@ -81,6 +106,63 @@ public static class Schema
         int n = s.Length;
         if (s[n - 1] == 'Z' || s[n - 1] == 'z') return true;
         return Two(s, n - 5) <= 23 && Two(s, n - 2) <= 59;
+    }
+
+    /// <summary>The UTC minute <paramref name="s"/> names, with its offset applied, counted from
+    /// 1970-01-01T00:00Z. Offsets are whole minutes, so normalizing one never changes the seconds
+    /// field. <paramref name="s"/> already passed <see cref="Rfc3339Instant"/>.</summary>
+    private static long UtcMinute(string s)
+    {
+        long days = DaysFromCivil(Two(s, 0) * 100 + Two(s, 2), Two(s, 5), Two(s, 8));
+        long local = days * 1440 + Two(s, 11) * 60 + Two(s, 14);
+        int n = s.Length;
+        if (s[n - 1] == 'Z' || s[n - 1] == 'z') return local;
+        long offset = Two(s, n - 5) * 60 + Two(s, n - 2);
+        return s[n - 6] == '+' ? local - offset : local + offset;
+    }
+
+    /// <summary>The fractional second in nanoseconds: its 1-9 digits right-padded with zeros, 0
+    /// when absent.</summary>
+    private static long FractionNanos(string s)
+    {
+        if (s.Length < 21 || s[19] != '.') return 0;
+        long value = 0;
+        int digits = 0;
+        for (int i = 20; i < s.Length && s[i] >= '0' && s[i] <= '9'; i++)
+        {
+            value = value * 10 + (s[i] - '0');
+            digits++;
+        }
+        for (; digits < 9; digits++) value *= 10;
+        return value;
+    }
+
+    /// <summary>
+    /// Orders two consecutive receipt timestamps at full precision (nanoseconds) after offset
+    /// normalization. Mirrors src/scan.ts tsOrder exactly; it feeds a WARNING only (spec §5,
+    /// ts-backwards / ts-not-comparable), never a verdict.
+    ///
+    /// Second 60 has two readings: a leap second after second 59 of its own minute, or an
+    /// overflow into second 0 of the next minute (the range rule admits it in any minute; a real
+    /// leap second is an IERS fact, not a property of the string). When the two readings disagree
+    /// about "backwards", the pair is not comparable. An input that is not an RFC 3339 instant is
+    /// also not comparable: never a silent skip.
+    /// </summary>
+    public static TsOrderResult TsOrder(string earlier, string later)
+    {
+        if (!Rfc3339Instant(earlier) || !Rfc3339Instant(later)) return TsOrderResult.NotComparable;
+        long minuteA = UtcMinute(earlier), minuteB = UtcMinute(later);
+        long secondA = Two(earlier, 17), secondB = Two(later, 17);
+        long nanosA = FractionNanos(earlier), nanosB = FractionNanos(later);
+        // Reading 1: second 60 is a leap second, after second 59 of its own minute.
+        bool backAsLeap = minuteB < minuteA
+            || (minuteB == minuteA && (secondB < secondA || (secondB == secondA && nanosB < nanosA)));
+        // Reading 2: second 60 is second 0 of the next minute.
+        long elapsedA = minuteA * 60 + secondA, elapsedB = minuteB * 60 + secondB;
+        bool backAsNextMinute = elapsedB < elapsedA || (elapsedB == elapsedA && nanosB < nanosA);
+        if (backAsLeap && backAsNextMinute) return TsOrderResult.Backwards;
+        if (backAsLeap != backAsNextMinute) return TsOrderResult.NotComparable;
+        return TsOrderResult.Ok;
     }
 
     public static (bool ok, List<string> errors) Validate(JVal value)

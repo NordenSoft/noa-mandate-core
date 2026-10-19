@@ -1,0 +1,80 @@
+[
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "toboff_0",
+    "ts": "2026-06-20T10:00:00Z",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "ts-order-toboff"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "POLICY"
+    },
+    "action": {
+      "id": "email.send",
+      "canonical": "email.send",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:1039f4444937bfcc44d6a6635039cd09db195ebe0b618146280cb8ff107d4329",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 0,
+      "prevHash": null,
+      "hash": "sha256:47a82b7d9be747d9b8b0619401d8abb0e83cb17fc7147064e470567e2ffa7969"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "1k7EwJe9aMJpQIgDOpSAEDuqeDlJEtZyaBUWyBiZRf/xDHBxOv1ZSGfMmX6dclnybSyP5QGnPlUshet/rbeZAw=="
+    }
+  },
+  {
+    "spec": "noa.receipt/0.1",
+    "id": "toboff_1",
+    "ts": "2026-06-20T11:30:00+02:00",
+    "scope": {
+      "tenant": "store_demo",
+      "chain": "ts-order-toboff"
+    },
+    "agent": {
+      "id": "agent-refunds",
+      "model": "example-provider/llm-v1",
+      "principal": "POLICY"
+    },
+    "action": {
+      "id": "email.send",
+      "canonical": "email.send",
+      "riskClass": "LOW",
+      "paramsHash": "sha256:1039f4444937bfcc44d6a6635039cd09db195ebe0b618146280cb8ff107d4329",
+      "reversible": true,
+      "rollbackRef": null
+    },
+    "governance": {
+      "mode": "on",
+      "verdict": "EXECUTED",
+      "ruleId": "low-risk-auto",
+      "approval": null,
+      "sandboxed": false
+    },
+    "chain": {
+      "seq": 1,
+      "prevHash": "sha256:47a82b7d9be747d9b8b0619401d8abb0e83cb17fc7147064e470567e2ffa7969",
+      "hash": "sha256:eb8c98ecf91c9940d8681df4931602d866a1e2df123ec0a8f9090fbb2d69487a"
+    },
+    "sig": {
+      "alg": "ed25519",
+      "kid": "noa-test-key-2026",
+      "value": "8KBPCb7cijwBsDPi770i/VUMQ+nThoobTXY//y43EQFOREm64Xvnde+p2pqJFnbrQ9HPNl96rVYDMCDloPfXCw=="
+    }
+  }
+]

@@ -6,7 +6,7 @@
 use crate::jcs::canonicalize;
 use crate::json::{Json, SAFE_INT_MAX};
 use crate::keys::verify_sig;
-use crate::schema::{is_hash, is_rfc3339_instant, validate_receipt_shape};
+use crate::schema::{is_hash, is_rfc3339_instant, ts_order, validate_receipt_shape, TsOrder};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -189,11 +189,14 @@ pub(crate) fn verify_checkpoint(cp: &Json, keyring: Option<&Json>) -> &'static s
 }
 
 /// Verify a receipt chain. Pure, offline, deterministic. Never panics — malformed shape → MALFORMED.
+/// When `warnings` is supplied, a VALID/UNVERIFIED run appends its warnings to it in order (the
+/// timestamp-order codes, spec §5); a refusal appends nothing, like the TS reference.
 pub fn verify_chain(
     receipts: &Json,
     keyring: Option<&Json>,
     identity: Option<&Json>,
     checkpoint: Option<&Json>,
+    warnings: Option<&mut Vec<String>>,
 ) -> (Status, String) {
     let arr = match receipts {
         Json::Array(a) if !a.is_empty() => a,
@@ -307,6 +310,8 @@ pub fn verify_chain(
     let n = arr.len();
     let mut pinned: HashMap<String, String> = HashMap::new();
     let mut prev_hash: Option<String> = None;
+    let mut prev_ts: Option<&str> = None;
+    let mut run_warnings: Vec<String> = Vec::new();
     for s in 0..n as i64 {
         let idx = match by_seq.get(&s) {
             Some(i) => *i,
@@ -390,6 +395,17 @@ pub fn verify_chain(
             return (Status::Tampered, format!("broken linkage at seq {s}"));
         }
         prev_hash = Some(stored_hash.to_string());
+
+        // 4e. timestamp order: a warning, never a verdict (spec §5)
+        let ts = r.get("ts").and_then(|v| v.as_str()).unwrap_or("");
+        if let Some(earlier) = prev_ts {
+            match ts_order(earlier, ts) {
+                TsOrder::Backwards => run_warnings.push(format!("ts-backwards: seq {s}")),
+                TsOrder::NotComparable => run_warnings.push(format!("ts-not-comparable: seq {s}")),
+                TsOrder::Ok => {}
+            }
+        }
+        prev_ts = Some(ts);
     }
 
     // Step 5: tail-truncation via checkpoint.
@@ -446,6 +462,9 @@ pub fn verify_chain(
         }
     }
 
+    if let Some(out) = warnings {
+        out.append(&mut run_warnings);
+    }
     let status = if have_keyring {
         Status::Valid
     } else {

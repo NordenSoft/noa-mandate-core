@@ -135,7 +135,7 @@ public static class Program
             haveIdentity ? identity : null,
             haveCheckpoint ? checkpoint : null);
 
-        PrintPretty(StatusName(result.Status), result.Detail);
+        PrintPretty(StatusName(result.Status), result.Detail, result.Warnings);
         return ExitCode(result.Status);
     }
 
@@ -154,9 +154,12 @@ public static class Program
         Console.WriteLine(JsonSerializer.Serialize(new { status, detail }));
     }
 
-    private static void PrintPretty(string status, string detail)
+    private static void PrintPretty(string status, string detail, IReadOnlyList<string> warnings)
     {
-        Console.WriteLine(JsonSerializer.Serialize(new { status, detail },
-            new JsonSerializerOptions { WriteIndented = true }));
+        var options = new JsonSerializerOptions { WriteIndented = true };
+        // "warnings" is an additive key, present only when the run reported a warning (spec §5).
+        Console.WriteLine(warnings.Count > 0
+            ? JsonSerializer.Serialize(new { status, detail, warnings }, options)
+            : JsonSerializer.Serialize(new { status, detail }, options));
     }
 }
