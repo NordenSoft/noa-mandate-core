@@ -814,7 +814,7 @@ function proofIdsFor(entry) {
  * reported, so the registry cannot silently stop describing the code).
  */
 // Bootstrap controls select their existing portable detector inside the closed observer. The full
-// unfiltered bootstrap suite, including real tarball packing, remains a Node 22 host CI gate.
+// unfiltered bootstrap suite, including real tarball packing, remains a Node 24 host CI gate.
 const KNOCKOUTS = [
   {
     id: "boundary-reviewed-controls-carry-publish-artifact-executor",

@@ -90,13 +90,13 @@ const EXPECTED_PUBLISH_SURFACE_SELFTEST_SCRIPT = "node scripts/lint-published-su
 const EXPECTED_PREPUBLISH_REFUSAL = String.raw`node -e "process.stderr.write('RELEASE_FROZEN: direct mutable-directory publication is disabled. Only a separately governed controller may verify and publish immutable tarball bytes; this hook grants no release authority.\n'); process.exit(1)"`;
 const EXPECTED_TOOLCHAIN_CONTRACT = Object.freeze({
   image:
-    "docker.io/library/node@sha256:62e4daa6819762bbd3072af77cc282ab72c631c4aed30dd7980192babaf385b3",
-  node: "22.22.2",
-  npm: "10.9.7",
+    "docker.io/library/node@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a",
+  node: "24.22.1",
+  npm: "11.19.1",
   packStack: Object.freeze({
-    arborist: "8.0.4",
-    npmPacklist: "9.0.0",
-    tar: "7.5.11",
+    arborist: "9.9.1",
+    npmPacklist: "10.0.4",
+    tar: "7.5.22",
   }),
 });
 function check(name, fn) {

@@ -1365,7 +1365,7 @@ function releaseControllerProblems(source, prOnlyContexts, profile = RECEIPT_REL
   }
   if (/registry-url/u.test(nonComment)) fail("publish", "PUB-NO-REGISTRY-URL", "setup-node writes no registry configuration");
   for (const step of allSteps.filter((candidate) => (candidate.uses ?? "").startsWith("actions/setup-node@"))) {
-    if (step.uses !== RELEASE_SETUP_NODE || !sameMap(step.with, { "node-version": "22.22.2", "package-manager-cache": "false" })) {
+    if (step.uses !== RELEASE_SETUP_NODE || !sameMap(step.with, { "node-version": "24.22.1", "package-manager-cache": "false" })) {
       fail("publish", "PUB-SETUP-NODE", `${step.job}: setup-node is the attested revision with no cache and no registry`);
     }
   }
@@ -2923,7 +2923,7 @@ function releaseControllerMutations(base, fileExpression, expandedFileExpression
   const setupNodeStep = [
     `      - uses: ${SETUP_NODE_TEXT}`,
     "        with:",
-    "          node-version: 22.22.2",
+    "          node-version: 24.22.1",
     "          package-manager-cache: false",
     "",
   ].join("\n");
@@ -3134,7 +3134,7 @@ check("every evidence-bearing CI launch point sanitizes the exact refusal list",
       assert.equal(hostSteps.length, 1, `${file}: the full host integration launch must occur exactly once`);
       const [host] = hostSteps;
       assert.equal(host.condition,
-        "${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 22 }}",
+        "${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 24 }}",
         `${file}: the full host integration must run after the supported build`);
       assert.equal(host.run, "|", `${file}: the host launch must retain its literal shell block`);
       // Bind the entire block: protecting the first command alone would admit an unguarded sibling,
