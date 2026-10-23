@@ -74,7 +74,7 @@ jobs:
           test "$(git rev-list --parents -n 1 HEAD)" = "$PARENTS"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22.22.2
+          node-version: 24.22.1
           cache: npm
       # The packed lane asks npm what would ship, and npm can only answer about files that exist.
       # `npm ci` runs the prepare hook, which builds dist/.
