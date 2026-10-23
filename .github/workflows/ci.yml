@@ -29,7 +29,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22.22.2
+          node-version: 24.22.1
           cache: npm
       - name: Audit every committed npm lockfile
         shell: bash
@@ -57,7 +57,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22.22.2
+          node-version: 24.22.1
           cache: npm
       - name: "Install the root FIRST — a file: link install builds its target"
         # NOT optional, and not obvious. `npm ci` inside a package whose manifest says
@@ -117,7 +117,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22.22.2
+          node-version: 24.22.1
           cache: npm
       - name: Build the root package
         run: npm ci && npm run build
@@ -213,7 +213,7 @@ jobs:
           /usr/bin/getfattr --version
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22.22.2
+          node-version: 24.22.1
           cache: npm
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -333,8 +333,8 @@ jobs:
         include:
           - node: 20.19.0
             label: 20
-          - node: 22.22.2
-            label: 22
+          - node: 24.22.1
+            label: 24
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -399,7 +399,7 @@ jobs:
         # The product and reporter compatibility checks retain their matrix runtime below.
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22.22.2
+          node-version: 24.22.1
       - name: Prepare every package the proof lanes and the sweep resolve through
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # ONE RUNNER, CALLED BY EVERY JOB THAT NEEDS THE SAME TREE. It derives the proof preparation
@@ -414,7 +414,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: Full boundary bootstrap and host packer integration
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 22 }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 24 }}
         # Knockout observers select portable authored tests inside their closed containers. Keep
         # the complete unfiltered suite here, where the real pinned packer has Docker access.
         env:
@@ -771,7 +771,7 @@ jobs:
           /usr/bin/getfattr --version
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22.22.2
+          node-version: 24.22.1
           cache: npm
       # Some suites the sweep re-runs shell out to python3; the lane this moved from set it up too.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

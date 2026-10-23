@@ -4298,8 +4298,8 @@ const KNOCKOUT_TEST_OBSERVER = fileURLToPath(
 // multi-architecture Docker Official Image manifests; mutable tags are not accepted as evidence.
 const KNOCKOUT_NODE_IMAGES = Object.freeze({
   20: "docker.io/library/node@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5",
-  22: "docker.io/library/node@sha256:62e4daa6819762bbd3072af77cc282ab72c631c4aed30dd7980192babaf385b3",
-  24: "docker.io/library/node@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584",
+  22: "docker.io/library/node@sha256:63538dfe497cc29dfafdda25ada09b46db68a3f4cc205abf1f5d6bf0913f3384",
+  24: "docker.io/library/node@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a",
 });
 
 // Docker is part of the evidence TCB, so a bare command name is not an acceptable way to select

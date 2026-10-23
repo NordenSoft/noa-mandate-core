@@ -814,7 +814,7 @@ function proofIdsFor(entry) {
  * reported, so the registry cannot silently stop describing the code).
  */
 // Bootstrap controls select their existing portable detector inside the closed observer. The full
-// unfiltered bootstrap suite, including real tarball packing, remains a Node 22 host CI gate.
+// unfiltered bootstrap suite, including real tarball packing, remains a Node 24 host CI gate.
 const KNOCKOUTS = [
   {
     id: "boundary-reviewed-controls-carry-publish-artifact-executor",
@@ -5051,15 +5051,19 @@ const KNOCKOUTS = [
     id: "l12-pack-derivation-is-lifecycle-free",
     control:
       "L12 L-PACK — scope and bytes come from the one lifecycle-free npm-packlist/tar " +
-      "implementation's actual, safely parsed tgz. `npm pack --dry-run --json --ignore-scripts` " +
-      "is not an enumerator because prepare may still execute. The mutation restores that unsafe " +
-      "path and reads its listed files from disk; the arm's prepare sentinel must expose the attempt.",
+      "implementation's actual, safely parsed tgz. A package-manager preview (`npm pack --dry-run " +
+      "--json`) is not an enumerator because it executes package lifecycle code: by default it runs " +
+      "prepack, prepare and postpack, and npm 10 (pacote 19, lib/dir.js #prepareDir) ran prepare " +
+      "even under --ignore-scripts. The pinned npm 11.19.1 (pacote 21.5.1, lib/dir.js:35) now " +
+      "honours --ignore-scripts, so the flag-ignoring subject no longer exists there; the mutation " +
+      "therefore restores the preview in its lifecycle-running form and reads its listed files from " +
+      "disk; the arm's prepare sentinel must expose the attempt.",
     file: "scripts/lint-boundary.mjs",
     find: "        packed = packFrozenPackageArtifact({ commitTime: 0, output, packagePath: dir, source });",
     replace:
       "        packed = (() => {\n" +
       "          const cwd = dir === \".\" ? source : join(source, ...dir.split(\"/\"));\n" +
-      "          const raw = capture(\"npm\", [\"pack\", \"--dry-run\", \"--json\", \"--ignore-scripts\"], { cwd }).out;\n" +
+      "          const raw = capture(\"npm\", [\"pack\", \"--dry-run\", \"--json\"], { cwd }).out;\n" +
       "          const files = JSON.parse(raw)[0].files.map((entry) => entry.path);\n" +
       "          const entries = files.map((path) => { const content = readFileSync(join(cwd, path)); return { content, mode: 0o644, path, sha256: \"\", size: content.length }; });\n" +
       "          return { entries, releaseAuthorized: false, status: \"CANDIDATE / NON-RELEASE\", tarball: { packlistCount: entries.length } };\n" +

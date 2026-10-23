@@ -35,13 +35,13 @@ export const CANDIDATE_STATUS = "CANDIDATE / NON-RELEASE";
 export const MANIFEST_SCHEMA = "noa.publish-artifact-set/2";
 export const PUBLISH_TOOLCHAIN_CONTRACT = Object.freeze({
   image:
-    "docker.io/library/node@sha256:62e4daa6819762bbd3072af77cc282ab72c631c4aed30dd7980192babaf385b3",
-  node: "22.22.2",
-  npm: "10.9.7",
+    "docker.io/library/node@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a",
+  node: "24.22.1",
+  npm: "11.19.1",
   packStack: Object.freeze({
-    arborist: "8.0.4",
-    npmPacklist: "9.0.0",
-    tar: "7.5.11",
+    arborist: "9.9.1",
+    npmPacklist: "10.0.4",
+    tar: "7.5.22",
   }),
 });
 export const NODE_IMAGE = PUBLISH_TOOLCHAIN_CONTRACT.image;

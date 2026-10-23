@@ -813,15 +813,15 @@ const LEGACY_PUBLISHER_WORKFLOWS = ["publish.yml", "publish-mcp.yml", "publish-t
 // A partial lexer cannot safely decide which hash begins YAML prose, so this quarantine ignores
 // nothing. Any material or prose change requires explicit re-review of the whole tiny workflow.
 const CLOSED_WORKFLOW_SHA256 = Object.freeze({
-  "boundary.yml": "226d648f13bc468017813b375d2f2437db248a44318a7f77942a90f5224cb0cb",
+  "boundary.yml": "413ff01fcc2ac22e00aa411ea30d0f31587d95146a4f02f92d6bf1e33c577217",
   "publish.yml": "95a5c267c674326e90ca97b1abe8c9b5b1628b7ca05a820851bbdb852795d5c3",
   "publish-mcp.yml": "7a38cf1cd331d2a61a2890f1430b422996e7c85d7aa892a18c2a8760bbcbc0e7",
   "publish-tsa.yml": "91745dac92651660718868884d203af96f7bcc42f5986ce9f319087c4b38716e",
   // The release controller is pinned whole as well; its controls are ALSO measured structurally
   // below, because a digest alone would make every knockout arm on the file vacuous.
-  "release-npm-noa-receipt.yml": "3009e5e00930527c0659ac57596d9ce6f543b73cda91a44b51df44f623a4eec6",
+  "release-npm-noa-receipt.yml": "b521ea0a24243b514f0b14da49d9b129424c048b8cda892bcad276a40bbf1fec",
   // The MCP release controller is pinned whole the same way, and measured structurally below.
-  "release-npm-mcp.yml": "9b080a5e2d543233b25bac9f73b5be095e386c21a0a26a24198e2d6e38b7d6ff",
+  "release-npm-mcp.yml": "aa024d086cfb002326477dca5ff3255d611d281c5ca6e99c8be03e0f9f07660f",
 });
 
 // Only LF is a line separator in the canonical production representation. Reject every other
@@ -1010,7 +1010,7 @@ const RELEASE_APP_ID = 15368;
 // and digest are pinned here, so shrinking the list or pointing a context at another app is refused
 // by this reader, not only by reviewer attention to a digest refresh.
 const RELEASE_MINIMUM_CHECK_COUNT = 43;
-const RELEASE_MINIMUM_CHECKS_SHA256 = "f381da99f7c0365a4e19305a0545c064e489cd3ebbc6df5b8ff294aef528cd96";
+const RELEASE_MINIMUM_CHECKS_SHA256 = "804ec3fbda1fb1524fba70f82894a27efa22ad9b331e8716f1a000100afc2386";
 // Parsed `uses:` values are SHA pins; the trailing version comment is YAML prose, not the value.
 const RELEASE_SETUP_NODE = `actions/setup-node@${SETUP_NODE_ATTESTED_REVISION}`;
 const RELEASE_DOWNLOAD_ARTIFACT = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
@@ -1365,7 +1365,7 @@ function releaseControllerProblems(source, prOnlyContexts, profile = RECEIPT_REL
   }
   if (/registry-url/u.test(nonComment)) fail("publish", "PUB-NO-REGISTRY-URL", "setup-node writes no registry configuration");
   for (const step of allSteps.filter((candidate) => (candidate.uses ?? "").startsWith("actions/setup-node@"))) {
-    if (step.uses !== RELEASE_SETUP_NODE || !sameMap(step.with, { "node-version": "22.22.2", "package-manager-cache": "false" })) {
+    if (step.uses !== RELEASE_SETUP_NODE || !sameMap(step.with, { "node-version": "24.22.1", "package-manager-cache": "false" })) {
       fail("publish", "PUB-SETUP-NODE", `${step.job}: setup-node is the attested revision with no cache and no registry`);
     }
   }
@@ -2923,7 +2923,7 @@ function releaseControllerMutations(base, fileExpression, expandedFileExpression
   const setupNodeStep = [
     `      - uses: ${SETUP_NODE_TEXT}`,
     "        with:",
-    "          node-version: 22.22.2",
+    "          node-version: 24.22.1",
     "          package-manager-cache: false",
     "",
   ].join("\n");
@@ -3134,7 +3134,7 @@ check("every evidence-bearing CI launch point sanitizes the exact refusal list",
       assert.equal(hostSteps.length, 1, `${file}: the full host integration launch must occur exactly once`);
       const [host] = hostSteps;
       assert.equal(host.condition,
-        "${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 22 }}",
+        "${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 24 }}",
         `${file}: the full host integration must run after the supported build`);
       assert.equal(host.run, "|", `${file}: the host launch must retain its literal shell block`);
       // Bind the entire block: protecting the first command alone would admit an unguarded sibling,

@@ -25,13 +25,13 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22.22.2
+          node-version: 24.22.1
 
       - name: Acquire the exact public Node image (setup only; staging later uses pull=never)
         shell: bash
         run: |
           set -euo pipefail
-          image='docker.io/library/node@sha256:62e4daa6819762bbd3072af77cc282ab72c631c4aed30dd7980192babaf385b3'
+          image='docker.io/library/node@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a'
           docker pull --platform=linux/amd64 "$image"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = 'linux/amd64'
 
