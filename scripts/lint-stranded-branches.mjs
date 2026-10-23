@@ -2041,7 +2041,7 @@ function selftest() {
     );
     rejectWorkflowDrift(
       "action input drift is rejected",
-      checkedInWorkflow.replace("          node-version: 22", "          node-version: 23"),
+      checkedInWorkflow.replace("          node-version: 24", "          node-version: 25"),
     );
     rejectWorkflowDrift(
       "step id drift is rejected",
