@@ -187,7 +187,9 @@ jobs:
     # the shape of gap this repository keeps finding: a rule enforced in some implementations is not
     # an invariant. Every verifier that claims conformance is now checked on every push.
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 40, was 25 (2026-10-28): the first evidence step runs the full `npm test` suite, measured at
+    # 704-1242 s on this runner; a green run finished at 24m52s and #66 was cut at 25m18s. Budget only.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
