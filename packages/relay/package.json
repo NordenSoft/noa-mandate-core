@@ -31,7 +31,7 @@
     "noa-relay": "dist/src/cli.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "files": [
     "dist/src",

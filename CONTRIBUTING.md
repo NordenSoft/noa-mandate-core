@@ -33,10 +33,12 @@ npm run test:dogfood  # repository dogfood suite (vitest)
 npm run verify -- conformance/vectors/valid-chain.json --keyring conformance/vectors/keyring.json
 ```
 
-- **Node version:** the published package targets **Node ≥ 20** (`engines`) and has **zero runtime
-  dependencies**, so consumers run it on any Node ≥ 20. The *contributor toolchain* is stricter: the
-  dogfood suite's `vitest`/`vite` devDependency needs **Node ≥ 20.19** (or ≥ 22.12). This is a
-  dev-only requirement — it does not narrow the runtime `engines` the package ships to consumers.
+- **Node version:** the published package targets **Node ≥ 22** (`engines`) and has **zero runtime
+  dependencies**, so consumers run it on any Node ≥ 22. CI tests every Node line that is still in
+  LTS or maintenance (22, 24 and 26); Node 20 reached end of life on 2026-04-30. The *contributor
+  toolchain* is stricter: the dogfood suite's `vite` devDependency needs **Node ≥ 22.12** on the 22
+  line. This is a dev-only requirement — it does not narrow the runtime `engines` the package ships
+  to consumers.
 - **Zero runtime dependencies** is a feature — do not add one without a strong, discussed
   reason. Dev-only deps (TypeScript, types, vitest) are fine.
 - If you touch hashing/canonicalization/schema, **regenerate vectors** (`npm run gen:vectors`)

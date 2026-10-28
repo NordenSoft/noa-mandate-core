@@ -77,7 +77,7 @@ including genuine pre-retirement history.
 
 ## Use your own tools
 
-Five steps. Each is one command. Node 20 or newer.
+Five steps. Each is one command. Node 22 or newer.
 
 1. Install the proxy and the approval command (`noa-approve`):
 

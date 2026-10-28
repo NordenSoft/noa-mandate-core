@@ -56,7 +56,7 @@ export interface GateClient {
 
 /** HTTP client for an operator-trusted origin. Remote origins require HTTPS; plaintext HTTP
  *  is restricted to literal loopback. Redirects cannot select a different credential destination.
- *  Uses global `fetch` (Node ≥ 20). Every response is normalized to an `EngineResult`. */
+ *  Uses global `fetch` (Node ≥ 22). Every response is normalized to an `EngineResult`. */
 export class HttpGateClient implements GateClient {
   private readonly baseUrl: string;
 

@@ -4298,10 +4298,12 @@ const KNOCKOUT_TEST_OBSERVER = fileURLToPath(
 // as PID 1 in a disposable Linux namespace. Docker does not return from `run --rm` until that
 // namespace is gone, so source restoration cannot race a delayed writer. Digests pin the exact
 // multi-architecture Docker Official Image manifests; mutable tags are not accepted as evidence.
+// Node 20 reached end of life on 2026-04-30 and is no longer a supported major. The Node 26 entry
+// is node:26.12.1-bookworm: on 2026-10-28 no Docker Official Image for 26.13.0 had been published.
 const KNOCKOUT_NODE_IMAGES = Object.freeze({
-  20: "docker.io/library/node@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5",
   22: "docker.io/library/node@sha256:63538dfe497cc29dfafdda25ada09b46db68a3f4cc205abf1f5d6bf0913f3384",
   24: "docker.io/library/node@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a",
+  26: "docker.io/library/node@sha256:3b764117159bda01d2396391e7789b6a9106af9729cfd001ef55e98557868310",
 });
 
 // Docker is part of the evidence TCB, so a bare command name is not an acceptable way to select
@@ -4357,7 +4359,7 @@ function knockoutEvidenceImage() {
   const major = Number.parseInt(process.versions.node.split(".", 1)[0], 10);
   const image = KNOCKOUT_NODE_IMAGES[major];
   if (image === undefined) {
-    throw new Error(`knockout evidence requires supported Node 20, 22, or 24; current major is ${major}`);
+    throw new Error(`knockout evidence requires supported Node 22, 24, or 26; current major is ${major}`);
   }
   return image;
 }

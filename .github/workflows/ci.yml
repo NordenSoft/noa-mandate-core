@@ -331,10 +331,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - node: 20.19.0
-            label: 20
+          - node: 22.23.4
+            label: 22
           - node: 24.22.1
             label: 24
+          - node: 26.13.0
+            label: 26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -394,7 +396,7 @@ jobs:
         # PHASES 2 and 3 — exactly as at the first evidence step in this file.
         run: /usr/bin/env -u NODE_OPTIONS -u NODE_REPL_EXTERNAL_MODULE -u npm_config_node_options -u npm_config_script_shell -u npm_config_shell -u BASH_ENV -u ENV -u SHELLOPTS -u DYLD_INSERT_LIBRARIES -u DYLD_LIBRARY_PATH -u DYLD_FRAMEWORK_PATH -u LD_PRELOAD -u LD_LIBRARY_PATH -u LD_AUDIT node scripts/lib/knockout-runner.mjs --launch-evidence npm test --ignore-scripts=false --script-shell=/bin/sh --node-options=
       - name: Select attested tooling runtime for package preparation
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 20 }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label != 24 }}
         # Registry derivation is an attested controller operation pinned to this runtime.
         # The product and reporter compatibility checks retain their matrix runtime below.
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -409,7 +411,7 @@ jobs:
         # script and not a block of shell each job carries its own copy of.
         run: node scripts/prepare-proof-packages.mjs
       - name: Restore product runtime before matrix proof checks
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 20 }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label != 24 }}
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -443,8 +445,8 @@ jobs:
       - name: Proof-runner reporter contract selftest (supported Node matrix)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # Machine evidence may not depend on Node's version/TTY-selected default reporter. This
-        # selftest executes positive, failing, skipped, duplicate and forged-output controls on BOTH
-        # supported product runtimes and pins compiled and tsx recipes to one versioned event format.
+        # selftest executes positive, failing, skipped, duplicate and forged-output controls on EVERY
+        # supported product runtime and pins compiled and tsx recipes to one versioned event format.
         run: node scripts/lib/proof-resolve.selftest.mjs
       - name: Resolver parity (public-core proofs)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

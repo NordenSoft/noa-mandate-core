@@ -819,9 +819,9 @@ const CLOSED_WORKFLOW_SHA256 = Object.freeze({
   "publish-tsa.yml": "91745dac92651660718868884d203af96f7bcc42f5986ce9f319087c4b38716e",
   // The release controller is pinned whole as well; its controls are ALSO measured structurally
   // below, because a digest alone would make every knockout arm on the file vacuous.
-  "release-npm-noa-receipt.yml": "b521ea0a24243b514f0b14da49d9b129424c048b8cda892bcad276a40bbf1fec",
+  "release-npm-noa-receipt.yml": "cff8897c5cf434f4d4dcb4491c8a22614d51a99e7c4c50a68cb93c7dfc47a271",
   // The MCP release controller is pinned whole the same way, and measured structurally below.
-  "release-npm-mcp.yml": "aa024d086cfb002326477dca5ff3255d611d281c5ca6e99c8be03e0f9f07660f",
+  "release-npm-mcp.yml": "b0a8e9bbe2af5eaec590117b295b4e2401e384196c5cc7b668b911cef6fac935",
 });
 
 // Only LF is a line separator in the canonical production representation. Reject every other
@@ -1009,8 +1009,8 @@ const RELEASE_APP_ID = 15368;
 // The minimum set of (context, app id) pairs the stage job requires of the live ruleset. Its length
 // and digest are pinned here, so shrinking the list or pointing a context at another app is refused
 // by this reader, not only by reviewer attention to a digest refresh.
-const RELEASE_MINIMUM_CHECK_COUNT = 43;
-const RELEASE_MINIMUM_CHECKS_SHA256 = "804ec3fbda1fb1524fba70f82894a27efa22ad9b331e8716f1a000100afc2386";
+const RELEASE_MINIMUM_CHECK_COUNT = 44;
+const RELEASE_MINIMUM_CHECKS_SHA256 = "c0c62407989ed07a57574d000bbcf1f9ad032e50c0a3e31e565f9fa558d96cd9";
 // Parsed `uses:` values are SHA pins; the trailing version comment is YAML prose, not the value.
 const RELEASE_SETUP_NODE = `actions/setup-node@${SETUP_NODE_ATTESTED_REVISION}`;
 const RELEASE_DOWNLOAD_ARTIFACT = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
@@ -2971,8 +2971,8 @@ function releaseControllerMutations(base, fileExpression, expandedFileExpression
     ["STG-RULESET-LIVE", "hard-coded ruleset", '          RULESET_ID: "22911326"\n', '          RULESET_ID: "1"\n'],
     ["STG-PR-LANE", "push-lane context moved to the pull-request lane", 'PR_ONLY_CONTEXTS: "pr-title review"', 'PR_ONLY_CONTEXTS: "pr-title review shapes"'],
     ["STG-MINIMUM-PINNED", "minimum shrunk to the pull-request lane", minimumLine, `          MINIMUM_REQUIRED_CHECKS: '[["pr-title", ${RELEASE_APP_ID}], ["review", ${RELEASE_APP_ID}]]'`],
-    ["STG-MINIMUM-PINNED", "one push-lane pair dropped", `MINIMUM_REQUIRED_CHECKS: '[["test (20)", ${RELEASE_APP_ID}], `, "MINIMUM_REQUIRED_CHECKS: '["],
-    ["STG-MINIMUM-PINNED", "pinned context pointed at another app", `["test (20)", ${RELEASE_APP_ID}]`, '["test (20)", 1]'],
+    ["STG-MINIMUM-PINNED", "one push-lane pair dropped", `MINIMUM_REQUIRED_CHECKS: '[["test (22)", ${RELEASE_APP_ID}], `, "MINIMUM_REQUIRED_CHECKS: '["],
+    ["STG-MINIMUM-PINNED", "pinned context pointed at another app", `["test (22)", ${RELEASE_APP_ID}]`, '["test (22)", 1]'],
     ["STG-PR-BINDING", "subject disagreement tolerated", '              echo "::error::the squash subject names #${subject_pr} but the merge belongs to #${pr_number}"; exit 1\n', '              echo "::warning::subject disagrees"\n'],
     ["STG-REVIEWED-TREE", "tree equality removed", '          test "$release_tree" = "$(api "repos/${repo}/git/commits/${head_sha}" --jq \'.tree.sha\')" ||\n', '          true ||\n'],
     ["STG-INDEPENDENT-BYTES", "independent bytes not compared", '          test "$(sha256sum < "$independent/files/$file")" = "$(sha256sum < "$staged")"\n', ""],
