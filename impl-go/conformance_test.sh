@@ -38,6 +38,7 @@ pass=0
 fail=0
 total=0
 warn_seen=0 # warning-parity cases on which impl-py printed at least one timestamp-order warning
+dup_seen=0  # warning-parity cases on which impl-py printed at least one duplicate-id warning
 
 run_case() {
 	local label="$1"
@@ -70,10 +71,11 @@ run_case() {
 	fi
 }
 
-# WARNING PARITY (scripts/gen-vectors.ts 10c and 10d, spec §5 and §2). run_case compares exit codes only,
-# so it cannot see a missing or different warning. For each ts-order/ and independent-fields/ chain both
-# verifiers must exit with the same code AND print the same timestamp-order warnings ("ts-backwards:
-# seq N" / "ts-not-comparable: seq N"), in the same order; impl-py/conformance.mjs pins impl-py's exit
+# WARNING PARITY (scripts/gen-vectors.ts 10c, 10d and 10e, spec §5 and §2). run_case compares exit codes
+# only, so it cannot see a missing or different warning. For each ts-order/, independent-fields/ and
+# duplicate-id/ chain both verifiers must exit with the same code AND print the same stable warnings
+# ("ts-backwards: seq N" / "ts-not-comparable: seq N" / "duplicate-id: seq N"), in the same order;
+# impl-py/conformance.mjs pins impl-py's exit
 # code and expected list. conformance/warning-parity.py reads each JSON result with a JSON parser: a
 # "warnings" member that is not an array of strings, or a code anywhere else in the result, fails the
 # case on either side. These lines start with "WARN-" on purpose: warning parity is not a verdict class
@@ -133,6 +135,7 @@ run_warn_case() {
 	warn_agree "$pyout" "$goout"
 	agree=$?
 	case "$WARN_REF" in '["'*) warn_seen=$((warn_seen + 1)) ;; esac
+	case "$WARN_REF" in *'"duplicate-id: seq '*) dup_seen=$((dup_seen + 1)) ;; esac
 	total=$((total + 1))
 	if [ "$pyc" -eq "$goc" ] && [ "$agree" -eq 0 ]; then
 		pass=$((pass + 1))
@@ -254,6 +257,28 @@ run_warn_case "independent-fields/risk-class-vs-reversible + keyring"     "$IND/
 run_warn_case "independent-fields/mode-vs-verdict-and-approval + keyring" "$IND/mode-vs-verdict-and-approval.json" "$V/keyring.json"
 run_warn_case "independent-fields/compliance-deny-vs-executed + keyring"  "$IND/compliance-deny-vs-executed.json" "$V/keyring.json"
 run_warn_case "independent-fields/approval-at-after-ts + keyring"         "$IND/approval-at-after-ts.json" "$V/keyring.json"
+
+echo "=== VECTORS: duplicate-id (warning parity; every chain stays VALID) ==="
+# Spec §5 step 6c (scripts/gen-vectors.ts 10e): every receipt whose id equals the id of a lower seq is
+# reported as "duplicate-id: seq N", in seq order and after that seq's timestamp-order code; ids are exact
+# strings after JSON parsing. impl-py/conformance.mjs pins impl-py's exit code and expected list.
+DUP="$V/duplicate-id"
+run_warn_case "duplicate-id/pair + keyring"                   "$DUP/pair.json" "$V/keyring.json"
+run_warn_case "duplicate-id/pair (no keyring)"                "$DUP/pair.json"
+# The shuffled file stores the same receipts in the array order seq 1, seq 3, seq 0, seq 2; verifiers
+# order by chain.seq, so both must print "duplicate-id: seq 2" then "duplicate-id: seq 3".
+run_warn_case "duplicate-id/three-holders + keyring"          "$DUP/three-holders.json" "$V/keyring.json"
+run_warn_case "duplicate-id/three-holders-shuffled + keyring" "$DUP/three-holders-shuffled.json" "$V/keyring.json"
+run_warn_case "duplicate-id/case-differs + keyring"           "$DUP/case-differs.json" "$V/keyring.json"
+run_warn_case "duplicate-id/nfc-vs-nfd + keyring"             "$DUP/nfc-vs-nfd.json" "$V/keyring.json"
+run_warn_case "duplicate-id/with-ts-backwards + keyring"      "$DUP/with-ts-backwards.json" "$V/keyring.json"
+run_warn_case "duplicate-id/escaped-spelling + keyring"       "$DUP/escaped-spelling.json" "$V/keyring.json"
+# ANTI-VACUITY: six of those cases must carry an impl-py duplicate-id warning, so none seen is a broken
+# runner (the ts-order cases never carry one).
+if [ "$dup_seen" -eq 0 ]; then
+	total=$((total + 1)); fail=$((fail + 1))
+	printf 'WARN-FAIL  vacuous: impl-py printed no duplicate-id warning on any duplicate-id case\n'
+fi
 
 echo "=== VECTORS: malformed (strict parse / structural rejects) ==="
 run_case "malformed/deep-nest"                           "$V/malformed/deep-nest.json"

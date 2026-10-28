@@ -8,7 +8,7 @@ import { signingMessage, RECEIPT_SIG_DOMAIN, CHECKPOINT_SIG_DOMAIN } from "./sig
 import { nonNfcPaths, isNFC } from "./nfc.js";
 import { parseDocument, parseDocumentBytes } from "./bytes.js";
 import { inertOptions, type OptionSchema } from "./opts.js";
-import { arrayPush, arrayIncludes, arrayEvery, arrayLength, arrayJoin, publishArray, bufferFrom, mapHas, mapGet, mapSet, newMap, newSet, objectCreateNull, objectKeys, objectGetOwnPropertyNames, isSafeInteger, arraySlice, setAdd, setSize, isArray, jsonStringify } from "./intrinsics.js";
+import { arrayPush, arrayIncludes, arrayEvery, arrayLength, arrayJoin, publishArray, bufferFrom, mapHas, mapGet, mapSet, newMap, newSet, objectCreateNull, objectKeys, objectGetOwnPropertyNames, isSafeInteger, arraySlice, setAdd, setHas, setSize, isArray, jsonStringify } from "./intrinsics.js";
 import { isSha256Hash, isRfc3339Instant, tsOrder, TS_ORDER_BACKWARDS, TS_ORDER_NOT_COMPARABLE } from "./scan.js";
 import { frozenTable } from "./inert.js";
 import { lifecycleInstantNanos, parseVerificationKeyring, type ParsedVerificationKeyring } from "./verification-keyring.js";
@@ -705,8 +705,9 @@ function verifyParsedChain(receipts: unknown, o: InertVerifyOptions): VerifyResu
   // restored. Caught by measuring the public array-returning surface rather than assuming it.
   const warnings: string[] = publishArray(arraySlice(tenantDriftMessages));
 
-  // 4. Walk the chain: hash, key-pinning, signature, linkage, timestamp monotonicity.
+  // 4. Walk the chain: hash, key-pinning, signature, linkage, timestamp order, id uniqueness.
   const pinnedKid = newMap<string, string>(); // agent.id -> kid (key continuity)
+  const seenIds = newSet<string>(); // receipt ids of the lower seqs (spec §5 step 6c, duplicate-id)
   let prev: Receipt | null = null;
   // The FIRST authentic signature by a lifecycle-retired key (receipt here, checkpoint in step 5).
   // It is a verdict only if nothing else fails: see step 5c and the KEY_RETIRED return at the end.
@@ -829,6 +830,14 @@ function verifyParsedChain(receipts: unknown, o: InertVerifyOptions): VerifyResu
       if (order === TS_ORDER_BACKWARDS) arrayPush(warnings, `ts-backwards: seq ${seq}`);
       else if (order === TS_ORDER_NOT_COMPARABLE) arrayPush(warnings, `ts-not-comparable: seq ${seq}`);
     }
+
+    // 4f. Receipt id uniqueness (spec §5 step 6c): an id equal to the id of a lower seq in this chain is
+    // reported after this seq's timestamp-order code. Exact string equality after JSON parsing: no
+    // Unicode normalization, case-sensitive. A warning, never a verdict: noa.receipt/0.1 accepts such a
+    // chain, and a stricter rule would refuse inputs this version accepts. Stable code, identical in all
+    // five verifiers.
+    if (setHas(seenIds, r.id)) arrayPush(warnings, `duplicate-id: seq ${seq}`);
+    else setAdd(seenIds, r.id);
     prev = r;
   }
   } catch {

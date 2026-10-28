@@ -37,6 +37,7 @@ fi
 PASS=0; FAIL=0
 declare -a FAILED=()
 WARN_SEEN=0 # warning-parity cases on which impl-py printed at least one timestamp-order warning
+DUP_SEEN=0  # warning-parity cases on which impl-py printed at least one duplicate-id warning
 
 # run_case <category> <label> <arg...>
 # runs impl-py and the rust bin with the same args; compares exit codes.
@@ -68,10 +69,11 @@ run_case() {
   fi
 }
 
-# WARNING PARITY (scripts/gen-vectors.ts 10c and 10d, spec §5 and §2). run_case compares exit codes only,
-# so it cannot see a missing or different warning. For each ts-order/ and independent-fields/ chain both
-# verifiers must exit with the same code AND print the same timestamp-order warnings ("ts-backwards:
-# seq N" / "ts-not-comparable: seq N"), in the same order; impl-py/conformance.mjs pins impl-py's exit
+# WARNING PARITY (scripts/gen-vectors.ts 10c, 10d and 10e, spec §5 and §2). run_case compares exit codes
+# only, so it cannot see a missing or different warning. For each ts-order/, independent-fields/ and
+# duplicate-id/ chain both verifiers must exit with the same code AND print the same stable warnings
+# ("ts-backwards: seq N" / "ts-not-comparable: seq N" / "duplicate-id: seq N"), in the same order;
+# impl-py/conformance.mjs pins impl-py's exit
 # code and expected list. conformance/warning-parity.py reads each JSON result with a JSON parser: a
 # "warnings" member that is not an array of strings, or a code anywhere else in the result, fails the
 # case on either side. These lines start with "WARN-" on purpose: warning parity is not a verdict class
@@ -130,6 +132,7 @@ run_warn_case() {
   rsout="$("$BIN" "$@" 2>/dev/null)"; re=$?
   warn_agree "$pyout" "$rsout"; agree=$?
   [[ "$WARN_REF" == '["'* ]] && WARN_SEEN=$((WARN_SEEN+1))
+  [[ "$WARN_REF" == *'"duplicate-id: seq '* ]] && DUP_SEEN=$((DUP_SEEN+1))
   if [[ "$pe" == "$re" && "$agree" -eq 0 ]]; then
     PASS=$((PASS+1))
     printf '  WARN-PASS  [%-13s] %-52s py=%d rust=%d  %s\n' "$cat" "$label" "$pe" "$re" "$WARN_REF"
@@ -253,6 +256,29 @@ run_warn_case "risk-class-vs-reversible + kr"            "$IND/risk-class-vs-rev
 run_warn_case "mode-vs-verdict-and-approval + kr"        "$IND/mode-vs-verdict-and-approval.json" "$KR"
 run_warn_case "compliance-deny-vs-executed + kr"         "$IND/compliance-deny-vs-executed.json" "$KR"
 run_warn_case "approval-at-after-ts + kr"                "$IND/approval-at-after-ts.json" "$KR"
+
+echo
+echo "── DUPLICATE-ID vectors (warning parity; every chain stays VALID) ──"
+# Spec §5 step 6c (scripts/gen-vectors.ts 10e): every receipt whose id equals the id of a lower seq is
+# reported as "duplicate-id: seq N", in seq order and after that seq's timestamp-order code; ids are exact
+# strings after JSON parsing. impl-py/conformance.mjs pins impl-py's exit code and expected list.
+DUP="$V/duplicate-id"
+run_warn_case "pair + kr"                                "$DUP/pair.json" "$KR"
+run_warn_case "pair, no keyring"                         "$DUP/pair.json"
+# The shuffled file stores the same receipts in the array order seq 1, seq 3, seq 0, seq 2; verifiers
+# order by chain.seq, so both must print "duplicate-id: seq 2" then "duplicate-id: seq 3".
+run_warn_case "three-holders + kr"                       "$DUP/three-holders.json" "$KR"
+run_warn_case "three-holders-shuffled + kr"              "$DUP/three-holders-shuffled.json" "$KR"
+run_warn_case "case-differs + kr"                        "$DUP/case-differs.json" "$KR"
+run_warn_case "nfc-vs-nfd + kr"                          "$DUP/nfc-vs-nfd.json" "$KR"
+run_warn_case "with-ts-backwards + kr"                   "$DUP/with-ts-backwards.json" "$KR"
+run_warn_case "escaped-spelling + kr"                    "$DUP/escaped-spelling.json" "$KR"
+# ANTI-VACUITY: six of those cases must carry an impl-py duplicate-id warning, so none seen is a broken
+# runner (the ts-order cases never carry one).
+if [[ "$DUP_SEEN" -eq 0 ]]; then
+  FAIL=$((FAIL+1)); FAILED+=("duplicate-id warning parity is vacuous (no impl-py duplicate-id warning seen)")
+  printf '  WARN-FAIL  vacuous: impl-py printed no duplicate-id warning on any duplicate-id case\n'
+fi
 
 echo
 echo "── MALFORMED vectors (strict parse / structural → MALFORMED) ──"

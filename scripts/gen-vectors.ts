@@ -504,6 +504,66 @@ write(
   ]),
 );
 
+// 10e. RECEIPT ID UNIQUENESS — WARNINGS, NEVER VERDICTS (duplicate-id/). Spec §2: every receipt of one
+//      `scope.chain` MUST carry a distinct `id`, compared as exact strings after JSON parsing (no
+//      Unicode normalization, case-sensitive). Spec §5 step 6c: a 0.1 verifier reports
+//      "duplicate-id: seq N" for every receipt whose id equals the id of a LOWER seq, in seq order and
+//      after that seq's timestamp-order code, and never refuses the chain for it. Every chain below is
+//      genuine and MUST stay VALID with the keyring in every verifier; impl-py/conformance.mjs pins the
+//      expected warnings for TS and Python, and the Go, Rust and C# runners compare theirs with Python's.
+function idChain(ids: string[], name: string, stamps?: string[]): Receipt[] {
+  const out: Receipt[] = [];
+  let prev: Receipt | null = null;
+  ids.forEach((id, i) => {
+    const r = buildReceipt(
+      { ...inputs[2]!, id, ts: stamps?.[i] ?? `2026-06-20T11:00:0${i}Z`, scope: { tenant: "store_demo", chain: `duplicate-id-${name}` } },
+      prev,
+      signer,
+    );
+    out.push(r);
+    prev = r;
+  });
+  return out;
+}
+// Two receipts share an id: the later one (seq 2) is reported, the first holder (seq 1) is not.
+const dupPair = idChain(["rcpt_dup_pair_0", "rcpt_dup_pair_1", "rcpt_dup_pair_1"], "pair");
+write("duplicate-id/pair.json", dupPair);
+// One id at seq 0, 2 and 3: every later holder is reported, in seq order ("duplicate-id: seq 2", then
+// seq 3). The second file stores the same four receipts in the array order seq 1, seq 3, seq 0, seq 2, a
+// fixed permutation that moves every receipt. Verifiers order receipts by chain.seq, so its result and
+// warnings are those of the first file; a verifier that compared ids in array order would report the
+// holders at array positions 2 and 3 (seq 0 and seq 2) instead.
+const dupTriple = idChain(["rcpt_dup_triple", "rcpt_dup_triple_other", "rcpt_dup_triple", "rcpt_dup_triple"], "triple");
+write("duplicate-id/three-holders.json", dupTriple);
+write("duplicate-id/three-holders-shuffled.json", [dupTriple[1]!, dupTriple[3]!, dupTriple[0]!, dupTriple[2]!]);
+// Ids that differ only in letter case are different ids: no warning.
+write("duplicate-id/case-differs.json", idChain(["rcpt_dup_case_A", "rcpt_dup_case_a"], "case"));
+// The same visible id in NFC (U+00E9) and in NFD (e + U+0301) is two different strings: no warning.
+// The builder refuses a non-NFC payload, so the NFD receipt (the last one, so no prevHash depends on its
+// hash) is built under the NFC id and resealed; it is genuine and signed. Producers MUST emit NFC (§4),
+// so the reference verifier also reports this receipt's non-NFC id; that warning is not compared here.
+const dupNormalization = idChain(["rcpt_dup_café", "rcpt_dup_café_nfd"], "normalization");
+dupNormalization[1]!.id = "rcpt_dup_café";
+reseal(dupNormalization[1]!, PRIVATE_KEY);
+write("duplicate-id/nfc-vs-nfd.json", dupNormalization);
+// One receipt carries both warnings: its ts goes back one second and its id repeats seq 0's. Within one
+// seq the timestamp-order code comes first ("ts-backwards: seq 1", then "duplicate-id: seq 1").
+write(
+  "duplicate-id/with-ts-backwards.json",
+  idChain(["rcpt_dup_both", "rcpt_dup_both"], "both", ["2026-06-20T11:00:01Z", "2026-06-20T11:00:00Z"]),
+);
+// Ids are compared after JSON parsing: seq 1 spells seq 0's id with a JSON escape (e for "e").
+// The hash and the signature cover the parsed value (JCS), so the receipt is genuine, and the two ids are
+// one id: "duplicate-id: seq 1".
+{
+  const escapedId = idChain(["rcpt_dup_escaped", "rcpt_dup_escaped"], "escaped");
+  const plain = '"id": "rcpt_dup_escaped"';
+  const text = JSON.stringify(escapedId, null, 2) + "\n";
+  const last = text.lastIndexOf(plain);
+  if (text.indexOf(plain) === last) throw new Error("duplicate-id/escaped-spelling: expected two id members");
+  write("duplicate-id/escaped-spelling.json", text.slice(0, last) + '"id": "rcpt_dup_\\u0065scaped"' + text.slice(last + plain.length));
+}
+
 // 11. STRICT Ed25519 KEY AND SCALAR VALIDATION (strict-ed25519/). Every verifier refuses
 //     non-canonical, small-order and mixed-order public-key encodings at key load (RFC 8032 §5.1.3
 //     decoding + small-order rejection + prime-order subgroup) and a non-canonical signature scalar

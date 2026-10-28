@@ -16,8 +16,8 @@ public readonly struct VerifyResult
 {
     public readonly VerifyStatus Status;
     public readonly string Detail;
-    /// <summary>The run's warnings in order (the timestamp-order codes, spec §5); empty on a
-    /// refusal, like the TS reference.</summary>
+    /// <summary>The run's warnings in order (the timestamp-order and duplicate-id codes, spec §5);
+    /// empty on a refusal, like the TS reference.</summary>
     public readonly IReadOnlyList<string> Warnings;
     public VerifyResult(VerifyStatus status, string detail) : this(status, detail, Array.Empty<string>()) { }
     public VerifyResult(VerifyStatus status, string detail, IReadOnlyList<string> warnings)
@@ -202,6 +202,7 @@ public static partial class Verifier
         var pinned = new Dictionary<string, string>(StringComparer.Ordinal);
         JObj? prev = null;
         var warnings = new List<string>();
+        var seenIds = new HashSet<string>(StringComparer.Ordinal); // receipt ids of the lower seqs (duplicate-id)
         for (int s = 0; s < receipts.Count; s++)
         {
             if (!bySeq.TryGetValue(s, out JObj? r))
@@ -280,6 +281,12 @@ public static partial class Verifier
                 if (order == TsOrderResult.Backwards) warnings.Add($"ts-backwards: seq {s}");
                 else if (order == TsOrderResult.NotComparable) warnings.Add($"ts-not-comparable: seq {s}");
             }
+
+            // Id uniqueness (spec §5 step 6c): a warning, never a verdict, after this seq's
+            // timestamp-order code. Exact (ordinal) string equality after JSON parsing: no Unicode
+            // normalization, case-sensitive.
+            if (!seenIds.Add(StrOf(r, "id") ?? ""))
+                warnings.Add($"duplicate-id: seq {s}");
             prev = r;
         }
 

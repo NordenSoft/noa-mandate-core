@@ -783,6 +783,7 @@ def verify_chain(receipts, keyring=None, identity_manifest=None, checkpoint=None
     pinned = {}
     prev = None
     warnings = []
+    seen_ids = set()                                 # receipt ids of the lower seqs (duplicate-id)
     for s in range(len(receipts)):
         if s not in by_seq: return "TAMPERED", f"seq gap: missing {s}"
         r = by_seq[s]
@@ -821,6 +822,13 @@ def verify_chain(receipts, keyring=None, identity_manifest=None, checkpoint=None
                 warnings.append(f"ts-backwards: seq {s}")
             elif order == TS_ORDER_NOT_COMPARABLE:
                 warnings.append(f"ts-not-comparable: seq {s}")
+        # 4f id uniqueness (spec §5 step 6c): a warning, never a verdict, after this seq's timestamp-order
+        # code. Exact string equality after JSON parsing: no Unicode normalization, case-sensitive.
+        rid = r["id"]
+        if rid in seen_ids:
+            warnings.append(f"duplicate-id: seq {s}")
+        else:
+            seen_ids.add(rid)
         prev = r
     head = by_seq[len(receipts) - 1]                 # 5 tail-truncation
     if checkpoint is not None:

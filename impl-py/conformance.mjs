@@ -650,23 +650,28 @@ expect("USAGE (--identity is the last token, no keyring) [PY verifier]", pyVerif
   stage("corpus key, not a low-order pubkey", keyOf(join(VEC, "keyring.json")), "accepted");
 }
 
-// ── ts-order/ (scripts/gen-vectors.ts 10c) and independent-fields/ (10d): WARNING PARITY on the SHARED
-// file corpus Go, Rust and C# also run. Spec §5: consecutive `ts` values are compared at full precision
+// ── ts-order/ (scripts/gen-vectors.ts 10c), independent-fields/ (10d) and duplicate-id/ (10e): WARNING
+// PARITY on the SHARED file corpus Go, Rust and C# also run. Spec §5: consecutive `ts` values are compared at full precision
 // after offset normalization; a receipt earlier than its predecessor under both readings of a second 60
 // is reported as "ts-backwards: seq N", one earlier under exactly one reading as "ts-not-comparable:
 // seq N". The independent-fields/ chains (spec §2 "Independent fields") combine fields this version
-// deliberately does not couple, so they carry no such warning. Every chain is genuine and stays VALID
-// (a warning never changes a verdict). This block pins the EXPECTED status and warnings for TS and for
-// the Python ground truth the other three runners compare theirs with. Warning parity is not a verdict
-// class, so these lines stay out
+// deliberately does not couple, so they carry no such warning. The duplicate-id/ chains (10e, spec §5
+// step 6c) repeat a receipt id: every receipt whose id equals that of a LOWER seq is reported as
+// "duplicate-id: seq N", in seq order and after that seq's timestamp-order code; ids are exact strings
+// after JSON parsing (no Unicode normalization, case-sensitive). Every chain is genuine and stays VALID
+// (a warning never changes a verdict). This block pins the EXPECTED status and the stable warning codes
+// (timestamp-order and duplicate-id) for TS and for the Python ground truth the other three runners
+// compare theirs with. Warning parity is not a verdict class, so these lines stay out
 // of the verdict-line grammar scripts/conformance-matrix.mjs reads (they never end in a "(want …)"
 // clause); a mismatch still fails this script.
 {
   const VEC = join(import.meta.dirname, "..", "conformance", "vectors");
   const KR = join(VEC, "keyring.json");
-  const tsOrderOnly = (list) =>
-    (Array.isArray(list) ? list : []).filter((w) => /^ts-(backwards|not-comparable): seq \d+$/.test(w)).join(" | ");
-  // [vector, expected ts-order warnings, keyring supplied]. Without a keyring the run is UNVERIFIED
+  const stableCodes = (list) =>
+    (Array.isArray(list) ? list : [])
+      .filter((w) => /^(?:ts-(?:backwards|not-comparable)|duplicate-id): seq \d+$/.test(w))
+      .join(" | ");
+  // [vector, expected stable warning codes, keyring supplied]. Without a keyring the run is UNVERIFIED
   // and still reports its warnings (exit 1), exactly as with one (VALID, exit 0).
   const cases = [
     ["ts-order/backwards-one-second", "ts-backwards: seq 1", true],
@@ -690,11 +695,22 @@ expect("USAGE (--identity is the last token, no keyring) [PY verifier]", pyVerif
     ["independent-fields/mode-vs-verdict-and-approval", "", true],
     ["independent-fields/compliance-deny-vs-executed", "", true],
     ["independent-fields/approval-at-after-ts", "", true],
+    ["duplicate-id/pair", "duplicate-id: seq 2", true],
+    ["duplicate-id/pair", "duplicate-id: seq 2", false],
+    // One id at seq 0, 2 and 3; the shuffled file holds the same receipts in the array order seq 1,
+    // seq 3, seq 0, seq 2, and verifiers order by chain.seq, so the expected list is the same.
+    ["duplicate-id/three-holders", "duplicate-id: seq 2 | duplicate-id: seq 3", true],
+    ["duplicate-id/three-holders-shuffled", "duplicate-id: seq 2 | duplicate-id: seq 3", true],
+    ["duplicate-id/case-differs", "", true],
+    // The reference also reports the NFD id as non-NFC (spec §4); that warning is not a stable code.
+    ["duplicate-id/nfc-vs-nfd", "", true],
+    ["duplicate-id/with-ts-backwards", "ts-backwards: seq 1 | duplicate-id: seq 1", true],
+    ["duplicate-id/escaped-spelling", "duplicate-id: seq 1", true],
   ];
   for (const [name, want, withKeyring] of cases) {
     const file = join(VEC, `${name}.json`);
     const ts = verifyChain(bytesOf(file), withKeyring ? { keyring: bytesOf(KR) } : {});
-    const tsGot = tsOrderOnly(ts.warnings);
+    const tsGot = stableCodes(ts.warnings);
     const tsOk = ts.status === (withKeyring ? "VALID" : "UNVERIFIED") && tsGot === want;
     console.log(`${tsOk ? "✓" : "✗"} WARNING PARITY ${name}${withKeyring ? "" : " (no keyring)"} [TS verifyChain]: ${ts.status}, [${tsGot}] expected [${want}]`);
     if (!tsOk) failures++;
@@ -706,7 +722,7 @@ expect("USAGE (--identity is the last token, no keyring) [PY verifier]", pyVerif
     } catch {
       pyParsed = false;
     }
-    const pyGot = pyParsed ? tsOrderOnly(pyWarnings) : "unparseable output";
+    const pyGot = pyParsed ? stableCodes(pyWarnings) : "unparseable output";
     const pyOk = py.code === (withKeyring ? 0 : 1) && pyParsed && pyGot === want;
     console.log(`${pyOk ? "✓" : "✗"} WARNING PARITY ${name}${withKeyring ? "" : " (no keyring)"} [PY verifier]: exit ${py.code}, [${pyGot}] expected [${want}]`);
     if (!pyOk) failures++;
