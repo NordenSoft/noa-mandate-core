@@ -183,7 +183,7 @@ func malformed(detail string) int {
 }
 
 // printResult prints the one-line JSON result. "warnings" is an additive key, present only when
-// the run reported a warning (the timestamp-order codes, spec §5).
+// the run reported a warning (the timestamp-order and duplicate-id codes, spec §5).
 func printResult(status, detail string, warnings []string) {
 	out := map[string]any{"status": status}
 	if detail != "" {

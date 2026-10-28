@@ -533,8 +533,8 @@ func verifyCheckpoint(cp *Value, keyring *Value) string {
 // structural validation → single chain partition + contiguous unique seq → per-receipt hash / key
 // continuity / signature / identity binding / linkage → checkpoint tail-truncation + §5b binding.
 // Any nil optional argument means "not supplied". Returns a status constant. When warnings is not
-// nil, a VALID/UNVERIFIED run appends its warnings to it in order (the timestamp-order codes,
-// spec §5); a refusal appends nothing, like the TS reference.
+// nil, a VALID/UNVERIFIED run appends its warnings to it in order (the timestamp-order and
+// duplicate-id codes, spec §5); a refusal appends nothing, like the TS reference.
 func verifyChain(receipts, keyring, identity, checkpoint *Value, warnings *[]string) string {
 	if receipts == nil || receipts.Kind != KindArray || len(receipts.Arr) == 0 {
 		return statusMalformed
@@ -611,6 +611,7 @@ func verifyChain(receipts, keyring, identity, checkpoint *Value, warnings *[]str
 	}
 
 	pinned := make(map[string]string)
+	seenIDs := make(map[string]struct{}) // receipt ids of the lower seqs (duplicate-id)
 	var prev *Value
 	var runWarnings []string
 	n := int64(len(receipts.Arr))
@@ -670,6 +671,14 @@ func verifyChain(receipts, keyring, identity, checkpoint *Value, warnings *[]str
 			case tsOrderNotComparable:
 				runWarnings = append(runWarnings, "ts-not-comparable: seq "+strconv.FormatInt(s, 10))
 			}
+		}
+		// id uniqueness (spec §5 step 6c): a warning, never a verdict, after this seq's timestamp-order
+		// code. Exact string equality after JSON parsing: no Unicode normalization, case-sensitive.
+		rid := r.get("id").Str
+		if _, dup := seenIDs[rid]; dup {
+			runWarnings = append(runWarnings, "duplicate-id: seq "+strconv.FormatInt(s, 10))
+		} else {
+			seenIDs[rid] = struct{}{}
 		}
 		prev = r
 	}

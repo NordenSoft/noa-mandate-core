@@ -1,17 +1,17 @@
-# Timestamp-order warning parity: reads one verifier's JSON result for the conformance runners.
+# Stable-warning parity: reads one verifier's JSON result for the conformance runners.
 #
 # impl-go/conformance_test.sh, impl-rust/conformance.sh and impl-csharp/conformance.sh run the Python
-# reference (impl-py/noa_verify.py) and their own verifier on the same chain, then compare the
-# timestamp-order warnings the two printed. docs/receipt-spec.md §5 makes "warnings" an additive member
-# of the CLI's JSON result: absent when the run reported no warning, otherwise an array of strings in
-# the order the run reported them. A text search for the codes cannot hold a result to that: it reads
+# reference (impl-py/noa_verify.py) and their own verifier on the same chain, then compare the stable
+# warning codes the two printed: the timestamp-order codes and the duplicate-id code.
+# docs/receipt-spec.md §5 makes "warnings" an additive member of the CLI's JSON result: absent when the
+# run reported no warning, otherwise an array of strings in the order the run reported them. A text search for the codes cannot hold a result to that: it reads
 # {"warnings": "ts-backwards: seq 1"}, or the same code under another key, exactly like the array.
 # This script parses the result and holds it to the documented shape:
 #
 #   - the output is exactly one JSON object; a duplicate key or a non-finite number is refused;
 #   - "warnings", when present, is an array of strings;
-#   - no timestamp-order code ("ts-backwards: seq N", "ts-not-comparable: seq N") stands anywhere else
-#     in the result, as a whole string or as a key.
+#   - no stable code ("ts-backwards: seq N", "ts-not-comparable: seq N", "duplicate-id: seq N") stands
+#     anywhere else in the result, as a whole string or as a key.
 #
 # Only then are the codes read from "warnings", in their order. The other warnings are not compared;
 # they differ between verifiers by design (spec §5). A longer text that merely contains a code, such
@@ -28,7 +28,7 @@ import json
 import re
 import sys
 
-CODE = re.compile(r"ts-(?:backwards|not-comparable): seq [0-9]+")
+CODE = re.compile(r"(?:ts-(?:backwards|not-comparable)|duplicate-id): seq [0-9]+")
 
 
 class ShapeError(Exception):
@@ -63,7 +63,7 @@ def _refuse_constant(name):
 
 
 def _stray_code(value, where):
-    """Where a timestamp-order code stands in value as a whole string or as a key; None if nowhere."""
+    """Where a stable warning code stands in value as a whole string or as a key; None if nowhere."""
     if isinstance(value, str):
         return where if CODE.fullmatch(value) else None
     if isinstance(value, dict):
@@ -83,7 +83,7 @@ def _stray_code(value, where):
 
 
 def codes(output):
-    """The ordered timestamp-order codes of one verifier result; ShapeError when the shape is wrong."""
+    """The ordered stable warning codes of one verifier result; ShapeError when the shape is wrong."""
     try:
         result = json.loads(output, object_pairs_hook=_unique_keys, parse_constant=_refuse_constant)
     except json.JSONDecodeError as e:
@@ -99,7 +99,7 @@ def codes(output):
     rest = {key: value for key, value in result.items() if key != "warnings"}
     stray = _stray_code(rest, "the result")
     if stray is not None:
-        raise ShapeError(f'a timestamp-order code outside "warnings", at {stray}')
+        raise ShapeError(f'a stable warning code outside "warnings", at {stray}')
     return [item for item in warnings if CODE.fullmatch(item)]
 
 
@@ -116,6 +116,9 @@ SELFTEST = [
     ("two codes in their order", TWO, ["ts-backwards: seq 1", "ts-backwards: seq 2"]),
     ("two codes in the other order", '{"status": "VALID", "warnings": ["ts-backwards: seq 2", "ts-backwards: seq 1"]}', ["ts-backwards: seq 2", "ts-backwards: seq 1"]),
     ("an indented result", '{\n  "status": "VALID",\n  "warnings": [\n    "ts-not-comparable: seq 3"\n  ]\n}', ["ts-not-comparable: seq 3"]),
+    ("a duplicate-id code after a timestamp-order code", '{"status": "VALID", "warnings": ["ts-backwards: seq 1", "duplicate-id: seq 1"]}', ["ts-backwards: seq 1", "duplicate-id: seq 1"]),
+    ("a duplicate-id code in a longer text", '{"status": "VALID", "warnings": ["duplicate-id: seq 2 (id rcpt_x)", "duplicate-id: seq 3"]}', ["duplicate-id: seq 3"]),
+    ("a duplicate-id code under another key", '{"status": "VALID", "warnings": ["duplicate-id: seq 2"], "notes": ["duplicate-id: seq 3"]}', REFUSED),
     ("another warning, and a code inside a longer detail", '{"status": "VALID", "detail": "3 receipts, chain c | ts-backwards: seq 1", "warnings": ["a caveat", "ts-backwards: seq 1"]}', ["ts-backwards: seq 1"]),
     ("a string in place of the array", '{"status": "VALID", "warnings": "ts-backwards: seq 1"}', REFUSED),
     ("an object in place of the array", '{"status": "VALID", "warnings": {"0": "ts-backwards: seq 1"}}', REFUSED),
