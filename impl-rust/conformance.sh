@@ -276,10 +276,11 @@ echo "── STRICT-BYTES vectors (opt-in --profile strict-bytes; native unchang
 SB_HELPER="$CONF/strict-bytes-cases.py"
 SB_MANIFEST="$V/strict-bytes/manifest.json"
 
-# strict_expect <label> <want exit> <want discriminator: NON_CANONICAL_BYTES | - (valid result, not asserted) | none (usage, no result)> <arg...>
+# strict_expect <label> <want exit> <want status | - (usage)> <want discriminator: NON_CANONICAL_BYTES | - (not asserted) | none (usage, no result)> <arg...>
+# The decoded status must equal the authored one on BOTH sides (security round 1, finding 2).
 strict_expect() {
-  local label="$1" want="$2" wdisc="$3"; shift 3
-  local pyout rout pe re pyd rd ok
+  local label="$1" want="$2" wstatus="$3" wdisc="$4"; shift 4
+  local pyout rout pe re pys rs pyd rd ok
   pyout="$("$PY" "$PYV" "$@" 2>/dev/null)"; pe=$?
   rout="$("$BIN" "$@" 2>/dev/null)"; re=$?
   local names=( VALID UNVERIFIED TAMPERED MALFORMED USAGE UNTRUSTED )
@@ -291,23 +292,25 @@ strict_expect() {
     FAIL=$((FAIL+1)); FAILED+=("$label")
     printf '  FAIL  [%-13s] %-52s py=%s(%d) rust=%s(%d)\n' "strict-bytes" "$label" "$pn" "$pe" "$rn" "$re"
   fi
-  pyd="-"; rd="-"
+  pys="-"; rs="-"; pyd="-"; rd="-"
   if [[ "$wdisc" != "none" ]]; then
-    pyd="$("$PY" "$SB_HELPER" disc "$pyout")"
-    rd="$("$PY" "$SB_HELPER" disc "$rout")"
+    read -r pys pyd <<< "$("$PY" "$SB_HELPER" result "$pyout")"
+    read -r rs rd <<< "$("$PY" "$SB_HELPER" result "$rout")"
   fi
   ok=1
   [[ "$pe" == "$want" && "$re" == "$want" ]] || ok=0
-  [[ "$pyd" != "INVALID" && "$rd" != "INVALID" ]] || ok=0
+  if [[ "$wdisc" != "none" ]]; then
+    [[ "$pys" == "$wstatus" && "$rs" == "$wstatus" ]] || ok=0
+  fi
   if [[ "$wdisc" == "NON_CANONICAL_BYTES" ]]; then
     [[ "$pyd" == "$wdisc" && "$rd" == "$wdisc" ]] || ok=0
   fi
   if [[ "$ok" -eq 1 ]]; then
     PASS=$((PASS+1))
-    printf '  STRICT-PASS  want=%s %s  py=%s %s  rust=%s %s  %s\n' "$want" "$wdisc" "$pe" "$pyd" "$re" "$rd" "$label"
+    printf '  STRICT-PASS  want=%s %s %s  py=%s %s %s  rust=%s %s %s  %s\n' "$want" "$wstatus" "$wdisc" "$pe" "$pys" "$pyd" "$re" "$rs" "$rd" "$label"
   else
     FAIL=$((FAIL+1)); FAILED+=("strict expectation: $label")
-    printf '  STRICT-FAIL  want=%s %s  py=%s %s  rust=%s %s  %s\n' "$want" "$wdisc" "$pe" "$pyd" "$re" "$rd" "$label"
+    printf '  STRICT-FAIL  want=%s %s %s  py=%s %s %s  rust=%s %s %s  %s\n' "$want" "$wstatus" "$wdisc" "$pe" "$pys" "$pyd" "$re" "$rs" "$rd" "$label"
   fi
 }
 
@@ -315,19 +318,19 @@ if ! SB_CASES="$("$PY" "$SB_HELPER" list "$SB_MANIFEST")"; then
   FAIL=$((FAIL+1)); FAILED+=("strict-bytes corpus unreadable")
   printf '  STRICT-FAIL  corpus: %s is missing, altered or not the authored case set\n' "$SB_MANIFEST"
 else
-  while IFS=$'\t' read -r sb_name sb_file sb_kr sb_native sb_strict sb_disc; do
+  while IFS=$'\t' read -r sb_name sb_file sb_kr sb_native sb_native_status sb_strict sb_strict_status sb_disc; do
     [[ -n "$sb_name" ]] || continue
-    strict_expect "strict-bytes/$sb_name --profile strict-bytes + kr" "$sb_strict" "$sb_disc" --profile strict-bytes "$sb_file" "$sb_kr"
+    strict_expect "strict-bytes/$sb_name --profile strict-bytes + kr" "$sb_strict" "$sb_strict_status" "$sb_disc" --profile strict-bytes "$sb_file" "$sb_kr"
     if [[ "$sb_native" != "-" ]]; then
-      strict_expect "strict-bytes/$sb_name native + kr" "$sb_native" "-" "$sb_file" "$sb_kr"
+      strict_expect "strict-bytes/$sb_name native + kr" "$sb_native" "$sb_native_status" "-" "$sb_file" "$sb_kr"
     fi
   done <<< "$SB_CASES"
 fi
 SB_CANON="$V/strict-bytes/canonical.json"
-strict_expect "strict-bytes usage: --profile without a value" 4 none "$SB_CANON" --profile
-strict_expect "strict-bytes usage: unknown --profile value"   4 none --profile strict "$SB_CANON"
-strict_expect "strict-bytes usage: repeated --profile"        4 none --profile native --profile strict-bytes "$SB_CANON"
-strict_expect "strict-bytes usage: with --purpose historical" 4 none --profile strict-bytes --purpose historical "$SB_CANON" "$KR"
+strict_expect "strict-bytes usage: --profile without a value" 4 - none "$SB_CANON" --profile
+strict_expect "strict-bytes usage: unknown --profile value"   4 - none --profile strict "$SB_CANON"
+strict_expect "strict-bytes usage: repeated --profile"        4 - none --profile native --profile strict-bytes "$SB_CANON"
+strict_expect "strict-bytes usage: with --purpose historical" 4 - none --profile strict-bytes --purpose historical "$SB_CANON" "$KR"
 
 echo
 echo "── EXHAUSTIVE FILE SWEEP: every *.json under conformance/{golden,vectors} run"

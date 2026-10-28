@@ -20,7 +20,13 @@ const SB = join(__dirname, "..", "..", "conformance", "vectors", "strict-bytes")
 interface Outcome { status: string; exit: number }
 interface StrictOutcome extends Outcome { discriminator: string | null }
 interface ManifestCase { name: string; file: string; sha256: string; native: Outcome | null; strict: StrictOutcome }
-interface Manifest { spec: string; keyring: string; cases: ManifestCase[] }
+interface Manifest {
+  spec: string;
+  keyring: string;
+  cases: ManifestCase[];
+  cose: Array<{ file: string; sha256: string }>;
+  jcsLiteral: { input: string; inputSha256: string; expected: string; expectedSha256: string };
+}
 
 const manifest = JSON.parse(readFileSync(join(SB, "manifest.json"), "utf8")) as Manifest;
 const keyring = readFileSync(join(SB, manifest.keyring));
@@ -40,6 +46,19 @@ test("strict-bytes manifest: exactly the authored case set, every file present w
     const digest = createHash("sha256").update(bytesOf(c.file)).digest("hex");
     assert.equal(digest, c.sha256, `${c.file}: bytes differ from the manifest digest`);
   }
+});
+
+// Security round 1, finding 3: every SHA-256 the manifest pins is recomputed here, so a pin nothing
+// reads cannot exist — the 13 chain cases (above), both COSE envelopes and both JCS literal files.
+test("strict-bytes manifest: every pinned SHA-256 (COSE envelopes, JCS literal input and expected) matches the committed bytes", () => {
+  const sha = (file: string): string => createHash("sha256").update(bytesOf(file)).digest("hex");
+  assert.deepEqual(manifest.cose.map((c) => c.file).sort(), ["canonical.cose", "extra-space.cose"]);
+  for (const c of manifest.cose) assert.equal(sha(c.file), c.sha256, `${c.file}: bytes differ from the manifest digest`);
+  const lit = manifest.jcsLiteral;
+  assert.equal(lit.input, "jcs-literal-input.json");
+  assert.equal(lit.expected, "jcs-literal-expected.json");
+  assert.equal(sha(lit.input), lit.inputSha256, `${lit.input}: bytes differ from the manifest digest`);
+  assert.equal(sha(lit.expected), lit.expectedSha256, `${lit.expected}: bytes differ from the manifest digest`);
 });
 
 for (const c of manifest.cases) {

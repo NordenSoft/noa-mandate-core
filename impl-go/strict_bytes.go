@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"unicode/utf8"
 )
 
@@ -24,24 +23,40 @@ func validProfile(p string) bool {
 // admitChainBytes decodes (strict UTF-8), strict-parses and, under strict-bytes, compares the whole
 // input once. It returns the parsed tree, or "" plus the MALFORMED detail of a refusal.
 func admitChainBytes(data []byte, profile string) (*Value, string) {
+	return admitChainBytesObserved(data, profile, nil)
+}
+
+// admitChainBytesObserved is admitChainBytes with an optional callback run after the parse and
+// before the comparison (nil in production; the snapshot test uses it to rewrite the caller's buffer
+// inside that window).
+//
+// ONE SNAPSHOT (security round 1, finding 1). The caller's slice is mutable and may be shared with
+// another goroutine, so it is read exactly once: `string(data)` copies it into an immutable string,
+// and the validity check, the parse and the comparison all read that string. A swap of the caller's
+// bytes after this line cannot pair one parse tree with different compared bytes.
+func admitChainBytesObserved(data []byte, profile string, afterParse func()) (*Value, string) {
 	if !validProfile(profile) {
 		return nil, "profile must be native or strict-bytes"
 	}
+	snapshot := string(data)
 	// The parser also rejects invalid UTF-8 inside strings; this check covers every byte, so the
 	// comparison below is never reached with a sequence the parser might have read leniently.
-	if !utf8.Valid(data) {
+	if !utf8.ValidString(snapshot) {
 		return nil, "input is not valid UTF-8"
 	}
-	v, err := parseStrict(string(data))
+	v, err := parseStrict(snapshot)
 	if err != nil {
 		return nil, err.Error()
+	}
+	if afterParse != nil {
+		afterParse()
 	}
 	if profile == profileStrictBytes {
 		canonical, err := jcs(v)
 		if err != nil {
 			return nil, nonCanonicalBytes + ": receipts: the parsed input has no JCS serialization"
 		}
-		if !bytes.Equal([]byte(canonical), data) {
+		if canonical != snapshot {
 			return nil, nonCanonicalBytes + ": receipts: the input bytes are not the UTF-8 JCS serialization of the parsed chain"
 		}
 	}

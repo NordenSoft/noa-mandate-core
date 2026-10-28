@@ -75,6 +75,34 @@ func TestStrictBytesManifestThroughVerifyChainBytes(t *testing.T) {
 	}
 }
 
+// TestStrictBytesGateReadsOneSnapshot rewrites the CALLER's buffer between the parse and the
+// comparison — the window security round 1 (finding 1) named. member-order.json and canonical.json
+// have the same length and the same parsed value, so a gate that compared the live buffer would parse
+// the non-canonical bytes, then compare the canonical bytes swapped in, and accept. Reading one
+// snapshot, it must still refuse the bytes it parsed.
+func TestStrictBytesGateReadsOneSnapshot(t *testing.T) {
+	nonCanonical, err := os.ReadFile(filepath.Join(strictBytesDir, "member-order.json"))
+	if err != nil {
+		t.Fatalf("member-order.json: %v", err)
+	}
+	canonical, err := os.ReadFile(filepath.Join(strictBytesDir, "canonical.json"))
+	if err != nil {
+		t.Fatalf("canonical.json: %v", err)
+	}
+	if len(nonCanonical) != len(canonical) || bytes.Equal(nonCanonical, canonical) {
+		t.Fatalf("fixture precondition: same length, different bytes (got %d and %d)", len(nonCanonical), len(canonical))
+	}
+	buf := bytes.Clone(nonCanonical)
+	swapped := false
+	v, detail := admitChainBytesObserved(buf, profileStrictBytes, func() { copy(buf, canonical); swapped = true })
+	if !swapped {
+		t.Fatal("the observer did not run between parse and comparison")
+	}
+	if v != nil || !strings.HasPrefix(detail, nonCanonicalBytes) {
+		t.Fatalf("a swap after the parse must not be accepted: value=%v detail=%q", v != nil, detail)
+	}
+}
+
 // TestJCSStrictBytesLiteral feeds the shared authored input through this port's own strict parser and
 // canonicalizer and requires the authored expected bytes exactly.
 func TestJCSStrictBytesLiteral(t *testing.T) {

@@ -93,6 +93,23 @@ Expect(accepted, "key load accepts the corpus key (keyring.json)");
     Expect(same, "JCS literal bytes match the authored expected bytes (strict-bytes/jcs-literal-*.json)");
 }
 
+// One snapshot (security round 1, finding 1): rewrite the CALLER's buffer between the parse and the
+// comparison. member-order.json and canonical.json have the same length and the same parsed value, so
+// a gate comparing the live buffer would parse the non-canonical bytes, compare the swapped-in
+// canonical bytes and accept. Reading its own snapshot, the gate must still refuse.
+{
+    string sbDir = Path.Combine(vectors, "strict-bytes");
+    byte[] nonCanonical = File.ReadAllBytes(Path.Combine(sbDir, "member-order.json"));
+    byte[] canonicalBytes = File.ReadAllBytes(Path.Combine(sbDir, "canonical.json"));
+    bool precondition = nonCanonical.Length == canonicalBytes.Length && !nonCanonical.AsSpan().SequenceEqual(canonicalBytes);
+    Expect(precondition, "snapshot fixture precondition: member-order.json and canonical.json differ at equal length");
+    byte[] buf = (byte[])nonCanonical.Clone();
+    bool swapped = false;
+    JVal? admitted = StrictBytesGate.Admit(buf, StrictBytesGate.ProfileStrictBytes, () => { canonicalBytes.CopyTo(buf, 0); swapped = true; }, out string swapDetail);
+    Expect(swapped && admitted is null && swapDetail.StartsWith(StrictBytesGate.NonCanonicalBytes, StringComparison.Ordinal),
+        "strict-bytes gate reads one snapshot: a buffer swap after the parse is still refused NON_CANONICAL_BYTES");
+}
+
 Console.WriteLine($"key-load self-check: {pass}/{pass + fail} passed");
 return fail == 0 ? 0 : 1;
 

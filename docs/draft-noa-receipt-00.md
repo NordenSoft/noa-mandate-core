@@ -365,14 +365,6 @@ service. It takes an ordered set of receipts and three OPTIONAL trust inputs —
 key ring, a checkpoint, and an identity manifest — and returns exactly one
 verdict from the enumeration in Section 7.2.
 
-**Later editorial clarification; this archived draft remains historical, and docs/receipt-spec.md is the current normative authority.**
-
-The default native verifier checks parsed receipt values. VALID means that the receipt structure, derived hashes, chain linkage, signatures and applicable supplied trust checks passed. It does not attest that the received JSON file was already canonically encoded. Whitespace, member order and equivalent JSON string escapes may differ without changing this verdict. VALID does not by itself establish the truth of recorded claims or successful execution of an action.
-
-The optional strict-bytes profile is selected with --profile strict-bytes. Its byte-entry APIs accept original UTF-8 input bytes. For a chain file, the comparison unit is the complete JSON array in presented order, including every receipt member. After strict parsing and before receipt verification, the verifier MUST require the original bytes to equal the UTF-8 JCS serialization of that array. It MUST NOT strip a BOM, trim whitespace, translate line endings, normalize strings, reorder array elements or repair the input. A byte mismatch returns MALFORMED, exit 3, with discriminator NON_CANONICAL_BYTES. Equality permits ordinary verification to continue; it does not establish signature validity. This profile applies to current-use bare-chain verification and does not impose canonical encoding on auxiliary files.
-
-The status table in Section 7.2 is unchanged by this profile: its mismatch is the `MALFORMED` row (exit `3`).
-
 ### 7.1 Algorithm
 
 ```

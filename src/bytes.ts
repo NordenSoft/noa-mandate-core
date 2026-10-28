@@ -207,6 +207,12 @@ export type BytesParseResult =
  * substitution) and BOM-preserving (nothing stripped), so it is injective on the inputs it accepts,
  * and the canonical text is well-formed Unicode, whose UTF-8 encoding is unique. Text equality
  * therefore holds exactly when `bytes == UTF8(canonical)`.
+ *
+ * ONE READ OF THE CALLER'S BUFFER (security round 1, finding 1). A `Uint8Array` is mutable, so its
+ * CONTENT is read exactly once, by the decode; the parse and the caller's comparison both use the
+ * returned `text`, an immutable string. No later step reads the buffer again, so a rewrite of the
+ * caller's bytes after the decode cannot pair one parse tree with different compared bytes. (The
+ * `byteLength` read before the decode is the size bound only, never compared.)
  */
 export function parseDocumentBytes(input: unknown, what: string): BytesParseResult {
   if (!isUint8Array(input)) {

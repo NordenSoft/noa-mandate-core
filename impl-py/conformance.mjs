@@ -905,11 +905,14 @@ expect("USAGE (--identity is the last token, no keyring) [PY verifier]", pyVerif
   const sbKeyringBytes = bytesOf(sbKeyring);
   const leads = (text, disc) => disc === null || (typeof text === "string" && text.startsWith(disc));
   const fmt = (status, disc) => (disc ? `${status} ${disc}` : status);
-  const pyDetail = (out) => {
+  // The decoded status is held to the authored one as well as the exit code (security round 1,
+  // finding 2): a result reading VALID beside exit 3 must fail here.
+  const pyResult = (out) => {
     try {
-      return JSON.parse(out).detail;
+      const v = JSON.parse(out);
+      return { status: v.status, detail: v.detail };
     } catch {
-      return undefined;
+      return { status: undefined, detail: undefined };
     }
   };
   for (const c of cases) {
@@ -919,13 +922,16 @@ expect("USAGE (--identity is the last token, no keyring) [PY verifier]", pyVerif
     const tsStrictOk = tsStrict.status === c.strict.status && leads(tsStrict.reason, disc);
     line(`strict-bytes/${c.name} with --profile strict-bytes [TS verifyChain]`, tsStrictOk, tsStrictOk ? fmt(tsStrict.status, disc) : tsStrict.status, fmt(c.strict.status, disc));
     const py = pyVerify(["--profile", "strict-bytes", file, sbKeyring]);
-    const pyOk = py.code === c.strict.exit && leads(pyDetail(py.out), disc);
-    line(`strict-bytes/${c.name} with --profile strict-bytes [PY verifier]`, pyOk, pyOk ? fmt(`exit ${py.code}`, disc) : `exit ${py.code}`, fmt(`exit ${c.strict.exit}`, disc));
+    const pyR = pyResult(py.out);
+    const pyOk = py.code === c.strict.exit && pyR.status === c.strict.status && leads(pyR.detail, disc);
+    line(`strict-bytes/${c.name} with --profile strict-bytes [PY verifier]`, pyOk, fmt(`exit ${py.code} ${pyR.status}`, pyOk ? disc : null), fmt(`exit ${c.strict.exit} ${c.strict.status}`, disc));
     if (c.native === null) continue; // transport-invalid input: per-language native outcome preserved, not asserted
     const tsNative = verifyChain(bytesOf(file), { keyring: sbKeyringBytes });
     line(`strict-bytes/${c.name} native profile [TS verifyChain]`, tsNative.status === c.native.status, tsNative.status, c.native.status);
     const pyNative = pyVerify([file, sbKeyring]);
-    line(`strict-bytes/${c.name} native profile [PY verifier]`, pyNative.code === c.native.exit, `exit ${pyNative.code}`, `exit ${c.native.exit}`);
+    const pyNativeStatus = pyResult(pyNative.out).status;
+    const pyNativeOk = pyNative.code === c.native.exit && pyNativeStatus === c.native.status;
+    line(`strict-bytes/${c.name} native profile [PY verifier]`, pyNativeOk, `exit ${pyNative.code} ${pyNativeStatus}`, `exit ${c.native.exit} ${c.native.status}`);
   }
 
   const canonicalFile = join(SBD, "canonical.json");

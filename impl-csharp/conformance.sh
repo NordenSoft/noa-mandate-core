@@ -260,9 +260,10 @@ echo "== conformance/vectors/strict-bytes (opt-in --profile strict-bytes; native
 SB_HELPER="conformance/strict-bytes-cases.py"
 SB_MANIFEST="conformance/vectors/strict-bytes/manifest.json"
 
-# strict_expect <label> <want exit> <want discriminator: NON_CANONICAL_BYTES | - (valid result, not asserted) | none (usage, no result)> <arg...>
+# strict_expect <label> <want exit> <want status | - (usage)> <want discriminator: NON_CANONICAL_BYTES | - (not asserted) | none (usage, no result)> <arg...>
+# The decoded status must equal the authored one on BOTH sides (security round 1, finding 2).
 strict_expect() {
-  label="$1"; want="$2"; wdisc="$3"; shift 3
+  label="$1"; want="$2"; wstatus="$3"; wdisc="$4"; shift 4
   py_out="$(python3 "$PY" "$@" 2>/dev/null)"; py_code=$?
   cs_out="$(dotnet "$EXE" "$@" 2>/dev/null)"; cs_code=$?
   TOTAL=$((TOTAL+1))
@@ -273,24 +274,26 @@ strict_expect() {
     FAIL=$((FAIL+1))
     printf '  FAIL  py=%s cs=%s  %s\n' "$py_code" "$cs_code" "$label"
   fi
-  py_d="-"; cs_d="-"
+  py_s="-"; cs_s="-"; py_d="-"; cs_d="-"
   if [ "$wdisc" != "none" ]; then
-    py_d="$(python3 "$SB_HELPER" disc "$py_out")"
-    cs_d="$(python3 "$SB_HELPER" disc "$cs_out")"
+    read -r py_s py_d <<< "$(python3 "$SB_HELPER" result "$py_out")"
+    read -r cs_s cs_d <<< "$(python3 "$SB_HELPER" result "$cs_out")"
   fi
   ok=1
   [ "$py_code" = "$want" ] && [ "$cs_code" = "$want" ] || ok=0
-  [ "$py_d" != "INVALID" ] && [ "$cs_d" != "INVALID" ] || ok=0
+  if [ "$wdisc" != "none" ]; then
+    [ "$py_s" = "$wstatus" ] && [ "$cs_s" = "$wstatus" ] || ok=0
+  fi
   if [ "$wdisc" = "NON_CANONICAL_BYTES" ]; then
     [ "$py_d" = "$wdisc" ] && [ "$cs_d" = "$wdisc" ] || ok=0
   fi
   TOTAL=$((TOTAL+1))
   if [ "$ok" -eq 1 ]; then
     PASS=$((PASS+1))
-    printf '  STRICT-PASS  want=%s %s  py=%s %s  cs=%s %s  %s\n' "$want" "$wdisc" "$py_code" "$py_d" "$cs_code" "$cs_d" "$label"
+    printf '  STRICT-PASS  want=%s %s %s  py=%s %s %s  cs=%s %s %s  %s\n' "$want" "$wstatus" "$wdisc" "$py_code" "$py_s" "$py_d" "$cs_code" "$cs_s" "$cs_d" "$label"
   else
     FAIL=$((FAIL+1))
-    printf '  STRICT-FAIL  want=%s %s  py=%s %s  cs=%s %s  %s\n' "$want" "$wdisc" "$py_code" "$py_d" "$cs_code" "$cs_d" "$label"
+    printf '  STRICT-FAIL  want=%s %s %s  py=%s %s %s  cs=%s %s %s  %s\n' "$want" "$wstatus" "$wdisc" "$py_code" "$py_s" "$py_d" "$cs_code" "$cs_s" "$cs_d" "$label"
   fi
 }
 
@@ -298,19 +301,19 @@ if ! SB_CASES="$(python3 "$SB_HELPER" list "$SB_MANIFEST")"; then
   TOTAL=$((TOTAL+1)); FAIL=$((FAIL+1))
   printf '  STRICT-FAIL  corpus: %s is missing, altered or not the authored case set\n' "$SB_MANIFEST"
 else
-  while IFS=$'\t' read -r sb_name sb_file sb_kr sb_native sb_strict sb_disc; do
+  while IFS=$'\t' read -r sb_name sb_file sb_kr sb_native sb_native_status sb_strict sb_strict_status sb_disc; do
     [ -n "$sb_name" ] || continue
-    strict_expect "strict-bytes/$sb_name --profile strict-bytes + kr" "$sb_strict" "$sb_disc" --profile strict-bytes "$sb_file" "$sb_kr"
+    strict_expect "strict-bytes/$sb_name --profile strict-bytes + kr" "$sb_strict" "$sb_strict_status" "$sb_disc" --profile strict-bytes "$sb_file" "$sb_kr"
     if [ "$sb_native" != "-" ]; then
-      strict_expect "strict-bytes/$sb_name native + kr" "$sb_native" "-" "$sb_file" "$sb_kr"
+      strict_expect "strict-bytes/$sb_name native + kr" "$sb_native" "$sb_native_status" "-" "$sb_file" "$sb_kr"
     fi
   done <<< "$SB_CASES"
 fi
 SB_CANON="conformance/vectors/strict-bytes/canonical.json"
-strict_expect "strict-bytes usage: --profile without a value" 4 none "$SB_CANON" --profile
-strict_expect "strict-bytes usage: unknown --profile value"   4 none --profile strict "$SB_CANON"
-strict_expect "strict-bytes usage: repeated --profile"        4 none --profile native --profile strict-bytes "$SB_CANON"
-strict_expect "strict-bytes usage: with --purpose historical" 4 none --profile strict-bytes --purpose historical "$SB_CANON" "$KR"
+strict_expect "strict-bytes usage: --profile without a value" 4 - none "$SB_CANON" --profile
+strict_expect "strict-bytes usage: unknown --profile value"   4 - none --profile strict "$SB_CANON"
+strict_expect "strict-bytes usage: repeated --profile"        4 - none --profile native --profile strict-bytes "$SB_CANON"
+strict_expect "strict-bytes usage: with --purpose historical" 4 - none --profile strict-bytes --purpose historical "$SB_CANON" "$KR"
 
 echo
 echo "excluded (non-receipt fixtures — consumed as auxiliary inputs, not standalone receipt chains):"

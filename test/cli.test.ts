@@ -54,7 +54,14 @@ function runOut(args: string[]): { code: number; stdout: string } {
 test("CLI --profile strict-bytes: every manifest case exits as authored; native output is unchanged", () => {
   const manifest = JSON.parse(readFileSync(join(SB, "manifest.json"), "utf8")) as {
     keyring: string;
-    cases: Array<{ file: string; native: { exit: number } | null; strict: { exit: number; discriminator: string | null } }>;
+    cases: Array<{ file: string; native: { status: string; exit: number } | null; strict: { status: string; exit: number; discriminator: string | null } }>;
+  };
+  const statusOf = (stdout: string): string | undefined => {
+    try {
+      return (JSON.parse(stdout) as { status?: string }).status;
+    } catch {
+      return undefined;
+    }
   };
   assert.equal(manifest.cases.length, 13, "the strict-bytes corpus has 13 authored cases");
   const kr = join(SB, manifest.keyring);
@@ -62,6 +69,7 @@ test("CLI --profile strict-bytes: every manifest case exits as authored; native 
     const file = join(SB, c.file);
     const strict = runOut(["verify", file, "--keyring", kr, "--profile", "strict-bytes"]);
     assert.equal(strict.code, c.strict.exit, `${c.file} strict: ${strict.stdout}`);
+    assert.equal(statusOf(strict.stdout), c.strict.status, `${c.file} strict status`);
     if (c.strict.discriminator !== null) {
       const reason = (JSON.parse(strict.stdout) as { reason?: string }).reason ?? "";
       assert.ok(reason.startsWith(c.strict.discriminator), `${c.file} strict reason: ${reason}`);
@@ -70,7 +78,10 @@ test("CLI --profile strict-bytes: every manifest case exits as authored; native 
     const explicit = runOut(["verify", file, "--keyring", kr, "--profile", "native"]);
     assert.equal(explicit.code, omitted.code, `${c.file}: --profile native must equal the default`);
     assert.equal(explicit.stdout, omitted.stdout, `${c.file}: --profile native must print the default output`);
-    if (c.native !== null) assert.equal(omitted.code, c.native.exit, `${c.file} native: ${omitted.stdout}`);
+    if (c.native !== null) {
+      assert.equal(omitted.code, c.native.exit, `${c.file} native: ${omitted.stdout}`);
+      assert.equal(statusOf(omitted.stdout), c.native.status, `${c.file} native status`);
+    }
   }
 });
 
