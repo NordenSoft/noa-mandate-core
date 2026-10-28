@@ -18,6 +18,9 @@
 
   <ItemGroup>
     <Compile Include="../src/Crypto.cs" Link="Crypto.cs" />
+    <!-- The CLI's own parser and canonicalizer, for the shared JCS literal-bytes pin. -->
+    <Compile Include="../src/Json.cs" Link="Json.cs" />
+    <Compile Include="../src/Jcs.cs" Link="Jcs.cs" />
     <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.1" />
   </ItemGroup>
 

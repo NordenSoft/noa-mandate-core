@@ -1,0 +1,217 @@
+{
+  "spec": "noa.strict-bytes-vectors/0.1",
+  "keyring": "../keyring.json",
+  "note": "Authored expectations for the opt-in strict-bytes verifier profile; never derived from verifier output. native = the default profile with the keyring; strict = --profile strict-bytes with the keyring. native null = transport-invalid input whose existing per-language native outcome is preserved and not asserted. strict.discriminator NON_CANONICAL_BYTES must lead the TS reason / the port's detail; null = not asserted.",
+  "cases": [
+    {
+      "name": "canonical",
+      "file": "canonical.json",
+      "sha256": "f79e9af3d1880c2d6552d345a9d3c27359d137d652a3c3b0626df3d87874ba14",
+      "construction": "UTF8(JCS(chain))",
+      "native": {
+        "status": "VALID",
+        "exit": 0
+      },
+      "strict": {
+        "status": "VALID",
+        "exit": 0,
+        "discriminator": null
+      }
+    },
+    {
+      "name": "extra-space",
+      "file": "extra-space.json",
+      "sha256": "f1a4978299680eab5efe6b82de5ea4bc5093850393d27a40657d9ef9df9664d4",
+      "construction": "U+0020 after the first array separator between receipts",
+      "native": {
+        "status": "VALID",
+        "exit": 0
+      },
+      "strict": {
+        "status": "MALFORMED",
+        "exit": 3,
+        "discriminator": "NON_CANONICAL_BYTES"
+      }
+    },
+    {
+      "name": "member-order",
+      "file": "member-order.json",
+      "sha256": "d0bb31ebe0316d5d6c8e1a952c117a70a8a99aa18934aa03f42fbebd8269f36b",
+      "construction": "the genesis receipt's action/agent members swapped, member bytes kept",
+      "native": {
+        "status": "VALID",
+        "exit": 0
+      },
+      "strict": {
+        "status": "MALFORMED",
+        "exit": 3,
+        "discriminator": "NON_CANONICAL_BYTES"
+      }
+    },
+    {
+      "name": "escaped-string",
+      "file": "escaped-string.json",
+      "sha256": "b1060ec4595a1eb3b637ca2102e358898df48b3e7421844211134cada0d19226",
+      "construction": "the first \"noa.receipt/0.1\" written as \"\\u006eoa.receipt/0.1\"",
+      "native": {
+        "status": "VALID",
+        "exit": 0
+      },
+      "strict": {
+        "status": "MALFORMED",
+        "exit": 3,
+        "discriminator": "NON_CANONICAL_BYTES"
+      }
+    },
+    {
+      "name": "trailing-lf",
+      "file": "trailing-lf.json",
+      "sha256": "693d9b7a5664771cbe73620fe05e68e7e218450fc7b629efcc646d8571092533",
+      "construction": "canonical bytes followed by 0A",
+      "native": {
+        "status": "VALID",
+        "exit": 0
+      },
+      "strict": {
+        "status": "MALFORMED",
+        "exit": 3,
+        "discriminator": "NON_CANONICAL_BYTES"
+      }
+    },
+    {
+      "name": "pretty",
+      "file": "pretty.json",
+      "sha256": "b7d919f4fa432ecfb704bb00ccd3c3b9a78aedf5668a7d4e39cece40af268990",
+      "construction": "two-space pretty serialization of parse(canonical), no final newline",
+      "native": {
+        "status": "VALID",
+        "exit": 0
+      },
+      "strict": {
+        "status": "MALFORMED",
+        "exit": 3,
+        "discriminator": "NON_CANONICAL_BYTES"
+      }
+    },
+    {
+      "name": "leading-space",
+      "file": "leading-space.json",
+      "sha256": "79467248da22cc5a9e0ce401c1dc8c3af01ab0f326827434ba375617136ad714",
+      "construction": "guard: one U+0020 before the canonical bytes",
+      "native": {
+        "status": "VALID",
+        "exit": 0
+      },
+      "strict": {
+        "status": "MALFORMED",
+        "exit": 3,
+        "discriminator": "NON_CANONICAL_BYTES"
+      }
+    },
+    {
+      "name": "trailing-crlf",
+      "file": "trailing-crlf.json",
+      "sha256": "5f5c2fa6aef628659d7ef8ba5e120dcfe6add589435f8e09a1d410994a537ab8",
+      "construction": "guard: canonical bytes followed by 0D 0A",
+      "native": {
+        "status": "VALID",
+        "exit": 0
+      },
+      "strict": {
+        "status": "MALFORMED",
+        "exit": 3,
+        "discriminator": "NON_CANONICAL_BYTES"
+      }
+    },
+    {
+      "name": "bom",
+      "file": "bom.json",
+      "sha256": "0956200589eaa4b52b99161092c500f49e18bd3c87ea27e27b7370600185e75b",
+      "construction": "guard: EF BB BF before the canonical bytes (refused at input admission)",
+      "native": null,
+      "strict": {
+        "status": "MALFORMED",
+        "exit": 3,
+        "discriminator": null
+      }
+    },
+    {
+      "name": "invalid-utf8",
+      "file": "invalid-utf8.json",
+      "sha256": "7d6cb4524730f66af88cc3877a20c70a74f759dafaaac8313f71a749ae02e0cb",
+      "construction": "guard: canonical bytes with the first byte of the genesis agent.id replaced by FF (refused at input admission)",
+      "native": null,
+      "strict": {
+        "status": "MALFORMED",
+        "exit": 3,
+        "discriminator": null
+      }
+    },
+    {
+      "name": "reversed-order",
+      "file": "reversed-order.json",
+      "sha256": "02ada7a41dceb6e05b3b98104b4141aa7b961de90b69f77832c92911de22022b",
+      "construction": "guard: UTF8(JCS([seq 2, seq 1, seq 0])) — canonical in presented order; the verifier orders by seq afterwards",
+      "native": {
+        "status": "VALID",
+        "exit": 0
+      },
+      "strict": {
+        "status": "VALID",
+        "exit": 0,
+        "discriminator": null
+      }
+    },
+    {
+      "name": "wrong-signature-canonical",
+      "file": "wrong-signature-canonical.json",
+      "sha256": "3d66279ab4232c49fb7a84c3968daecc697b3d050d12a7eef7aea301a07c4f84",
+      "construction": "guard: UTF8(JCS(attack/wrong-signature chain)) — canonical bytes, bad signature",
+      "native": {
+        "status": "TAMPERED",
+        "exit": 2
+      },
+      "strict": {
+        "status": "TAMPERED",
+        "exit": 2,
+        "discriminator": null
+      }
+    },
+    {
+      "name": "wrong-signature-noncanonical",
+      "file": "wrong-signature-noncanonical.json",
+      "sha256": "9584527dede36f2c2548401f79d6b8bca586dff25aa847f0b83e45496108983c",
+      "construction": "guard: the wrong-signature chain with the extra-space mutation — the byte mismatch outranks the bad signature",
+      "native": {
+        "status": "TAMPERED",
+        "exit": 2
+      },
+      "strict": {
+        "status": "MALFORMED",
+        "exit": 3,
+        "discriminator": "NON_CANONICAL_BYTES"
+      }
+    }
+  ],
+  "cose": [
+    {
+      "file": "canonical.cose",
+      "sha256": "8dbaae7dacec471a9475ab164f2031490fd9a6521d7081c50deaf208c2c002a0",
+      "coseSign1Verify": true,
+      "receiptFromCose": true
+    },
+    {
+      "file": "extra-space.cose",
+      "sha256": "effcfcc5c29f4d01aa4f87f5d066753af0d4ad873af0ee1c3eacb6f9870e1de8",
+      "coseSign1Verify": true,
+      "receiptFromCose": false
+    }
+  ],
+  "coseCoverage": "TypeScript only (test/cose/cose.test.ts); Python, Go, Rust and C# have no COSE implementation — unavailable, not passed.",
+  "jcsLiteral": {
+    "input": "jcs-literal-input.json",
+    "inputSha256": "81702dcf44ea075e19011b5b31da67e4aa68874fdbadb59172f7777a28213d96",
+    "expected": "jcs-literal-expected.json",
+    "expectedSha256": "e257b5696b651b24c3660aba3d870fd6ac5d394832215c8480667d45ebcc06aa"
+  }
+}

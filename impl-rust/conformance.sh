@@ -266,6 +266,70 @@ run_case valid       "valid-chain + keyring (VALID)"             "$V/valid-chain
 run_case valid       "valid-chain, no keyring (UNVERIFIED)"      "$V/valid-chain.json"
 
 echo
+echo "── STRICT-BYTES vectors (opt-in --profile strict-bytes; native unchanged) ──"
+# scripts/gen-vectors.ts section 12. Each case runs BOTH verifiers with identical arguments: a parity
+# line (PASS/FAIL, counted by scripts/conformance-matrix.mjs as class strict-bytes) and a STRICT- line
+# that holds BOTH exit codes to the manifest's AUTHORED expectation and, where one is pinned, BOTH
+# results' detail to the NON_CANONICAL_BYTES discriminator — fixed expectations, not parity alone.
+# conformance/strict-bytes-cases.py refuses a missing manifest, a missing or altered file and an absent
+# case, which fails this run instead of passing on zero cases.
+SB_HELPER="$CONF/strict-bytes-cases.py"
+SB_MANIFEST="$V/strict-bytes/manifest.json"
+
+# strict_expect <label> <want exit> <want discriminator: NON_CANONICAL_BYTES | - (valid result, not asserted) | none (usage, no result)> <arg...>
+strict_expect() {
+  local label="$1" want="$2" wdisc="$3"; shift 3
+  local pyout rout pe re pyd rd ok
+  pyout="$("$PY" "$PYV" "$@" 2>/dev/null)"; pe=$?
+  rout="$("$BIN" "$@" 2>/dev/null)"; re=$?
+  local names=( VALID UNVERIFIED TAMPERED MALFORMED USAGE UNTRUSTED )
+  local pn="${names[$pe]:-EXIT$pe}"; local rn="${names[$re]:-EXIT$re}"
+  if [[ "$pe" == "$re" ]]; then
+    PASS=$((PASS+1))
+    printf '  PASS  [%-13s] %-52s py=%s(%d) rust=%s(%d)\n' "strict-bytes" "$label" "$pn" "$pe" "$rn" "$re"
+  else
+    FAIL=$((FAIL+1)); FAILED+=("$label")
+    printf '  FAIL  [%-13s] %-52s py=%s(%d) rust=%s(%d)\n' "strict-bytes" "$label" "$pn" "$pe" "$rn" "$re"
+  fi
+  pyd="-"; rd="-"
+  if [[ "$wdisc" != "none" ]]; then
+    pyd="$("$PY" "$SB_HELPER" disc "$pyout")"
+    rd="$("$PY" "$SB_HELPER" disc "$rout")"
+  fi
+  ok=1
+  [[ "$pe" == "$want" && "$re" == "$want" ]] || ok=0
+  [[ "$pyd" != "INVALID" && "$rd" != "INVALID" ]] || ok=0
+  if [[ "$wdisc" == "NON_CANONICAL_BYTES" ]]; then
+    [[ "$pyd" == "$wdisc" && "$rd" == "$wdisc" ]] || ok=0
+  fi
+  if [[ "$ok" -eq 1 ]]; then
+    PASS=$((PASS+1))
+    printf '  STRICT-PASS  want=%s %s  py=%s %s  rust=%s %s  %s\n' "$want" "$wdisc" "$pe" "$pyd" "$re" "$rd" "$label"
+  else
+    FAIL=$((FAIL+1)); FAILED+=("strict expectation: $label")
+    printf '  STRICT-FAIL  want=%s %s  py=%s %s  rust=%s %s  %s\n' "$want" "$wdisc" "$pe" "$pyd" "$re" "$rd" "$label"
+  fi
+}
+
+if ! SB_CASES="$("$PY" "$SB_HELPER" list "$SB_MANIFEST")"; then
+  FAIL=$((FAIL+1)); FAILED+=("strict-bytes corpus unreadable")
+  printf '  STRICT-FAIL  corpus: %s is missing, altered or not the authored case set\n' "$SB_MANIFEST"
+else
+  while IFS=$'\t' read -r sb_name sb_file sb_kr sb_native sb_strict sb_disc; do
+    [[ -n "$sb_name" ]] || continue
+    strict_expect "strict-bytes/$sb_name --profile strict-bytes + kr" "$sb_strict" "$sb_disc" --profile strict-bytes "$sb_file" "$sb_kr"
+    if [[ "$sb_native" != "-" ]]; then
+      strict_expect "strict-bytes/$sb_name native + kr" "$sb_native" "-" "$sb_file" "$sb_kr"
+    fi
+  done <<< "$SB_CASES"
+fi
+SB_CANON="$V/strict-bytes/canonical.json"
+strict_expect "strict-bytes usage: --profile without a value" 4 none "$SB_CANON" --profile
+strict_expect "strict-bytes usage: unknown --profile value"   4 none --profile strict "$SB_CANON"
+strict_expect "strict-bytes usage: repeated --profile"        4 none --profile native --profile strict-bytes "$SB_CANON"
+strict_expect "strict-bytes usage: with --purpose historical" 4 none --profile strict-bytes --purpose historical "$SB_CANON" "$KR"
+
+echo
 echo "── EXHAUSTIVE FILE SWEEP: every *.json under conformance/{golden,vectors} run"
 echo "   identically (bare, no keyring) on BOTH — nothing silently skipped ──"
 SWEEP_PASS=0; SWEEP_FAIL=0

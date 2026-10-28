@@ -72,6 +72,27 @@ try { Crypto.SpkiToRaw(corpusKey); accepted = true; }
 catch (FormatException) { accepted = false; }
 Expect(accepted, "key load accepts the corpus key (keyring.json)");
 
+// JCS literal bytes (conformance/vectors/strict-bytes/jcs-literal-*.json): the CLI's own StrictJson
+// parser and Jcs canonicalizer must turn the authored input into the authored expected bytes — the
+// astral key before U+E000, the short and lowercase \u00XX escapes, a literal DEL and "/", literal
+// non-ASCII, decomposed text kept decomposed, and the safe-integer bounds.
+{
+    var strictUtf8 = new System.Text.UTF8Encoding(false, true);
+    string sbDir = Path.Combine(vectors, "strict-bytes");
+    bool same;
+    try
+    {
+        string input = strictUtf8.GetString(File.ReadAllBytes(Path.Combine(sbDir, "jcs-literal-input.json")));
+        byte[] expected = File.ReadAllBytes(Path.Combine(sbDir, "jcs-literal-expected.json"));
+        same = strictUtf8.GetBytes(Jcs.Canonicalize(StrictJson.Parse(input))).AsSpan().SequenceEqual(expected.AsSpan());
+    }
+    catch (Exception)
+    {
+        same = false;
+    }
+    Expect(same, "JCS literal bytes match the authored expected bytes (strict-bytes/jcs-literal-*.json)");
+}
+
 Console.WriteLine($"key-load self-check: {pass}/{pass + fail} passed");
 return fail == 0 ? 0 : 1;
 

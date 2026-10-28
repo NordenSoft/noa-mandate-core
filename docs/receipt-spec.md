@@ -212,6 +212,8 @@ cannot disagree.
 Anyone — operator, auditor, receiving service, regulator — verifies a chain **offline**, no
 NOA service, via `noa verify` (or the library `verifyChain`):
 
+The default native verifier checks parsed receipt values. VALID means that the receipt structure, derived hashes, chain linkage, signatures and applicable supplied trust checks passed. It does not attest that the received JSON file was already canonically encoded. Whitespace, member order and equivalent JSON string escapes may differ without changing this verdict. VALID does not by itself establish the truth of recorded claims or successful execution of an action.
+
 ```
 verify(receipts, { keyring?, checkpoint?, identityManifest? }):
   1. structural validate each receipt (strict; reject unknown fields;   -> else MALFORMED
@@ -256,6 +258,18 @@ by design: without a keyring, signatures are reported UNVERIFIED, never VALID; w
 checkpoint, the reference verifier emits an explicit tail-truncation warning; and it always emits a
 fork/equivocation caveat (an offline verifier sees only the branch it was given). Every verifier
 reports the timestamp-order warnings (see "Timestamp-order warnings" below).
+
+### Optional strict-bytes profile (`--profile strict-bytes`)
+
+The optional strict-bytes profile is selected with --profile strict-bytes. Its byte-entry APIs accept original UTF-8 input bytes. For a chain file, the comparison unit is the complete JSON array in presented order, including every receipt member. After strict parsing and before receipt verification, the verifier MUST require the original bytes to equal the UTF-8 JCS serialization of that array. It MUST NOT strip a BOM, trim whitespace, translate line endings, normalize strings, reorder array elements or repair the input. A byte mismatch returns MALFORMED, exit 3, with discriminator NON_CANONICAL_BYTES. Equality permits ordinary verification to continue; it does not establish signature validity. This profile applies to current-use bare-chain verification and does not impose canonical encoding on auxiliary files.
+
+The profile adds no verdict and no exit code: `NON_CANONICAL_BYTES` leads the TypeScript `reason` and the
+`detail` of the Python, Go, Rust and C# verifiers. Omitting `--profile`, or `--profile native`, is the
+default run above, unchanged. A missing, unknown or repeated `--profile`, or `--profile strict-bytes`
+combined with `--purpose historical` or the witness flags, is a usage error (exit `4`); an API profile
+value outside `native | strict-bytes` is `MALFORMED`. The comparison is not `receiptHashInput`, which
+omits `chain.hash` and `sig.value`; it covers every byte of the file. The shared vectors are
+`conformance/vectors/strict-bytes/` (authored expectations in its `manifest.json`).
 
 **Tenant consistency (step 2b).** `scope.tenant` is optional, but within one `scope.chain` every
 present value MUST equal the last present one in `seq` order; a different present value is a

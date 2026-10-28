@@ -266,6 +266,72 @@ run_case "malformed/proto-pollution"                     "$V/malformed/proto-pol
 run_case "malformed/reversed-surrogate-pair"             "$V/malformed/reversed-surrogate-pair.json"
 run_case "malformed/trailing-garbage"                    "$V/malformed/trailing-garbage.json"
 
+echo "=== VECTORS: strict-bytes (opt-in --profile strict-bytes; native unchanged) ==="
+# scripts/gen-vectors.ts section 12. Each case runs BOTH verifiers with identical arguments twice over:
+# a parity line (PASS/FAIL, counted by scripts/conformance-matrix.mjs as class strict-bytes) and a
+# STRICT- line that holds BOTH exit codes to the manifest's AUTHORED expectation and, where one is
+# pinned, BOTH results' detail to the NON_CANONICAL_BYTES discriminator — fixed expectations, not
+# parity alone. conformance/strict-bytes-cases.py refuses a missing manifest, a missing or altered file
+# and an absent case, which fails this run instead of passing on zero cases.
+SB_HELPER="$CONF/strict-bytes-cases.py"
+SB_MANIFEST="$V/strict-bytes/manifest.json"
+
+# strict_expect <label> <want exit> <want discriminator: NON_CANONICAL_BYTES | - (valid result, not asserted) | none (usage, no result)> <arg...>
+strict_expect() {
+	local label="$1" want="$2" wdisc="$3"
+	shift 3
+	local pyout goout pyc goc pyd god ok
+	pyout="$(python3 "$PY_SCRIPT" "$@" 2>/dev/null)"
+	pyc=$?
+	goout="$("$GO_BIN" "$@" 2>/dev/null)"
+	goc=$?
+	total=$((total + 1))
+	if [ "$pyc" -eq "$goc" ]; then
+		pass=$((pass + 1))
+		printf 'PASS  py=%s go=%s  %s\n' "$pyc" "$goc" "$label"
+	else
+		fail=$((fail + 1))
+		printf 'FAIL  py=%s go=%s  %s\n' "$pyc" "$goc" "$label"
+	fi
+	pyd="-"; god="-"
+	if [ "$wdisc" != "none" ]; then
+		pyd="$(python3 "$SB_HELPER" disc "$pyout")"
+		god="$(python3 "$SB_HELPER" disc "$goout")"
+	fi
+	ok=1
+	[ "$pyc" -eq "$want" ] && [ "$goc" -eq "$want" ] || ok=0
+	[ "$pyd" != "INVALID" ] && [ "$god" != "INVALID" ] || ok=0
+	if [ "$wdisc" = "NON_CANONICAL_BYTES" ]; then
+		[ "$pyd" = "$wdisc" ] && [ "$god" = "$wdisc" ] || ok=0
+	fi
+	total=$((total + 1))
+	if [ "$ok" -eq 1 ]; then
+		pass=$((pass + 1))
+		printf 'STRICT-PASS  want=%s %s  py=%s %s  go=%s %s  %s\n' "$want" "$wdisc" "$pyc" "$pyd" "$goc" "$god" "$label"
+	else
+		fail=$((fail + 1))
+		printf 'STRICT-FAIL  want=%s %s  py=%s %s  go=%s %s  %s\n' "$want" "$wdisc" "$pyc" "$pyd" "$goc" "$god" "$label"
+	fi
+}
+
+if ! SB_CASES="$(python3 "$SB_HELPER" list "$SB_MANIFEST")"; then
+	total=$((total + 1)); fail=$((fail + 1))
+	printf 'STRICT-FAIL  corpus: %s is missing, altered or not the authored case set\n' "$SB_MANIFEST"
+else
+	while IFS=$'\t' read -r sb_name sb_file sb_kr sb_native sb_strict sb_disc; do
+		[ -n "$sb_name" ] || continue
+		strict_expect "strict-bytes/$sb_name --profile strict-bytes + keyring" "$sb_strict" "$sb_disc" --profile strict-bytes "$sb_file" "$sb_kr"
+		if [ "$sb_native" != "-" ]; then
+			strict_expect "strict-bytes/$sb_name native + keyring" "$sb_native" "-" "$sb_file" "$sb_kr"
+		fi
+	done <<< "$SB_CASES"
+fi
+SB_CANON="$V/strict-bytes/canonical.json"
+strict_expect "strict-bytes usage: --profile without a value"          4 none "$SB_CANON" --profile
+strict_expect "strict-bytes usage: unknown --profile value"            4 none --profile strict "$SB_CANON"
+strict_expect "strict-bytes usage: repeated --profile"                 4 none --profile native --profile strict-bytes "$SB_CANON"
+strict_expect "strict-bytes usage: with --purpose historical"          4 none --profile strict-bytes --purpose historical "$SB_CANON" "$V/keyring.json"
+
 echo "=== AUX fixtures fed as receipts -> both MALFORMED (non-array top-level) ==="
 run_case "aux/vectors keyring as receipts"               "$V/keyring.json"
 run_case "aux/vectors checkpoint as receipts"            "$V/checkpoint.json"

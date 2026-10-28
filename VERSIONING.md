@@ -51,6 +51,8 @@ flags, new optional verifier inputs that don't change existing receipts' verdict
 supports), or the COSE/SCITT envelope in [receipt-spec.md](docs/receipt-spec.md) §8 (a
 *different* wire encoding of the same receipt, versioned by its own COSE `alg` id).
 
+strict-bytes is an explicitly selected verifier profile. Its additional input-encoding requirement does not change native noa.receipt/0.1 acceptance, receipt fields, hash inputs or signing domains, and does not require a wire-format version change.
+
 **Where the COSE alg-id change (`-8` -> `-19`) fits — a third, independent axis:** it lives
 entirely inside the COSE_Sign1 envelope's own `alg` header ([receipt-spec.md](docs/receipt-spec.md)
 §8), not the `spec` string above and not `package.json`'s version. It broke exactly one thing: a
