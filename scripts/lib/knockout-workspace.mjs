@@ -130,6 +130,9 @@ export class KnockoutWorkspaceError extends Error {
 const MAX_CAPTURE_ATTEMPTS = 2;
 const MAX_CHILD_PROCESS_DURATION_MS = 5 * 60 * 1000;
 const MAX_ARM_WORKER_DURATION_MS = 20 * 60 * 1000;
+// Longest natural drain of the original process group after a clean leader close; it is always
+// further capped by the remaining worker timeout, which stays armed for the whole drain.
+const MAX_WORKER_PROCESS_GROUP_DRAIN_MS = 2_000;
 const MAX_CAPTURE_OPERATION_DURATION_MS = 20 * 60 * 1000;
 export const KNOCKOUT_WORKSPACE_COMMAND_TIMEOUT_LIMIT_MS =
   MAX_CHILD_PROCESS_DURATION_MS;
@@ -2202,10 +2205,23 @@ function workerProcessGroupExists(pid) {
 }
 
 async function waitForWorkerProcessGroupExit(pid, timeoutMs = 2_000) {
+  return waitForWorkerProcessGroupExitBy(
+    pid,
+    process.hrtime.bigint() + BigInt(Math.max(0, timeoutMs)) * 1_000_000n,
+  );
+}
+
+// Absolute monotonic deadline. Only a probe failing with ESRCH proves absence: a live member, a
+// zombie member that the kernel still counts, or any other probe error keeps the group present.
+// `stop` ends the wait early (reported as not absent) once another refusal has been latched.
+async function waitForWorkerProcessGroupExitBy(pid, deadlineNs, stop = () => false) {
   if (process.platform === "win32") return false;
-  const deadline = Date.now() + timeoutMs;
-  while (workerProcessGroupExists(pid) && Date.now() < deadline) await workerDelay(25);
-  return !workerProcessGroupExists(pid);
+  while (true) {
+    if (!workerProcessGroupExists(pid)) return true;
+    const remainingNs = deadlineNs - process.hrtime.bigint();
+    if (remainingNs <= 0n || stop()) return false;
+    await workerDelay(Math.max(1, Math.min(25, Number((remainingNs + 999_999n) / 1_000_000n))));
+  }
 }
 
 /**
@@ -16711,6 +16727,7 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
     capabilityDeliveryFailure = error;
     requestTermination("WORKER_CAPABILITY_DELIVERY_FAILED");
   });
+  const workerDeadlineNs = process.hrtime.bigint() + BigInt(timeoutMs) * 1_000_000n;
   const timeout = setTimeout(() => {
     timedOut = true;
     requestTermination("WORKER_TIMEOUT");
@@ -16750,26 +16767,47 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
       if (abnormalReason === null) abnormalReason = "DIRECT_CHILD_CLOSE_UNPROVEN";
     }
   } finally {
-    clearTimeout(timeout);
+    // Only a cleanly closed leader keeps the worker timeout armed, through the group drain below.
+    if (!directChildClosed || abnormalReason !== null) clearTimeout(timeout);
   }
   try { await waitWithTimeout(deliveryPromise, 1_000, `arm ${record.armId} capability delivery close`); }
   catch {
+    clearTimeout(timeout);
     capabilityDeliveryFailure ??= new Error("worker capability delivery did not close");
     try { child.stdio[3]?.destroy(); }
     catch {}
     await requestTermination("WORKER_CAPABILITY_DELIVERY_FAILED");
   }
-  if (terminationPromise !== null) await terminationPromise;
+  if (terminationPromise !== null) {
+    clearTimeout(timeout);
+    await terminationPromise;
+  }
   if (!directChildClosed && closeObservation.current() !== null) {
     closeOutcome = closeObservation.current();
     directChildClosed = true;
   }
-  if (
-    directChildClosed && workerProcessGroupExists(child.pid) &&
-    abnormalReason === null
-  ) {
-    await requestTermination("ORIGINAL_PROCESS_GROUP_SURVIVED_LEADER");
+  // Bounded natural drain: same-group descendants of a cleanly closed leader may still be exiting.
+  // The drain ends at min(MAX_WORKER_PROCESS_GROUP_DRAIN_MS, remaining worker timeout) on one
+  // absolute monotonic deadline, while the worker timeout stays armed. Only proven absence (ESRCH)
+  // lets the result proceed to validation; expiry, an uncertain probe or a live group refuses, and
+  // a refusal latched here or by the timeout is never cleared by the forced cleanup that follows.
+  let originalProcessGroupDrainMs = null;
+  if (directChildClosed && abnormalReason === null) {
+    const drainStartedNs = process.hrtime.bigint();
+    const graceDeadlineNs = drainStartedNs + BigInt(MAX_WORKER_PROCESS_GROUP_DRAIN_MS) * 1_000_000n;
+    const drained = await waitForWorkerProcessGroupExitBy(
+      child.pid,
+      graceDeadlineNs < workerDeadlineNs ? graceDeadlineNs : workerDeadlineNs,
+      () => abnormalReason !== null,
+    );
+    originalProcessGroupDrainMs = diagnosticMs(process.hrtime.bigint() - drainStartedNs);
+    clearTimeout(timeout);
+    if (!drained && abnormalReason === null) {
+      await requestTermination("ORIGINAL_PROCESS_GROUP_SURVIVED_LEADER");
+    }
   }
+  clearTimeout(timeout);
+  if (terminationPromise !== null) await terminationPromise;
   const originalProcessGroupAbsent = directChildClosed &&
     await waitForWorkerProcessGroupExit(child.pid, 250);
   heartbeatStopped = true;
@@ -17002,6 +17040,7 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
   }), {
     preparation: preparationDiagnostics,
     workerExecutionMs,
+    originalProcessGroupDrainMs,
     workerTimeoutMs: timeoutMs,
     publication: operationBudgetSnapshot(publicationBudget),
   });

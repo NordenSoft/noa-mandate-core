@@ -541,6 +541,7 @@ const workspace = await import(
     options?: { commandTimeoutMs?: number; gitExecutable?: string },
   ) => SourceSnapshot;
   knockoutWorkspaceFailureDiagnostics: (error: unknown) => WorkspaceFailureDiagnostics | null;
+  knockoutWorkspaceOperationDiagnostics: (value: unknown) => Record<string, unknown> | null;
 };
 const knockoutRunner = await import(
   pathToFileURL(path.join(repositoryRoot, "scripts/lib/knockout-runner.mjs")).href
@@ -14766,6 +14767,279 @@ test("Phase 2 worker timeout rejects active close and reaps a stubborn original 
     removeFixturePath(fixture.source);
     removeFixturePath(fixture.custody);
   }
+});
+
+// A clean worker that leaves one same-group descendant behind. The result is written first, so FD 3
+// and FD 4 are already closed and the descendant holds no supervisor pipe: the leader's close is
+// observed while the descendant is still alive. The leader exits only after the descendant is ready.
+function groupDrainWorkerSource(descendantBody: string[], beforeExit: string[] = []): string {
+  return [
+    "import { spawn } from 'node:child_process';",
+    "import fs from 'node:fs';",
+    "import { claimArmWorkerCapabilityFromFd, writeArmWorkerResultToFd } from './knockout-workspace.mjs';",
+    "const capability = claimArmWorkerCapabilityFromFd();",
+    "const wait = new Int32Array(new SharedArrayBuffer(4));",
+    "writeArmWorkerResultToFd(capability, {",
+    "  observation: { operation: 'ATTEST_ARM', role: capability.role, workspaceBound: true },",
+    "  status: 'COMPLETE',",
+    "});",
+    `const descendant = spawn(process.execPath, ['-e', ${JSON.stringify(descendantBody.join("\n"))}], {`,
+    "  detached: false,",
+    "  stdio: 'ignore',",
+    "});",
+    "fs.writeFileSync('group-drain-processes.json', JSON.stringify({ descendantPid: descendant.pid, workerPid: process.pid }));",
+    "const readyDeadline = Date.now() + 20000;",
+    "while (!fs.existsSync('group-drain-descendant.ready') && Date.now() < readyDeadline) Atomics.wait(wait, 0, 0, 5);",
+    "if (!fs.existsSync('group-drain-descendant.ready')) process.exit(3);",
+    ...beforeExit,
+    "process.exit(0);",
+  ].join("\n");
+}
+
+// The descendant records a SIGTERM (whether it then exits or ignores it) and a natural exit.
+function groupDrainDescendantBody(onSigterm: string, naturalExit: string): string[] {
+  return [
+    "const fs = require('node:fs');",
+    `process.on('SIGTERM', () => { fs.writeFileSync('group-drain-descendant.sigterm', ''); ${onSigterm} });`,
+    "fs.writeFileSync('group-drain-descendant.ready', '');",
+    naturalExit,
+  ];
+}
+
+type GroupDrainTerminal = {
+  lifecycle: {
+    directChildClosed: boolean;
+    exitCode: number | null;
+    originalProcessGroupAbsent: boolean;
+    signal: string | null;
+    timedOut: boolean;
+  };
+  reasonCode: string;
+  status: string;
+  workerResult: { accepted: boolean; status: string | null };
+};
+
+async function runGroupDrainWorkerCase(options: {
+  armId: string;
+  clock?: (callStartedMs: number) => Record<string, number>;
+  timeoutMs: number;
+  workerSource: (clockPath: string) => string;
+}): Promise<{
+  descendantAbsent: boolean;
+  drainMs: unknown;
+  naturalExit: boolean;
+  sigterm: boolean;
+  status: string;
+  terminal: GroupDrainTerminal;
+}> {
+  const fixture = minimalCaptureFixture(`phase2-${options.armId}`);
+  const clockRoot = privateTemp(`noa-kws-${options.armId}-clock-`);
+  const clockPath = path.join(clockRoot, "clock.json");
+  let captured: Capture | null = null;
+  let cooperativeLease: CooperativeSourceLease | null = null;
+  let plan: ArmPlan | null = null;
+  let arm: DisposableArm | null = null;
+  let terminal = false;
+  let workerPid: number | null = null;
+  let descendantPid: number | null = null;
+  let released: { retainedPrivateRoots: RetainedPrivateRoot[] } | null = null;
+  try {
+    const workerSha256 = installArmWorkerFixture(
+      fixture.source,
+      `install ${options.armId} worker`,
+      options.workerSource(clockPath),
+    );
+    const subject = armWorkerSubject(workerSha256);
+    captured = workspace.captureAndSealCandidate({
+      custodyRoot: fixture.custody,
+      maxAttempts: 1,
+      sourceRoot: fixture.source,
+    });
+    const sourceLease = workspace.acquireSourceLease(workspace.openKnockoutCustody(captured, {
+      maxRetainedArms: 1,
+      maxRetainedBytes: 64 * 1024 * 1024,
+    }));
+    cooperativeLease = await workspace.acquireCooperativeSourceLease(sourceLease);
+    plan = workspace.admitArmPlan(cooperativeLease, {
+      arms: [{
+        armId: options.armId,
+        role: "SELFTEST",
+        subjectSha256: armWorkerSubjectSha256(subject),
+      }],
+    });
+    arm = workspace.materializeArm(plan, options.armId);
+    if (options.clock !== undefined) {
+      fs.writeFileSync(clockPath, JSON.stringify(options.clock(Date.now())), { mode: 0o600 });
+    }
+    const result = await workspace.runArmWorker(cooperativeLease, arm, {
+      subject,
+      timeoutMs: options.timeoutMs,
+    });
+    terminal = true;
+    const processMarker = path.join(arm.workspaceRoot, "group-drain-processes.json");
+    assert.equal(fs.existsSync(processMarker), true, "group-drain worker never published its PID marker");
+    const processIds = JSON.parse(fs.readFileSync(processMarker, "utf8")) as {
+      descendantPid: number;
+      workerPid: number;
+    };
+    workerPid = processIds.workerPid;
+    descendantPid = processIds.descendantPid;
+    assert.equal(Number.isSafeInteger(descendantPid) && descendantPid > 1, true);
+    const processExitDeadline = Date.now() + 2_000;
+    let descendantAbsent = false;
+    while (!descendantAbsent && Date.now() < processExitDeadline) {
+      try { process.kill(descendantPid, 0); }
+      catch (error) { descendantAbsent = (error as NodeJS.ErrnoException).code === "ESRCH"; }
+      if (!descendantAbsent) await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const outcome = {
+      descendantAbsent,
+      drainMs: workspace.knockoutWorkspaceOperationDiagnostics(result)?.originalProcessGroupDrainMs,
+      naturalExit: fs.existsSync(path.join(arm.workspaceRoot, "group-drain-descendant.natural-exit")),
+      sigterm: fs.existsSync(path.join(arm.workspaceRoot, "group-drain-descendant.sigterm")),
+      status: result.status,
+      terminal: result.terminalPublication.terminal as unknown as GroupDrainTerminal,
+    };
+    assert.equal(result.originalProcessGroupAbsent, true);
+    released = (await workspace.closeCooperativeSourceLease(cooperativeLease)).sourceRelease;
+    cooperativeLease = null;
+    return outcome;
+  } finally {
+    if (!terminal && workerPid !== null && workerPid > 1) {
+      try { process.kill(-workerPid, "SIGKILL"); }
+      catch {}
+    }
+    if (!terminal && arm !== null && descendantPid === null) {
+      try {
+        descendantPid = (JSON.parse(fs.readFileSync(
+          path.join(arm.workspaceRoot, "group-drain-processes.json"),
+          "utf8",
+        )) as { descendantPid: number }).descendantPid;
+      } catch {}
+    }
+    if (!terminal && descendantPid !== null && descendantPid > 1) {
+      try { process.kill(descendantPid, "SIGKILL"); }
+      catch {}
+    }
+    if (cooperativeLease !== null) {
+      if (!terminal && arm !== null) {
+        try { workspace.cancelMaterializedArm(cooperativeLease, arm, "TEST_ABORT"); }
+        catch {}
+      } else if (plan !== null && arm === null) {
+        try { workspace.cancelAdmittedArm(plan, options.armId, "TEST_ABORT"); }
+        catch {}
+      }
+      try { released = (await workspace.closeCooperativeSourceLease(cooperativeLease)).sourceRelease; }
+      catch {}
+    }
+    cleanupReportedScratchRoots(released?.retainedPrivateRoots ?? captured?.retainedPrivateRoots ?? []);
+    removeFixturePath(clockRoot);
+    removeFixturePath(fixture.source);
+    removeFixturePath(fixture.custody);
+  }
+}
+
+test("Phase 2 supervisor drains a same-group descendant that exits naturally after a clean leader close", async () => {
+  const outcome = await runGroupDrainWorkerCase({
+    armId: "group-drain-natural",
+    timeoutMs: 30_000,
+    workerSource: () => groupDrainWorkerSource(groupDrainDescendantBody(
+      "process.exit(0);",
+      "setTimeout(() => { fs.writeFileSync('group-drain-descendant.natural-exit', ''); process.exit(0); }, 1200);",
+    )),
+  });
+  // The descendant was still in the original group at the first probe, so an immediate
+  // classification would have refused this clean result.
+  assert.equal(Number.isSafeInteger(outcome.drainMs) && (outcome.drainMs as number) > 0, true);
+  assert.equal((outcome.drainMs as number) < 2_000, true);
+  assert.equal(outcome.naturalExit, true, "descendant did not exit on its own");
+  assert.equal(outcome.sigterm, false, "a termination signal reached a naturally draining group");
+  assert.equal(outcome.descendantAbsent, true);
+  assert.equal(outcome.status, "COMPLETE");
+  assert.equal(outcome.terminal.status, "COMPLETE");
+  assert.equal(outcome.terminal.reasonCode, "WORKER_COMPLETE");
+  assert.equal(outcome.terminal.workerResult.accepted, true);
+  assert.equal(outcome.terminal.workerResult.status, "COMPLETE");
+  assert.deepEqual(outcome.terminal.lifecycle, {
+    directChildClosed: true,
+    exitCode: 0,
+    originalProcessGroupAbsent: true,
+    signal: null,
+    timedOut: false,
+  });
+});
+
+test("Phase 2 supervisor refuses a same-group descendant that outlives the drain and ignores SIGTERM", async () => {
+  const outcome = await runGroupDrainWorkerCase({
+    armId: "group-drain-lingering",
+    timeoutMs: 30_000,
+    workerSource: () => groupDrainWorkerSource(groupDrainDescendantBody(
+      "",
+      "setTimeout(() => { fs.writeFileSync('group-drain-descendant.natural-exit', ''); process.exit(0); }, 30000);",
+    )),
+  });
+  // The full natural drain elapsed before classification; only SIGKILL then emptied the group,
+  // and that forced cleanup did not clear the refusal.
+  assert.equal(Number.isSafeInteger(outcome.drainMs) && (outcome.drainMs as number) >= 2_000, true);
+  assert.equal(outcome.sigterm, true, "descendant never received the post-drain SIGTERM");
+  assert.equal(outcome.naturalExit, false);
+  assert.equal(outcome.descendantAbsent, true, "SIGTERM-ignoring descendant survived the SIGKILL cleanup");
+  assert.equal(outcome.status, "INDETERMINATE");
+  assert.equal(outcome.terminal.status, "INDETERMINATE");
+  assert.equal(outcome.terminal.reasonCode, "ORIGINAL_PROCESS_GROUP_SURVIVED_LEADER");
+  assert.equal(outcome.terminal.workerResult.accepted, false);
+  assert.equal(outcome.terminal.workerResult.status, "COMPLETE");
+  assert.deepEqual(outcome.terminal.lifecycle, {
+    directChildClosed: true,
+    exitCode: 0,
+    originalProcessGroupAbsent: true,
+    signal: null,
+    timedOut: false,
+  });
+});
+
+test("Phase 2 supervisor counts the group drain against the worker timeout and refuses on exhaustion", async () => {
+  const timeoutMs = 4_000;
+  const outcome = await runGroupDrainWorkerCase({
+    armId: "group-drain-budget",
+    // The leader closes about 900 ms before the worker deadline; the descendant would exit on its
+    // own about 1.7 s after that close, inside the 2 s drain but after the worker deadline.
+    clock: (callStartedMs) => ({
+      closeNotBeforeMs: callStartedMs + timeoutMs - 900,
+      descendantExitAtMs: callStartedMs + timeoutMs + 800,
+    }),
+    timeoutMs,
+    workerSource: (clockPath) => groupDrainWorkerSource(
+      [
+        `const clock = JSON.parse(require('node:fs').readFileSync(${JSON.stringify(clockPath)}, 'utf8'));`,
+        ...groupDrainDescendantBody(
+          "process.exit(0);",
+          "setTimeout(() => { fs.writeFileSync('group-drain-descendant.natural-exit', ''); process.exit(0); }, Math.max(0, clock.descendantExitAtMs - Date.now()));",
+        ),
+      ],
+      [
+        `const clock = JSON.parse(fs.readFileSync(${JSON.stringify(clockPath)}, 'utf8'));`,
+        "while (Date.now() < clock.closeNotBeforeMs) Atomics.wait(wait, 0, 0, 5);",
+      ],
+    ),
+  });
+  // The leader closed by itself inside its timeout, the drain was cut short by the remaining
+  // budget rather than the 2 s grace, and the still-live descendant had to be terminated.
+  assert.equal(outcome.terminal.lifecycle.exitCode, 0);
+  assert.equal(outcome.terminal.lifecycle.signal, null);
+  assert.equal(Number.isSafeInteger(outcome.drainMs) && (outcome.drainMs as number) < 2_000, true);
+  assert.equal(outcome.sigterm, true, "descendant was not terminated when the worker budget ran out");
+  assert.equal(outcome.naturalExit, false);
+  assert.equal(outcome.descendantAbsent, true);
+  assert.equal(outcome.status, "INDETERMINATE");
+  assert.equal(outcome.terminal.status, "INDETERMINATE");
+  assert.equal(
+    ["ORIGINAL_PROCESS_GROUP_SURVIVED_LEADER", "WORKER_TIMEOUT"].includes(outcome.terminal.reasonCode),
+    true,
+    `unexpected budget-exhaustion reason ${outcome.terminal.reasonCode}`,
+  );
+  assert.equal(outcome.terminal.workerResult.accepted, false);
+  assert.equal(outcome.terminal.workerResult.status, "COMPLETE");
 });
 
 test("Phase 2 cooperative close reopens every worker result and terminal before releasing authority", async () => {
