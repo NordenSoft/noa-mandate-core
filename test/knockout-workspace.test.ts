@@ -3786,9 +3786,10 @@ test("Linux descriptor metadata batches cover every node in fixed chunks and kee
   const calls: Array<{ batch: string[] } | { tool: string }> = [];
   const rootIdentity = lstatIdentity(root);
   try {
-    // Two sibling directories, each holding 63 regular files and one symlink. Whatever readdir
-    // order the filesystem yields, the census preorder visits one directory's symlink before the
-    // other directory node, so a regular node always follows a symlink in request order.
+    // Two sibling directories, each holding 63 regular files and one symlink. The census sorts
+    // every directory's entries bytewise, so its preorder is ".", "A", A's 62 "file-*", the
+    // unusual name, "A/link", then "B", B's 63 files, "B/link": the streamed calls are [64], [1],
+    // A/link, [64], B/link, and a helper batch follows a symlink on every filesystem.
     for (const name of ["A", "B"]) {
       const directory = path.join(root, name);
       fs.mkdirSync(directory, { mode: 0o700 });
@@ -3832,10 +3833,10 @@ test("Linux descriptor metadata batches cover every node in fixed chunks and kee
     assert.equal(census.nodeCount, 131);
     assert.equal(census.nodes.filter((node) => node.type !== "symlink").length, 129);
 
-    // The census request order is a preorder walk in the filesystem's own readdir order (opendir,
-    // unsorted). Rebuild it independently and derive the exact streamed call sequence: contiguous
-    // regular nodes flushed in batches of at most 64 before each symlink and at the end, each
-    // symlink observed in place by getfacl then getfattr.
+    // The census request order is a preorder walk whose directory entries are sorted bytewise
+    // (Buffer.compare of the raw names). Rebuild it independently and derive the exact streamed
+    // call sequence: contiguous regular nodes flushed in batches of at most 64 before each
+    // symlink and at the end, each symlink observed in place by getfacl then getfattr.
     const requestOrder: Array<{ identity: string; relative: string; symlink: boolean }> = [];
     const walk = (relative: string) => {
       const absolute = relative === "." ? root : path.join(root, ...relative.split("/"));
@@ -3847,6 +3848,7 @@ test("Linux descriptor metadata batches cover every node in fixed chunks and kee
           names.push(entry.name);
         }
       } finally { directory.closeSync(); }
+      names.sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
       for (const name of names) {
         const child = relative === "." ? name : `${relative}/${name}`;
         const stat = fs.lstatSync(path.join(absolute, name));
@@ -3879,6 +3881,14 @@ test("Linux descriptor metadata batches cover every node in fixed chunks and kee
       expectedCalls.push({ tool: `getfacl ${operand}` }, { tool: `getfattr ${operand}` });
     }
     flush();
+    assert.deepEqual(
+      expectedCalls.map((call) => "batch" in call ? call.batch.length : call.tool),
+      [
+        64, 1, `getfacl .${path.sep}A${path.sep}link`, `getfattr .${path.sep}A${path.sep}link`,
+        64, `getfacl .${path.sep}B${path.sep}link`, `getfattr .${path.sep}B${path.sep}link`,
+      ],
+      "the rebuilt sorted preorder does not match the fixture's fixed interleaving",
+    );
     assert.deepEqual(calls, expectedCalls, "metadata observations did not stream in request order");
     const firstToolCall = calls.findIndex((call) => "tool" in call);
     assert.ok(firstToolCall > 0, "no helper batch preceded the first symlink");
@@ -4322,8 +4332,8 @@ test("Linux descriptor metadata rechecks leaf and ancestor pathnames after the h
       let swapped = false;
       try {
         fs.mkdirSync(parent, { mode: 0o700 });
-        // The census binds "." and "a" first (preorder), then a's 70 files in readdir order: 62
-        // files complete the first chunk and the remaining 8 form the second chunk.
+        // The census binds "." and "a" first (preorder), then a's 70 files in bytewise-sorted
+        // order: f-000..f-061 complete the first chunk and f-062..f-069 form the second chunk.
         const fileByIdentity = new Map<string, string>();
         for (let index = 0; index < 70; index++) {
           const file = path.join(parent, `f-${index.toString().padStart(3, "0")}`);
