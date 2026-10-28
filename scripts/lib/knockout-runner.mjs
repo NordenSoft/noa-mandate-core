@@ -89,6 +89,8 @@ import {
   knockoutResultEvidenceFromWire,
   knockoutSelftestKeySha256,
   knockoutWorkerSubjectSha256,
+  knockoutWorkspaceFailureDiagnostics,
+  knockoutWorkspaceOperationDiagnostics,
   LEGACY_TOMBSTONE_PROTOCOL,
   materializeArm,
   openKnockoutCustody,
@@ -5351,6 +5353,14 @@ function withoutInheritedKnockoutReporter(sourceEnvironment) {
   return environment;
 }
 
+// Diagnostics only: wall time of the most recent observer cleanup (container removal, evidence
+// snapshot cleanup, final dependency attestation). It is never part of an observation or verdict.
+let lastObserverCleanupMs = null;
+
+export function knockoutObserverCleanupDiagnostic() {
+  return Number.isSafeInteger(lastObserverCleanupMs) ? lastObserverCleanupMs : null;
+}
+
 export function observeSuite(
   root,
   [dir, cmd, args],
@@ -5559,6 +5569,7 @@ export function observeSuite(
         ? String(e && e.message)
         : observationError;
   } finally {
+    const observerCleanupStartedMs = Date.now();
     let containerRemoved = containerName === null;
     if (containerName !== null) {
       try {
@@ -5589,6 +5600,7 @@ export function observeSuite(
     } catch (error) {
       observationError ??= `dependency attestation changed during observation: ${String(error && error.message)}`;
     }
+    lastObserverCleanupMs = Math.max(0, Date.now() - observerCleanupStartedMs);
   }
 
   const parsed = kind === "tests" && observationError === null ? parseProofEvents(testEvents) : null;
@@ -6841,6 +6853,104 @@ function isolatedSweepFailure(code, message, cause = null, details = null) {
   return error;
 }
 
+// ── SWEEP DIAGNOSTICS ───────────────────────────────────────────────────────────────────────────
+// Bounded, typed phase telemetry for the CI log: each record is built field by field from closed
+// enums, safe integers and workspace diagnostic snapshots. Nothing here is read by a verdict, a
+// refusal, the terminal chain or any digest, and a failing diagnostic callback never changes the
+// sweep. The printer (lint-control-knockout.mjs) enforces the per-line and per-report byte caps.
+export const SWEEP_DIAGNOSTIC_PROTOCOL = "noa-knockout-sweep-diagnostic/1";
+const SWEEP_DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const SWEEP_DIAGNOSTIC_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const SWEEP_DIAGNOSTIC_MAX_CAUSES = 8;
+const sweepFailureDiagnostics = new WeakMap();
+
+function sweepDiagnosticCode(value) {
+  return typeof value === "string" && SWEEP_DIAGNOSTIC_CODE.test(value) ? value : null;
+}
+
+function sweepDiagnosticId(value) {
+  return typeof value === "string" && SWEEP_DIAGNOSTIC_ID.test(value) ? value : null;
+}
+
+function sweepDiagnosticInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function sweepDiagnosticErrorCode(error) {
+  try { return sweepDiagnosticCode(error?.code); }
+  catch { return null; }
+}
+
+/** Bounded breadth-first codes of nested causes and aggregate members, never their messages. */
+function sweepDiagnosticCauseCodes(error) {
+  const codes = [];
+  try {
+    const queue = [];
+    const seen = new Set([error]);
+    const enqueue = (value) => {
+      if (value !== null && typeof value === "object" && !seen.has(value) && seen.size < 64) {
+        seen.add(value);
+        queue.push(value);
+      }
+    };
+    const expand = (value) => {
+      if (value instanceof AggregateError && Array.isArray(value.errors)) {
+        for (const member of value.errors.slice(0, SWEEP_DIAGNOSTIC_MAX_CAUSES)) enqueue(member);
+      }
+      enqueue(value?.cause);
+    };
+    expand(error);
+    while (queue.length > 0 && codes.length < SWEEP_DIAGNOSTIC_MAX_CAUSES) {
+      const current = queue.shift();
+      codes.push(sweepDiagnosticErrorCode(current) ??
+        (current instanceof AggregateError ? "AGGREGATE" : "UNCODED"));
+      expand(current);
+    }
+  } catch {}
+  return Object.freeze(codes);
+}
+
+function sweepDiagnosticFailureFields(error) {
+  let details = null;
+  try { details = error?.details ?? null; }
+  catch { details = null; }
+  const typed = (read) => {
+    try { return read(); }
+    catch { return null; }
+  };
+  const lifecycle = typed(() => details?.lifecycle ?? null);
+  return Object.freeze({
+    code: sweepDiagnosticErrorCode(error) ?? "UNCODED",
+    child: Object.freeze({
+      timedOut: typed(() => (typeof details?.timedOut === "boolean" ? details.timedOut : null)),
+      timeoutMs: typed(() => sweepDiagnosticInteger(details?.timeoutMs)),
+      status: typed(() => (Number.isSafeInteger(details?.status)
+        ? details.status
+        : sweepDiagnosticCode(details?.status))),
+    }),
+    terminal: Object.freeze({
+      reasonCode: typed(() => sweepDiagnosticCode(details?.reasonCode)),
+      workerRefusalReasonCode: typed(() => sweepDiagnosticCode(details?.workerRefusalReasonCode)),
+      exitCode: typed(() => (Number.isSafeInteger(lifecycle?.exitCode) ? lifecycle.exitCode : null)),
+      signal: typed(() => sweepDiagnosticCode(lifecycle?.signal)),
+      timedOut: typed(() => (typeof lifecycle?.timedOut === "boolean" ? lifecycle.timedOut : null)),
+      workerTimeoutMs: typed(() => sweepDiagnosticInteger(details?.workerTimeoutMs)),
+    }),
+    causeCodes: sweepDiagnosticCauseCodes(error),
+    workspace: knockoutWorkspaceFailureDiagnostics(error),
+  });
+}
+
+/** Diagnostics-only reader for a sweep failure: the primary snapshot and the separate cleanup. */
+export function isolatedSweepFailureDiagnostics(error) {
+  try {
+    if (error === null || typeof error !== "object") return null;
+    return sweepFailureDiagnostics.get(error) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Execute the selected knockout registry only in candidate-bound disposable workspaces. This
  * function owns every asynchronous lifecycle edge and returns verdict-bearing bytes only after the
@@ -6854,6 +6964,7 @@ export async function runIsolatedKnockoutSweep({
   custodyRoot: requestedCustodyRoot = null,
   maxRetainedArms,
   maxRetainedBytes,
+  onDiagnostic = null,
   onProgress = null,
   rawDependenciesByEntry,
   registry,
@@ -6924,6 +7035,12 @@ export async function runIsolatedKnockoutSweep({
   if (!(onProgress === null || typeof onProgress === "function")) {
     throw isolatedSweepFailure("PROGRESS_CALLBACK_INVALID", "isolated knockout progress callback is malformed");
   }
+  if (!(onDiagnostic === null || typeof onDiagnostic === "function")) {
+    throw isolatedSweepFailure(
+      "DIAGNOSTIC_CALLBACK_INVALID",
+      "isolated knockout diagnostic callback is malformed",
+    );
+  }
   const selectedEntries = selected.map((entry) => {
     const canonical = registryById.get(entry?.id);
     if (canonical === undefined) {
@@ -6985,16 +7102,83 @@ export async function runIsolatedKnockoutSweep({
     kind: entry.kind,
     suite: entry.suite,
   });
-  const runOneArm = async ({ armId, role, subject }) => {
+  // Diagnostic context survives a phase's end, so a refusal raised after a phase returns (for
+  // example ARM_REFUSED after the worker phase) still names the phase, arm, role and entry.
+  const sweepStartedMs = performance.now();
+  let diagnosticContext = null;
+  const armTimings = new Map();
+  const emitDiagnostic = (record) => {
+    if (onDiagnostic === null) return;
+    try { onDiagnostic(Object.freeze({ protocol: SWEEP_DIAGNOSTIC_PROTOCOL, ...record })); }
+    catch {}
+  };
+  const elapsedSinceMs = (startedMs) => Math.max(0, Math.round(performance.now() - startedMs));
+  const contextFields = () => ({
+    phase: diagnosticContext?.phase ?? null,
+    armId: diagnosticContext?.armId ?? null,
+    role: diagnosticContext?.role ?? null,
+    entryId: diagnosticContext?.entryId ?? null,
+  });
+  const beginDiagnosticPhase = (phase, { armId = null, entryId = null, role = null } = {}) => {
+    diagnosticContext = {
+      armId: sweepDiagnosticId(armId),
+      entryId: sweepDiagnosticId(entryId),
+      phase,
+      role: sweepDiagnosticCode(role),
+      startedMs: performance.now(),
+      state: "OPEN",
+    };
+    emitDiagnostic({
+      event: "start", ...contextFields(), sweepElapsedMs: elapsedSinceMs(sweepStartedMs),
+    });
+  };
+  const endDiagnosticPhase = (extra = {}) => {
+    if (diagnosticContext === null) return 0;
+    diagnosticContext.state = "ENDED";
+    const durationMs = elapsedSinceMs(diagnosticContext.startedMs);
+    emitDiagnostic({
+      event: "end", ...contextFields(), durationMs,
+      sweepElapsedMs: elapsedSinceMs(sweepStartedMs), ...extra,
+    });
+    return durationMs;
+  };
+
+  const runOneArm = async ({ armId, entryId = null, role, subject }) => {
+    const armContext = { armId, entryId, role };
     currentArmId = armId;
+    beginDiagnosticPhase("ADMISSION", armContext);
     currentPlan = admitArmPlan(cooperativeLease, {
       arms: [{ armId, role, subjectSha256: knockoutWorkerSubjectSha256(subject) }],
     });
+    const admissionMs = endDiagnosticPhase();
+    beginDiagnosticPhase("MATERIALIZATION", armContext);
     currentArm = materializeArm(currentPlan, armId);
+    const materializationMs = endDiagnosticPhase({
+      workspace: knockoutWorkspaceOperationDiagnostics(currentArm)?.materialization ?? null,
+    });
+    beginDiagnosticPhase("WORKER", armContext);
     const completed = await runArmWorker(cooperativeLease, currentArm, {
       subject,
       timeoutMs: workerTimeoutMs,
     });
+    const workerDiagnostics = knockoutWorkspaceOperationDiagnostics(completed);
+    const terminal = completed.terminalPublication?.terminal ?? null;
+    const workerRefusalReasonCode = completed.workerResult?.status === "REFUSED"
+      ? sweepDiagnosticCode(completed.workerResult?.observation?.reasonCode)
+      : null;
+    const workerMs = endDiagnosticPhase({
+      terminalReasonCode: sweepDiagnosticCode(terminal?.reasonCode),
+      terminalStatus: sweepDiagnosticCode(completed.status),
+      workerExecutionMs: sweepDiagnosticInteger(workerDiagnostics?.workerExecutionMs),
+      workerTimeoutMs,
+      preparation: workerDiagnostics?.preparation ?? null,
+      publication: workerDiagnostics?.publication ?? null,
+    });
+    armTimings.set(armId, Object.freeze({
+      admissionMs,
+      materializationMs,
+      workerMs,
+    }));
     currentPlan = null;
     currentArm = null;
     currentArmId = null;
@@ -7004,8 +7188,24 @@ export async function runIsolatedKnockoutSweep({
         `isolated ${role.toLowerCase()} arm ${armId} did not complete`,
         null,
         {
+          armId,
+          lifecycle: terminal?.lifecycle === undefined || terminal?.lifecycle === null
+            ? null
+            : Object.freeze({
+                exitCode: Number.isSafeInteger(terminal.lifecycle.exitCode)
+                  ? terminal.lifecycle.exitCode
+                  : null,
+                signal: typeof terminal.lifecycle.signal === "string"
+                  ? terminal.lifecycle.signal
+                  : null,
+                timedOut: terminal.lifecycle.timedOut === true,
+              }),
+          reasonCode: sweepDiagnosticCode(terminal?.reasonCode),
+          role,
           status: completed.status,
           terminalSha256: completed.terminalPublication?.sha256 ?? null,
+          workerRefusalReasonCode,
+          workerTimeoutMs,
         },
       );
     }
@@ -7062,11 +7262,16 @@ export async function runIsolatedKnockoutSweep({
     : path.resolve(requestedCustodyRoot);
 
   try {
+    beginDiagnosticPhase("CAPTURE");
     capture = captureAndSealCandidate({
       custodyRoot,
       operationTimeoutMs: captureTimeoutMs,
       sourceRoot,
     });
+    endDiagnosticPhase({
+      workspace: knockoutWorkspaceOperationDiagnostics(capture)?.capture ?? null,
+    });
+    beginDiagnosticPhase("CUSTODY");
     const workerPath = path.join(
       capture.workspaceRoot,
       ...KNOCKOUT_WORKER_RELATIVE_PATH.split("/"),
@@ -7078,6 +7283,7 @@ export async function runIsolatedKnockoutSweep({
     const custody = openKnockoutCustody(capture, custodyOptions);
     sourceLease = acquireSourceLease(custody);
     cooperativeLease = await acquireCooperativeSourceLease(sourceLease);
+    endDiagnosticPhase();
 
     const selftestKeySha256 = knockoutSelftestKeySha256();
     const selftestSubject = createKnockoutWorkerSubject({
@@ -7149,7 +7355,7 @@ export async function runIsolatedKnockoutSweep({
         workerSha256,
       });
       const armId = `baseline-${String(baselineIndex).padStart(4, "0")}`;
-      const completed = await runOneArm({ armId, role: "BASELINE", subject });
+      const completed = await runOneArm({ armId, entryId: entry.id, role: "BASELINE", subject });
       const wire = completed.workerResult.observation.baseline;
       const observation = knockoutBaselineObservationFromWire(wire, {
         workspaceRoot: completed.workspaceRoot,
@@ -7216,7 +7422,7 @@ export async function runIsolatedKnockoutSweep({
         workerSha256,
       });
       const armId = `mutant-${String(index + 1).padStart(4, "0")}`;
-      const completed = await runOneArm({ armId, role: "MUTANT", subject });
+      const completed = await runOneArm({ armId, entryId: entry.id, role: "MUTANT", subject });
       const mutantWire = completed.workerResult.observation.knockout;
       let result = knockoutResultEvidenceFromWire(mutantWire, {
         baseline: baseline.wire,
@@ -7275,6 +7481,7 @@ export async function runIsolatedKnockoutSweep({
         const postcheckArmId = `postcheck-${String(index + 1).padStart(4, "0")}`;
         const postcheckCompleted = await runOneArm({
           armId: postcheckArmId,
+          entryId: entry.id,
           role: "POSTCHECK",
           subject: postcheckSubject,
         });
@@ -7307,6 +7514,19 @@ export async function runIsolatedKnockoutSweep({
         total: selectedEntries.length,
         verdict: result.verdict,
       }));
+      // The completed control's timing, after its progress line: the mutant suite time preserved in
+      // the result wire plus the measured arm phases (postcheck arm when one ran).
+      emitDiagnostic({
+        event: "summary",
+        phase: "CONTROL",
+        entryId: sweepDiagnosticId(entry.id),
+        completed: index + 1,
+        total: selectedEntries.length,
+        mutatedMs: sweepDiagnosticInteger(result.mutatedMs),
+        mutantArm: armTimings.get(armId) ?? null,
+        postcheckArm: armTimings.get(`postcheck-${String(index + 1).padStart(4, "0")}`) ?? null,
+        sweepElapsedMs: elapsedSinceMs(sweepStartedMs),
+      });
       if (result.verdict === VERDICT.RESTORATION_FAILED) {
         throw isolatedSweepFailure(
           "MUTANT_ARM_RESTORATION_FAILED",
@@ -7317,7 +7537,13 @@ export async function runIsolatedKnockoutSweep({
       }
     }
 
+    beginDiagnosticPhase("CLOSE");
     closeEvidence = await closeCooperativeSourceLease(cooperativeLease);
+    const closeDiagnostics = knockoutWorkspaceOperationDiagnostics(closeEvidence);
+    endDiagnosticPhase({
+      sourceRelease: closeDiagnostics?.sourceRelease ?? null,
+      terminalReopen: closeDiagnostics?.terminalReopen ?? null,
+    });
     cooperativeLease = null;
     sourceLease = null;
     return Object.freeze({
@@ -7334,36 +7560,85 @@ export async function runIsolatedKnockoutSweep({
       status: "COMPLETE",
     });
   } catch (primary) {
+    // Snapshot the primary failure BEFORE any cleanup runs: cancellation and lease close replace the
+    // phase, the arm state and the workspace counters this record describes. Cleanup is timed and
+    // reported separately below and never overwrites the primary snapshot.
+    const primaryDiagnostics = Object.freeze({
+      ...contextFields(),
+      phaseState: diagnosticContext?.state ?? null,
+      phaseElapsedMs: diagnosticContext === null ? null : elapsedSinceMs(diagnosticContext.startedMs),
+      sweepElapsedMs: elapsedSinceMs(sweepStartedMs),
+      suiteTimeoutMs: resolvedSuiteTimeoutMs,
+      workerTimeoutMs,
+      ...sweepDiagnosticFailureFields(primary),
+    });
+    emitDiagnostic({
+      event: "failure",
+      ...contextFields(),
+      code: primaryDiagnostics.code,
+      phaseElapsedMs: primaryDiagnostics.phaseElapsedMs,
+      sweepElapsedMs: primaryDiagnostics.sweepElapsedMs,
+    });
+    const cleanupStartedMs = performance.now();
+    emitDiagnostic({
+      event: "start", phase: "CLEANUP", armId: null, role: null, entryId: null,
+      sweepElapsedMs: elapsedSinceMs(sweepStartedMs),
+    });
+    let armCancellation = "NOT_REQUIRED";
+    let leaseCleanup = "NOT_REQUIRED";
     let closeFailure = null;
     if (cooperativeLease !== null) {
       if (currentPlan !== null && currentArmId !== null) {
+        armCancellation = "CANCELLED";
         try {
           if (currentArm === null) cancelAdmittedArm(currentPlan, currentArmId, "SWEEP_ABORTED");
           else cancelMaterializedArm(cooperativeLease, currentArm, "SWEEP_ABORTED");
-        } catch {}
+        } catch { armCancellation = "FAILED"; }
       }
+      leaseCleanup = "COOPERATIVE_CLOSE";
       try { await closeCooperativeSourceLease(cooperativeLease); }
       catch (error) { closeFailure = error; }
       cooperativeLease = null;
       sourceLease = null;
     } else if (sourceLease !== null) {
+      leaseCleanup = "SOURCE_RELEASE";
       try { releaseSourceLease(sourceLease); }
       catch (error) { closeFailure = error; }
       sourceLease = null;
     }
+    const cleanupDiagnostics = Object.freeze({
+      armCancellation,
+      leaseCleanup,
+      status: closeFailure === null ? "COMPLETE" : "FAILED",
+      durationMs: elapsedSinceMs(cleanupStartedMs),
+      failure: closeFailure === null ? null : sweepDiagnosticFailureFields(closeFailure),
+    });
+    emitDiagnostic({
+      event: "end", phase: "CLEANUP", armId: null, role: null, entryId: null,
+      durationMs: cleanupDiagnostics.durationMs, status: cleanupDiagnostics.status,
+      sweepElapsedMs: elapsedSinceMs(sweepStartedMs),
+    });
+    const sweepDiagnostics = Object.freeze({
+      cleanup: cleanupDiagnostics,
+      primary: primaryDiagnostics,
+    });
     if (closeFailure !== null) {
-      throw isolatedSweepFailure(
+      const combined = isolatedSweepFailure(
         "SWEEP_AND_CLOSE_FAILED",
         "isolated knockout sweep failed and its lease close was not proven",
         new AggregateError([primary, closeFailure]),
         { custodyRoot },
       );
+      sweepFailureDiagnostics.set(combined, sweepDiagnostics);
+      throw combined;
     }
     if (primary !== null && typeof primary === "object") {
       if (primary.details === null || primary.details === undefined) primary.details = { custodyRoot };
       else if (typeof primary.details === "object" && !Array.isArray(primary.details)) {
         primary.details = { ...primary.details, custodyRoot };
       }
+      try { sweepFailureDiagnostics.set(primary, sweepDiagnostics); }
+      catch {}
     }
     throw primary;
   }

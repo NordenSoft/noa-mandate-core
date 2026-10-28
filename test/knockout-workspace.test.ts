@@ -66,6 +66,68 @@ type WorkspaceError = Error & {
     stderr?: string;
   } | null;
 };
+type OperationDiagnosticSnapshot = {
+  operation: string;
+  elapsedMs: number;
+  remainingMs: number;
+  operationTimeoutMs: number;
+  commandTimeoutMs: number;
+  openSubphases: string[];
+  pendingLaunch: { kind: string; elapsedMs: number; timeoutMs: number } | null;
+  nodes: Record<string, number>;
+  metadata: { requested: number; cacheHit: number; attempted: number; completed: number };
+  launches: Record<string, number>;
+  launchWindowMs: Record<string, number>;
+  batches: { count: number; maxNodes: number; totalNodes: number };
+  bytesWritten: number;
+  fsyncCount: number;
+  subphaseInclusiveMs: Record<string, number>;
+  subphaseExclusiveMs: Record<string, number>;
+};
+type WorkspaceFailureDiagnostics = {
+  causeDepth: number;
+  deadlineCause: string | null;
+  pendingLaunchKind: string | null;
+  launch: {
+    errorCode: string | null;
+    executable: string;
+    kind: string | null;
+    signal: string | null;
+    status: number | null;
+    timedOut: boolean;
+    timeoutMs: number;
+  } | null;
+  openSubphases: string[] | null;
+  budget: OperationDiagnosticSnapshot | null;
+};
+type SweepFailureDiagnostics = {
+  cleanup: {
+    armCancellation: string;
+    durationMs: number;
+    failure: unknown;
+    leaseCleanup: string;
+    status: string;
+  };
+  primary: {
+    armId: string | null;
+    code: string;
+    entryId: string | null;
+    phase: string | null;
+    phaseElapsedMs: number | null;
+    phaseState: string | null;
+    role: string | null;
+    sweepElapsedMs: number;
+    terminal: {
+      exitCode: number | null;
+      reasonCode: string | null;
+      signal: string | null;
+      timedOut: boolean | null;
+      workerRefusalReasonCode: string | null;
+      workerTimeoutMs: number | null;
+    };
+    workerTimeoutMs: number;
+  };
+};
 type DirectoryObservation = {
   ctimeNs: string;
   dev: string;
@@ -478,6 +540,7 @@ const workspace = await import(
     expectedSnapshot: SourceSnapshot,
     options?: { commandTimeoutMs?: number; gitExecutable?: string },
   ) => SourceSnapshot;
+  knockoutWorkspaceFailureDiagnostics: (error: unknown) => WorkspaceFailureDiagnostics | null;
 };
 const knockoutRunner = await import(
   pathToFileURL(path.join(repositoryRoot, "scripts/lib/knockout-runner.mjs")).href
@@ -500,6 +563,8 @@ const knockoutRunner = await import(
     workerTimeoutMs: number;
   };
   createIsolatedCustodyRoot: (cacheHome?: string) => string;
+  isolatedSweepFailureDiagnostics: (error: unknown) => SweepFailureDiagnostics | null;
+  SWEEP_DIAGNOSTIC_PROTOCOL: string;
   finalizeIsolatedSetupIntegrityPostcheck: (options: Record<string, unknown>) => {
     detail?: string;
     postRestoreBaselineVerified?: boolean;
@@ -522,6 +587,12 @@ const knockoutRunner = await import(
 const knockoutCli = await import(
   pathToFileURL(path.join(repositoryRoot, "scripts", "lint-control-knockout.mjs")).href
 ) as {
+  DIAGNOSTIC_LINE_MAX_BYTES: number;
+  boundedDiagnosticLine: (label: string, record: unknown) => string;
+  createDiagnosticPrinter: (
+    write: (line: string) => void,
+    maxBytes?: number,
+  ) => (record: unknown) => void;
   isolatedSweepFailureLines: (error: unknown) => readonly string[];
 };
 
@@ -2834,6 +2905,193 @@ test("metadata launcher diagnostics and absence fail closed", {
     syncBuiltinESMExports();
     removeFixturePath(root);
   }
+});
+
+test("workspace diagnostics tell a budget exhausted before a launch from a child that timed out", {
+  skip: process.platform !== "linux",
+}, () => {
+  // Both faults surface as OPERATION_DEADLINE_EXCEEDED; only the diagnostics side channel may tell
+  // them apart, and neither may add a field to the refusal's own details. Regular nodes go through
+  // the Linux descriptor helper batch; the symlink keeps the per-node getfacl/getfattr path.
+  const root = fs.realpathSync(privateTemp("noa-kws-diagnostic-deadline-"));
+  fs.writeFileSync(path.join(root, "leaf.txt"), "stable\n", { mode: 0o600 });
+  fs.symlinkSync("leaf.txt", path.join(root, "link"));
+  const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+  const clockDescriptor = Object.getOwnPropertyDescriptor(process.hrtime, "bigint");
+  assert.ok(spawnDescriptor !== undefined);
+  assert.ok(clockDescriptor !== undefined);
+  const originalSpawnSync = childProcess.spawnSync;
+  const originalClock = process.hrtime.bigint;
+  const launcher = "/usr/bin/perl";
+  const expiredOffsetNs =
+    BigInt(workspace.KNOCKOUT_WORKSPACE_COMMAND_TIMEOUT_LIMIT_MS + 1) * 1_000_000n;
+  let mode: "expire-after-acl" | "child-timeout" = "expire-after-acl";
+  let expire = false;
+  const metadataLaunches: string[] = [];
+  const stub = ((...args: Parameters<typeof childProcess.spawnSync>) => {
+    const argv = (Array.isArray(args[1]) ? args[1] : []) as readonly string[];
+    const tool = path.basename(String(argv[3] ?? ""));
+    const injected = mode === "child-timeout" ? ["python3"] : ["getfacl", "getfattr"];
+    if (args[0] !== launcher || !injected.includes(tool)) {
+      return Reflect.apply(originalSpawnSync, childProcess, args);
+    }
+    metadataLaunches.push(tool);
+    const empty = Buffer.alloc(0);
+    if (mode === "child-timeout") {
+      const error = Object.assign(new Error("injected metadata helper timeout"), { code: "ETIMEDOUT" });
+      return {
+        error, output: [null, empty, empty], pid: 321, signal: "SIGKILL", status: null,
+        stderr: empty, stdout: empty,
+      };
+    }
+    // A clean base ACL for the symlink, after which the shared budget is spent.
+    expire = true;
+    const stdout = Buffer.from("user::rw-\ngroup::---\nother::---\n");
+    return { output: [null, stdout, empty], pid: 321, signal: null, status: 0, stderr: empty, stdout };
+  }) as typeof childProcess.spawnSync;
+  try {
+    Object.defineProperty(childProcess, "spawnSync", { ...spawnDescriptor, value: stub });
+    syncBuiltinESMExports();
+    Object.defineProperty(process.hrtime, "bigint", {
+      ...clockDescriptor,
+      value: () => originalClock() + (expire ? expiredOffsetNs : 0n),
+    });
+
+    let exhausted: WorkspaceError | null = null;
+    assert.throws(
+      () => workspace.censusWorkspace(root, { rootGitPolicy: "absent" }),
+      (error: WorkspaceError) => {
+        exhausted = error;
+        return error.code === workspaceErrorCode("OPERATION_DEADLINE_EXCEEDED");
+      },
+    );
+    assert.equal(expire, true, "the budget-exhaustion fault never fired");
+    assert.deepEqual(metadataLaunches, ["getfacl"], "the xattr child launched after the budget was spent");
+    assert.ok(exhausted !== null);
+    assert.deepEqual(Object.keys((exhausted as WorkspaceError).details ?? {}), ["timeoutMs"]);
+    const before = workspace.knockoutWorkspaceFailureDiagnostics(exhausted);
+    assert.ok(before !== null);
+    assert.equal(before.deadlineCause, "BUDGET_EXHAUSTED_BEFORE_LAUNCH");
+    assert.equal(before.pendingLaunchKind, "xattr");
+    assert.equal(before.launch, null);
+    assert.ok(before.budget !== null);
+    assert.equal(before.budget.remainingMs, 0);
+    assert.equal(before.budget.launches.acl, 1);
+    assert.equal(before.budget.launches.xattr, 0);
+    assert.equal(before.budget.launches.linuxMetadataHelper, 1);
+    // Only the symlink was in flight: every node the descriptor batch attempted had completed.
+    assert.equal(before.budget.metadata.attempted - before.budget.metadata.completed, 1);
+    assert.deepEqual(before.budget.openSubphases, ["metadataBatch"]);
+    assert.deepEqual(before.openSubphases, ["metadataBatch"]);
+
+    mode = "child-timeout";
+    expire = false;
+    metadataLaunches.length = 0;
+    let timedOut: WorkspaceError | null = null;
+    assert.throws(
+      () => workspace.censusWorkspace(root, { rootGitPolicy: "absent" }),
+      (error: WorkspaceError) => {
+        timedOut = error;
+        return error.code === workspaceErrorCode("OPERATION_DEADLINE_EXCEEDED");
+      },
+    );
+    assert.deepEqual(metadataLaunches, ["python3"], "the helper-timeout fault never fired");
+    assert.ok(timedOut !== null);
+    const childDetails = (timedOut as WorkspaceError).details as Record<string, unknown> | null;
+    assert.equal(childDetails?.timedOut, true);
+    const child = workspace.knockoutWorkspaceFailureDiagnostics(timedOut);
+    assert.ok(child !== null);
+    assert.equal(child.deadlineCause, "CHILD_TIMED_OUT");
+    assert.equal(child.pendingLaunchKind, null);
+    assert.deepEqual(child.launch, {
+      kind: "linuxMetadataHelper",
+      executable: "python3",
+      timeoutMs: childDetails?.timeoutMs,
+      timedOut: true,
+      status: null,
+      signal: "SIGKILL",
+      errorCode: "ETIMEDOUT",
+    });
+    assert.ok(child.budget !== null);
+    assert.ok(child.budget.remainingMs > 0, "a child timeout was reported as an exhausted budget");
+    assert.equal(child.budget.pendingLaunch?.kind, "linuxMetadataHelper");
+    assert.equal(child.budget.launches.linuxMetadataHelper, 1);
+    assert.equal(child.budget.launches.acl, 0);
+    assert.ok(child.budget.batches.maxNodes >= 1);
+  } finally {
+    Object.defineProperty(process.hrtime, "bigint", clockDescriptor);
+    Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+    syncBuiltinESMExports();
+    removeFixturePath(root);
+  }
+});
+
+test("sweep diagnostic lines are allowlisted, keep producer order and stay byte-bounded", () => {
+  const max = knockoutCli.DIAGNOSTIC_LINE_MAX_BYTES;
+  assert.equal(max, 4096);
+  const label = "  knockout-diagnostic";
+  const hostile = {
+    protocol: "noa-knockout-sweep-diagnostic/1",
+    event: "end",
+    phase: "WORKER",
+    message: "free text must-not-escape",
+    newline: "A\nmust-not-escape",
+    unsafe: Number.MAX_SAFE_INTEGER + 2,
+    fraction: 1.5,
+    error: new Error("must-not-escape"),
+    map: new Map([["key", "must-not-escape"]]),
+    "bad key": "must-not-escape",
+    nested: { a: { b: { c: { d: { e: "must-not-escape" } } } } },
+    big: Object.fromEntries(Array.from({ length: 60 }, (_, index) => [`k${index}`, "x".repeat(100)])),
+    durationMs: 12,
+  };
+  const line = knockoutCli.boundedDiagnosticLine(label, hostile);
+  assert.ok(Buffer.byteLength(line, "utf8") <= max, `line is ${Buffer.byteLength(line, "utf8")} bytes`);
+  assert.ok(line.startsWith(`${label} {`));
+  assert.doesNotMatch(line, /must-not-escape/);
+  const payload = JSON.parse(line.slice(label.length + 1)) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(payload), [
+    "protocol", "event", "phase", "message", "newline", "unsafe", "fraction", "error", "map",
+    "nested", "durationMs", "omitted",
+  ]);
+  assert.deepEqual(payload.omitted, ["big"], "the oversize section was not the one dropped");
+  assert.equal(payload.message, null);
+  assert.equal(payload.unsafe, null);
+  assert.equal(payload.fraction, null);
+  assert.equal(payload.error, null);
+  assert.equal(payload.map, null);
+  assert.deepEqual(payload.nested, { a: { b: { c: { d: null } } } });
+  assert.equal(payload.durationMs, 12);
+
+  const scalars = Object.fromEntries(
+    Array.from({ length: 40 }, (_, index) => [`s${index}`, "y".repeat(120)]),
+  );
+  const oversize = knockoutCli.boundedDiagnosticLine(label, scalars);
+  assert.ok(Buffer.byteLength(oversize, "utf8") <= max);
+  assert.equal((JSON.parse(oversize.slice(label.length + 1)) as { diagnosticStatus: string })
+    .diagnosticStatus, "OVERSIZE");
+  assert.equal(
+    knockoutCli.boundedDiagnosticLine(label, "not a record"),
+    `${label} {"diagnosticStatus":"UNAVAILABLE"}`,
+  );
+
+  const written: string[] = [];
+  const print = knockoutCli.createDiagnosticPrinter((text) => written.push(text), 600);
+  for (let index = 0; index < 10; index++) {
+    print({ protocol: "p", event: "start", phase: "ADMISSION", sweepElapsedMs: index });
+  }
+  const truncations = written.filter((text) => text.startsWith("  knockout-diagnostic-truncated "));
+  assert.equal(truncations.length, 1, "the report cap did not fire exactly once");
+  assert.equal(written.at(-1), truncations[0]);
+  assert.ok(written.length > 1 && written.length < 11);
+  const printedBytes = written.slice(0, -1)
+    .reduce((total, text) => total + Buffer.byteLength(text, "utf8") + 1, 0);
+  assert.ok(printedBytes <= 600);
+  const timing: string[] = [];
+  knockoutCli.createDiagnosticPrinter((text) => timing.push(text))({
+    event: "summary", phase: "CONTROL", mutatedMs: 5,
+  });
+  assert.match(timing[0] ?? "", /^ {2}progress-timing \{"event":"summary","phase":"CONTROL","mutatedMs":5\}$/);
 });
 
 test("macOS descriptor metadata batches preserve exact bytes and fixed chunk bounds", (t) => {
@@ -12767,11 +13025,13 @@ test("Phase 2 isolated runner executes one real baseline and mutant in separate 
     const captureTimeoutMs = workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS;
     const suiteTimeoutMs = 600_000;
     const workerTimeoutMs = workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS;
+    const diagnostics: Array<Record<string, unknown>> = [];
     const sweep = await knockoutRunner.runIsolatedKnockoutSweep({
       captureTimeoutMs,
       custodyRoot: fixture.custody,
       maxRetainedArms: 3,
       maxRetainedBytes: 512 * 1024 * 1024,
+      onDiagnostic: (record: Record<string, unknown>) => diagnostics.push(record),
       rawDependenciesByEntry: new Map([[entry.id, {}]]),
       registry: [entry],
       root: fixture.source,
@@ -12781,6 +13041,56 @@ test("Phase 2 isolated runner executes one real baseline and mutant in separate 
     });
 
     assert.equal(sweep.status, "COMPLETE");
+    // Phase telemetry: every phase of every arm has one start and one end, in execution order.
+    assert.ok(diagnostics.every((record) =>
+      record.protocol === knockoutRunner.SWEEP_DIAGNOSTIC_PROTOCOL));
+    assert.deepEqual(
+      diagnostics
+        .filter((record) => record.event === "start" || record.event === "end")
+        .map((record) => `${String(record.event)}:${String(record.phase)}:${String(record.role)}`),
+      [
+        "start:CAPTURE:null", "end:CAPTURE:null", "start:CUSTODY:null", "end:CUSTODY:null",
+        ...["SELFTEST", "BASELINE", "MUTANT"].flatMap((role) =>
+          ["ADMISSION", "MATERIALIZATION", "WORKER"].flatMap((phase) =>
+            [`start:${phase}:${role}`, `end:${phase}:${role}`])),
+        "start:CLOSE:null", "end:CLOSE:null",
+      ],
+    );
+    assert.equal(diagnostics.some((record) => record.event === "failure"), false);
+    const ends = (phase: string) => diagnostics.filter((record) =>
+      record.event === "end" && record.phase === phase);
+    for (const materialization of ends("MATERIALIZATION")) {
+      const budget = materialization.workspace as OperationDiagnosticSnapshot;
+      assert.equal(budget.operation, "ARM_MATERIALIZATION");
+      assert.ok(budget.nodes.file! > 0 && budget.bytesWritten > 0 && budget.fsyncCount > 0);
+      assert.ok(budget.launches.acl! + budget.launches.linuxMetadataHelper! +
+        budget.launches.macMetadataHelper! > 0);
+      assert.ok(budget.metadata.requested >= budget.metadata.completed);
+      assert.ok(Number.isSafeInteger(budget.subphaseInclusiveMs.worktreeCopy));
+      assert.ok(Number.isSafeInteger(materialization.durationMs));
+    }
+    for (const worker of ends("WORKER")) {
+      assert.equal(worker.terminalReasonCode, "WORKER_COMPLETE");
+      assert.equal(worker.workerTimeoutMs, workerTimeoutMs);
+      assert.ok(Number.isSafeInteger(worker.workerExecutionMs));
+      assert.equal((worker.preparation as OperationDiagnosticSnapshot).operation, "WORKER_PREPARATION");
+      assert.equal((worker.publication as OperationDiagnosticSnapshot).operation, "WORKER_PUBLICATION");
+    }
+    const summaries = diagnostics.filter((record) => record.event === "summary");
+    assert.equal(summaries.length, 1);
+    const summary = summaries[0]!;
+    assert.equal(summary.entryId, entry.id);
+    assert.ok(Number.isSafeInteger(summary.mutatedMs));
+    const summaryArm = summary.mutantArm as { materializationMs: unknown; workerMs: unknown };
+    assert.ok(Number.isSafeInteger(summaryArm.materializationMs));
+    assert.ok(Number.isSafeInteger(summaryArm.workerMs));
+    assert.equal(summary.postcheckArm, null);
+    for (const record of diagnostics) {
+      const printed = knockoutCli.boundedDiagnosticLine("  knockout-diagnostic", record);
+      assert.ok(Buffer.byteLength(printed, "utf8") <= knockoutCli.DIAGNOSTIC_LINE_MAX_BYTES);
+      assert.equal("omitted" in (JSON.parse(printed.slice("  knockout-diagnostic ".length)) as object),
+        false, `a ${String(record.event)}:${String(record.phase)} record exceeded one bounded line`);
+    }
     const candidateManifestFiles = regularFilesBelow(fixture.custody)
       .filter((file) => path.basename(file) === "candidate-manifest.json");
     assert.equal(candidateManifestFiles.length, 1);
@@ -12972,8 +13282,12 @@ test("Phase 2 supervisor refuses a retained mutant changed by a delayed same-gro
         workerTimeoutMs: workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS,
       }),
       (error: WorkspaceError) => {
-        const details = (error as unknown as { details?: { status?: unknown } }).details;
-        return error.code === "ARM_REFUSED" && details?.status === "INDETERMINATE";
+        const details = (error as unknown as { details?: Record<string, unknown> }).details;
+        return error.code === "ARM_REFUSED" && details?.status === "INDETERMINATE" &&
+          details.role === "MUTANT" &&
+          details.reasonCode === "RETAINED_TARGET_REVALIDATION_FAILED" &&
+          details.workerRefusalReasonCode === null &&
+          details.workerTimeoutMs === workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS;
       },
     );
 
@@ -13756,12 +14070,15 @@ test("Phase 2 isolated runner refuses a captured registry mismatch before suite 
     const statusBefore = git(fixture.source, ["status", "--porcelain=v1", "-z"]);
     const indexBefore = sha256File(path.join(fixture.source, ".git", "index"));
     const controlBefore = sha256File(path.join(fixture.source, "control.mjs"));
+    const diagnostics: Array<Record<string, unknown>> = [];
+    let refusal: unknown = null;
     await assert.rejects(
       () => knockoutRunner.runIsolatedKnockoutSweep({
         captureTimeoutMs: workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS,
         custodyRoot: fixture.custody,
         maxRetainedArms: 3,
         maxRetainedBytes: 512 * 1024 * 1024,
+        onDiagnostic: (record: Record<string, unknown>) => diagnostics.push(record),
         rawDependenciesByEntry: new Map([[supervisorEntry.id, {}]]),
         registry: [supervisorEntry],
         root: fixture.source,
@@ -13771,9 +14088,51 @@ test("Phase 2 isolated runner refuses a captured registry mismatch before suite 
       }),
       (error: WorkspaceError) => {
         assert.equal(error.code, "ARM_REFUSED", errorChain(error));
+        refusal = error;
         return true;
       },
     );
+
+    // ARM_REFUSED names the terminal reason, the worker's own refusal, the lifecycle and the budget.
+    const refusalDetails = (refusal as { details?: Record<string, unknown> } | null)?.details;
+    assert.equal(refusalDetails?.role, "BASELINE");
+    assert.equal(refusalDetails?.armId, "baseline-0001");
+    assert.equal(refusalDetails?.reasonCode, "WORKER_REFUSED");
+    assert.equal(refusalDetails?.workerRefusalReasonCode, "REGISTRY_REFUSED");
+    assert.deepEqual(refusalDetails?.lifecycle, { exitCode: 0, signal: null, timedOut: false });
+    assert.equal(refusalDetails?.workerTimeoutMs, workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS);
+    // The primary failure is snapshotted before cleanup, and cleanup is reported on its own.
+    const sweepDiagnostics = knockoutRunner.isolatedSweepFailureDiagnostics(refusal);
+    assert.ok(sweepDiagnostics !== null);
+    assert.equal(sweepDiagnostics.primary.code, "ARM_REFUSED");
+    assert.equal(sweepDiagnostics.primary.phase, "WORKER");
+    assert.equal(sweepDiagnostics.primary.phaseState, "ENDED");
+    assert.equal(sweepDiagnostics.primary.role, "BASELINE");
+    assert.equal(sweepDiagnostics.primary.armId, "baseline-0001");
+    assert.equal(sweepDiagnostics.primary.entryId, supervisorEntry.id);
+    assert.equal(sweepDiagnostics.primary.terminal.reasonCode, "WORKER_REFUSED");
+    assert.equal(sweepDiagnostics.primary.terminal.workerRefusalReasonCode, "REGISTRY_REFUSED");
+    assert.equal(sweepDiagnostics.cleanup.status, "COMPLETE");
+    assert.equal(sweepDiagnostics.cleanup.leaseCleanup, "COOPERATIVE_CLOSE");
+    const eventOrder = diagnostics.map((record) => `${String(record.event)}:${String(record.phase)}`);
+    const failureAt = eventOrder.indexOf("failure:WORKER");
+    assert.ok(failureAt >= 0, eventOrder.join(","));
+    assert.ok(failureAt < eventOrder.indexOf("start:CLEANUP"), eventOrder.join(","));
+    assert.ok(eventOrder.indexOf("start:CLEANUP") < eventOrder.indexOf("end:CLEANUP"));
+    assert.equal(eventOrder.includes("start:CLOSE"), false);
+    const failureLines = knockoutCli.isolatedSweepFailureLines(refusal);
+    const failureLine = failureLines.find((line) => line.startsWith("  failure diagnostic: "));
+    const cleanupLine = failureLines.find((line) => line.startsWith("  cleanup diagnostic: "));
+    assert.ok(failureLine !== undefined && cleanupLine !== undefined, failureLines.join("\n"));
+    for (const line of [failureLine, cleanupLine]) {
+      assert.ok(Buffer.byteLength(line, "utf8") <= knockoutCli.DIAGNOSTIC_LINE_MAX_BYTES);
+      assert.equal(line.includes(fixture.custody), false, "a private path escaped into telemetry");
+    }
+    const printedFailure = JSON.parse(failureLine.slice("  failure diagnostic: ".length)) as
+      Record<string, unknown>;
+    assert.equal(printedFailure.phase, "WORKER");
+    assert.equal(printedFailure.code, "ARM_REFUSED");
+    assert.equal("omitted" in printedFailure, false);
 
     assert.equal(fs.existsSync(path.join(fixture.source, "suite-ran.txt")), false);
     assert.equal(

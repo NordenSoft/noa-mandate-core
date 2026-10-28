@@ -42,7 +42,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   BOUNDARY_CANDIDATE_TIER_A_KNOCKOUT_PROVENANCE_EXPECTATION,
-  baselineEvidenceSummary, KNOCKOUT_SHARD_LIMITS, knockoutShardTimingVerdict,
+  baselineEvidenceSummary, isolatedSweepFailureDiagnostics,
+  KNOCKOUT_SHARD_LIMITS, knockoutShardTimingVerdict,
   planKnockoutShards, PASSING,
   ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS, runIsolatedKnockoutSweep, validateKnockoutRegistry,
 } from "./lib/knockout-runner.mjs";
@@ -149,12 +150,101 @@ function selftestFailureDiagnosticLine(details) {
   }
 }
 
+// ── SWEEP DIAGNOSTIC OUTPUT ─────────────────────────────────────────────────────────────────────
+// Telemetry printed beside, never inside, the verdict output. Every record is re-sanitized here:
+// allowlisted key shapes, safe integers, booleans, null and short identifier-shaped strings only, in
+// the producer's fixed field order. Each line is capped at DIAGNOSTIC_LINE_MAX_BYTES UTF-8 bytes
+// (largest nested sections are dropped first and named in `omitted`), and a report's diagnostic
+// lines are capped at DIAGNOSTIC_REPORT_MAX_BYTES in total. Arbitrary details, messages and
+// stderr are never printed through this path.
+export const DIAGNOSTIC_LINE_MAX_BYTES = 4096;
+export const DIAGNOSTIC_REPORT_MAX_BYTES = 1024 * 1024;
+const DIAGNOSTIC_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const DIAGNOSTIC_STRING_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+const DIAGNOSTIC_MAX_DEPTH = 5;
+const DIAGNOSTIC_MAX_KEYS = 64;
+const DIAGNOSTIC_MAX_ITEMS = 16;
+
+function sanitizedDiagnosticValue(value, depth) {
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isSafeInteger(value) ? value : null;
+  if (typeof value === "string") return DIAGNOSTIC_STRING_RE.test(value) ? value : null;
+  if (depth >= DIAGNOSTIC_MAX_DEPTH || typeof value !== "object") return null;
+  if (Array.isArray(value)) {
+    return value.slice(0, DIAGNOSTIC_MAX_ITEMS).map((item) => sanitizedDiagnosticValue(item, depth + 1));
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return null;
+  const sanitized = {};
+  for (const key of Object.keys(value).slice(0, DIAGNOSTIC_MAX_KEYS)) {
+    if (DIAGNOSTIC_KEY_RE.test(key)) sanitized[key] = sanitizedDiagnosticValue(value[key], depth + 1);
+  }
+  return sanitized;
+}
+
+/** One bounded `<label> <json>` line; never throws and never exceeds DIAGNOSTIC_LINE_MAX_BYTES. */
+export function boundedDiagnosticLine(label, record) {
+  const fallback = `${label} {"diagnosticStatus":"UNAVAILABLE"}`;
+  try {
+    let candidate = sanitizedDiagnosticValue(record, 0);
+    if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) return fallback;
+    const render = (value) => `${label} ${JSON.stringify(value)}`;
+    let line = render(candidate);
+    const omitted = [];
+    while (Buffer.byteLength(line, "utf8") > DIAGNOSTIC_LINE_MAX_BYTES) {
+      const largest = Object.keys(candidate)
+        .filter((key) => key !== "omitted" && candidate[key] !== null && typeof candidate[key] === "object")
+        .sort((left, right) =>
+          JSON.stringify(candidate[right]).length - JSON.stringify(candidate[left]).length)[0];
+      if (largest === undefined) {
+        return `${label} {"diagnosticStatus":"OVERSIZE","omitted":${JSON.stringify(Object.keys(candidate).slice(0, DIAGNOSTIC_MAX_ITEMS))}}`;
+      }
+      omitted.push(largest);
+      const rest = { ...candidate };
+      delete rest[largest];
+      delete rest.omitted;
+      candidate = { ...rest, omitted: [...omitted] };
+      line = render(candidate);
+    }
+    return line;
+  } catch {
+    return fallback;
+  }
+}
+
+/** A report-wide diagnostic writer: each line bounded, all lines together capped once. */
+export function createDiagnosticPrinter(write, maxBytes = DIAGNOSTIC_REPORT_MAX_BYTES) {
+  let usedBytes = 0;
+  let truncated = false;
+  return (record) => {
+    if (truncated) return;
+    try {
+      const label = record?.event === "summary" ? "  progress-timing" : "  knockout-diagnostic";
+      const line = boundedDiagnosticLine(label, record);
+      const bytes = Buffer.byteLength(line, "utf8") + 1;
+      if (usedBytes + bytes > maxBytes) {
+        truncated = true;
+        write(`  knockout-diagnostic-truncated {"reportCapBytes":${maxBytes},"usedBytes":${usedBytes}}`);
+        return;
+      }
+      usedBytes += bytes;
+      write(line);
+    } catch {}
+  };
+}
+
 export function isolatedSweepFailureLines(error) {
   const code = typeof error?.code === "string" ? error.code : "ISOLATED_SWEEP_FAILED";
   const lines = [`\n${code}: ${String(error?.message ?? error)}`];
   if (code === "SELFTEST_FAILED") lines.push(selftestFailureDiagnosticLine(error?.details));
   if (typeof error?.details?.custodyRoot === "string") {
     lines.push(`  retained custody: ${error.details.custodyRoot}`);
+  }
+  // Present only for a failure the isolated sweep itself snapshotted (primary before cleanup).
+  const sweep = isolatedSweepFailureDiagnostics(error);
+  if (sweep !== null) {
+    lines.push(boundedDiagnosticLine("  failure diagnostic:", sweep.primary));
+    lines.push(boundedDiagnosticLine("  cleanup diagnostic:", sweep.cleanup));
   }
   return Object.freeze(lines);
 }
@@ -7001,12 +7091,16 @@ if (DIRECT_ENTRY) {
     ? deriveBoundaryKnockoutCandidateSubject(ROOT)
     : null;
   const shardLabel = SHARD ? `shard ${SHARD.index}/${SHARD.total} ` : "";
+  // Per-phase cost telemetry (capture, custody, admission, materialization, worker, close), bounded
+  // per line and per report; it is printed beside the verdict lines and never feeds them.
+  const printDiagnostic = createDiagnosticPrinter((line) => process.stdout.write(`${line}\n`));
   let sweep = null;
   try {
     sweep = await runIsolatedKnockoutSweep({
       captureTimeoutMs: ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS.captureTimeoutMs,
       maxRetainedArms: KNOCKOUT_WORKSPACE_ARM_LIMITS.maxRetainedArms,
       maxRetainedBytes: KNOCKOUT_WORKSPACE_ARM_LIMITS.maxRetainedBytes,
+      onDiagnostic: printDiagnostic,
       onProgress: ({ completed, detail, id, suite, total, verdict }) => {
         process.stdout.write(`  progress ${shardLabel}${completed}/${total} ${verdict} ${id}\n`);
         // Preserve the completed control's diagnostic even if a later arm or the job times out.

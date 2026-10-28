@@ -853,6 +853,11 @@ const SHARED_INDEX_BASENAME = /^sharedindex\.(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const REF_NAME = /^refs\/[\x21-\x7e]+$/;
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 const operationBudgets = new WeakSet();
+// Diagnostics-only side channels (see "OPERATION DIAGNOSTICS" below). No control, refusal,
+// verdict, schema or digest ever reads them; they only describe where an operation spent its budget.
+const operationBudgetDiagnostics = new WeakMap();
+const workspaceFailureDiagnostics = new WeakMap();
+const workspaceOperationResultDiagnostics = new WeakMap();
 const metadataObservationCacheStates = new WeakMap();
 const sealedCaptureCapabilities = new WeakMap();
 const boundDirectoryLeaseStates = new WeakMap();
@@ -2774,7 +2779,279 @@ function currentEffectiveUid() {
   return uid;
 }
 
-function registerOperationBudget(operationTimeoutMs, commandTimeoutMs) {
+// ── OPERATION DIAGNOSTICS ───────────────────────────────────────────────────────────────────────
+// Bounded, typed telemetry keyed by the existing operation budget. It answers one question a CI log
+// could not: which part of a deadline-bound operation consumed the budget. It is NOT evidence and
+// NOT authority: nothing here may throw into a caller, change a deadline, select a refusal code, or
+// enter a returned schema, terminal, manifest or digest. Values are closed enums and safe integers.
+const DIAGNOSTIC_OPERATIONS = new Set([
+  "ARM_ADMISSION", "ARM_MATERIALIZATION", "CAPTURE", "CLOSE_TERMINAL_REOPEN",
+  "COOPERATIVE_LEASE_ACQUIRE", "CUSTODY_OPEN", "SOURCE_LEASE_ACQUIRE", "SOURCE_RELEASE",
+  "WORKER_PREPARATION", "WORKER_PUBLICATION",
+]);
+const DIAGNOSTIC_LAUNCH_KINDS = Object.freeze([
+  "acl", "xattr", "linuxMetadataHelper", "macMetadataHelper", "entryStat", "descriptorCensus",
+]);
+const DIAGNOSTIC_SUBPHASES = Object.freeze([
+  "censusWalk", "metadataBatch", "fileCopy", "directoryFsync", "destinationCensus",
+  "seedObservation", "worktreeCopy", "initialArmObservation", "retainedTargets",
+  "resultPublication", "terminalPublication",
+]);
+const DIAGNOSTIC_NODE_TYPES = Object.freeze(["directory", "file", "symlink", "other"]);
+const DIAGNOSTIC_MAX_SUBPHASE_DEPTH = 16;
+const DIAGNOSTIC_MAX_CAUSE_DEPTH = 8;
+const DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const DIAGNOSTIC_EXECUTABLES = new Set(["getfacl", "getfattr", "perl", "python3", "stat"]);
+// The one launch grant whose timeout the next metadata child will receive. metadataTimeout() is
+// evaluated as an argument immediately before its synchronous launch, so the launch site can bind
+// its own failure to the granting budget without a new parameter on every launch helper.
+let lastGrantedLaunch = null;
+
+function diagnosticMs(ns) {
+  if (typeof ns !== "bigint" || ns <= 0n) return 0;
+  const ms = ns / 1_000_000n;
+  return ms > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(ms);
+}
+
+function diagnosticCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function newOperationDiagnosticState(operation, operationTimeoutMs, commandTimeoutMs, startedNs) {
+  const counters = (names, zero) => Object.fromEntries(names.map((name) => [name, zero]));
+  return {
+    batches: { count: 0, maxNodes: 0, totalNodes: 0 },
+    bytesWritten: 0,
+    commandTimeoutMs,
+    deadlineNs: startedNs + BigInt(operationTimeoutMs) * 1_000_000n,
+    fsyncCount: 0,
+    launchNs: counters(DIAGNOSTIC_LAUNCH_KINDS, 0n),
+    launches: counters(DIAGNOSTIC_LAUNCH_KINDS, 0),
+    metadata: { requested: 0, cacheHit: 0, attempted: 0, completed: 0 },
+    nodes: counters(DIAGNOSTIC_NODE_TYPES, 0),
+    operation: DIAGNOSTIC_OPERATIONS.has(operation) ? operation : "UNNAMED",
+    operationTimeoutMs,
+    pendingLaunch: null,
+    startedNs,
+    subphaseExclusiveNs: counters(DIAGNOSTIC_SUBPHASES, 0n),
+    subphaseInclusiveNs: counters(DIAGNOSTIC_SUBPHASES, 0n),
+    subphaseStack: [],
+  };
+}
+
+function diagnosticStateOf(operationBudget) {
+  if (operationBudget === null || typeof operationBudget !== "object") return null;
+  return operationBudgetDiagnostics.get(operationBudget) ?? null;
+}
+
+// A launch window runs from the grant to the next checkpoint of the same budget: child execution
+// plus output parsing. An open window at failure time names the child that was still running.
+function closePendingLaunch(state, nowNs) {
+  const pending = state.pendingLaunch;
+  if (pending === null) return;
+  state.pendingLaunch = null;
+  if (nowNs > pending.startedNs) state.launchNs[pending.kind] += nowNs - pending.startedNs;
+}
+
+function noteOperationLaunch(operationBudget, launchKind, launchNodes, timeoutMs) {
+  try {
+    const state = diagnosticStateOf(operationBudget);
+    if (state === null || !DIAGNOSTIC_LAUNCH_KINDS.includes(launchKind)) {
+      lastGrantedLaunch = null;
+      return;
+    }
+    const nowNs = process.hrtime.bigint();
+    closePendingLaunch(state, nowNs);
+    const nodes = diagnosticCount(launchNodes);
+    state.launches[launchKind] += 1;
+    state.batches.count += 1;
+    state.batches.totalNodes += nodes;
+    if (nodes > state.batches.maxNodes) state.batches.maxNodes = nodes;
+    state.pendingLaunch = { kind: launchKind, startedNs: nowNs, timeoutMs };
+    lastGrantedLaunch = { consumed: false, kind: launchKind, state, timeoutMs };
+  } catch {
+    lastGrantedLaunch = null;
+  }
+}
+
+function consumeGrantedLaunch(timeoutMs) {
+  const grant = lastGrantedLaunch;
+  lastGrantedLaunch = null;
+  return grant !== null && !grant.consumed && grant.timeoutMs === timeoutMs ? grant : null;
+}
+
+function countOperationDiagnostic(operationBudget, field, amount = 1) {
+  try {
+    const state = diagnosticStateOf(operationBudget);
+    if (state === null) return;
+    const increment = diagnosticCount(amount);
+    if (field === "bytesWritten" || field === "fsyncCount") {
+      state[field] = Math.min(Number.MAX_SAFE_INTEGER, state[field] + increment);
+    } else if (Object.hasOwn(state.metadata, field)) {
+      state.metadata[field] += increment;
+    }
+  } catch {}
+}
+
+function countOperationNodes(operationBudget, nodes) {
+  try {
+    const state = diagnosticStateOf(operationBudget);
+    if (state === null || !Array.isArray(nodes)) return;
+    for (const node of nodes) {
+      const type = DIAGNOSTIC_NODE_TYPES.includes(node?.type) ? node.type : "other";
+      state.nodes[type] += 1;
+    }
+  } catch {}
+}
+
+function operationDiagnosticSnapshot(state, nowNs = process.hrtime.bigint()) {
+  try { return unguardedOperationDiagnosticSnapshot(state, nowNs); }
+  catch { return null; }
+}
+
+function unguardedOperationDiagnosticSnapshot(state, nowNs) {
+  const msOf = (record) => Object.fromEntries(
+    Object.entries(record).map(([name, ns]) => [name, diagnosticMs(ns)]),
+  );
+  return Object.freeze({
+    operation: state.operation,
+    elapsedMs: diagnosticMs(nowNs - state.startedNs),
+    remainingMs: diagnosticMs(state.deadlineNs - nowNs),
+    operationTimeoutMs: state.operationTimeoutMs,
+    commandTimeoutMs: state.commandTimeoutMs,
+    openSubphases: Object.freeze(state.subphaseStack.map((frame) => frame.name)),
+    pendingLaunch: state.pendingLaunch === null ? null : Object.freeze({
+      kind: state.pendingLaunch.kind,
+      elapsedMs: diagnosticMs(nowNs - state.pendingLaunch.startedNs),
+      timeoutMs: diagnosticCount(state.pendingLaunch.timeoutMs),
+    }),
+    nodes: Object.freeze({ ...state.nodes }),
+    metadata: Object.freeze({ ...state.metadata }),
+    launches: Object.freeze({ ...state.launches }),
+    launchWindowMs: Object.freeze(msOf(state.launchNs)),
+    batches: Object.freeze({ ...state.batches }),
+    bytesWritten: state.bytesWritten,
+    fsyncCount: state.fsyncCount,
+    subphaseInclusiveMs: Object.freeze(msOf(state.subphaseInclusiveNs)),
+    subphaseExclusiveMs: Object.freeze(msOf(state.subphaseExclusiveNs)),
+  });
+}
+
+function operationBudgetSnapshot(operationBudget) {
+  const state = diagnosticStateOf(operationBudget);
+  return state === null ? null : operationDiagnosticSnapshot(state);
+}
+
+function annotateWorkspaceFailure(error, fields) {
+  try {
+    if (error === null || (typeof error !== "object" && typeof error !== "function")) return error;
+    const record = workspaceFailureDiagnostics.get(error) ?? {};
+    for (const [key, value] of Object.entries(fields)) {
+      if (record[key] === undefined && value !== undefined && value !== null) record[key] = value;
+    }
+    workspaceFailureDiagnostics.set(error, record);
+  } catch {}
+  return error;
+}
+
+function annotateOperationBudgetFailure(error, operationBudget) {
+  return annotateWorkspaceFailure(error, { budget: operationBudgetSnapshot(operationBudget) });
+}
+
+function recordOperationResultDiagnostics(value, record) {
+  try {
+    if (value !== null && typeof value === "object") {
+      workspaceOperationResultDiagnostics.set(value, Object.freeze({ ...record }));
+    }
+  } catch {}
+  return value;
+}
+
+/**
+ * Inclusive time counts the outermost frame of a subphase name once; exclusive time subtracts every
+ * nested measured subphase. The innermost failing frame records the open subphase path on the error
+ * before any frame closes, so "current phase" survives the unwind.
+ */
+function measureSubphase(operationBudget, name, run) {
+  const state = diagnosticStateOf(operationBudget);
+  if (
+    state === null || !DIAGNOSTIC_SUBPHASES.includes(name) ||
+    state.subphaseStack.length >= DIAGNOSTIC_MAX_SUBPHASE_DEPTH
+  ) return run();
+  const frame = { childNs: 0n, name, startedNs: process.hrtime.bigint() };
+  state.subphaseStack.push(frame);
+  try {
+    return run();
+  } catch (error) {
+    annotateWorkspaceFailure(error, {
+      openSubphases: Object.freeze(state.subphaseStack.map((open) => open.name)),
+    });
+    throw error;
+  } finally {
+    try {
+      const index = state.subphaseStack.lastIndexOf(frame);
+      if (index >= 0) {
+        state.subphaseStack.length = index;
+        const elapsedNs = process.hrtime.bigint() - frame.startedNs;
+        if (elapsedNs > 0n) {
+          const exclusiveNs = elapsedNs - frame.childNs;
+          if (exclusiveNs > 0n) state.subphaseExclusiveNs[name] += exclusiveNs;
+          if (!state.subphaseStack.some((open) => open.name === name)) {
+            state.subphaseInclusiveNs[name] += elapsedNs;
+          }
+          const parent = state.subphaseStack.at(-1);
+          if (parent !== undefined) parent.childNs += elapsedNs;
+        }
+      }
+    } catch {}
+  }
+}
+
+function diagnosticExecutable(executable) {
+  const name = typeof executable === "string" ? path.basename(executable) : null;
+  return DIAGNOSTIC_EXECUTABLES.has(name) ? name : "other";
+}
+
+function freezeFailureDiagnostics(record, causeDepth) {
+  const launch = record.launch ?? null;
+  return Object.freeze({
+    causeDepth,
+    deadlineCause: record.deadlineCause ?? null,
+    pendingLaunchKind: record.pendingLaunchKind ?? null,
+    launch: launch === null ? null : Object.freeze({ ...launch }),
+    openSubphases: record.openSubphases ?? null,
+    budget: record.budget ?? null,
+  });
+}
+
+/**
+ * Diagnostics-only reader for a workspace failure: the first annotated error on the bounded cause
+ * chain (AggregateError follows its primary member). Returns null rather than throwing.
+ */
+export function knockoutWorkspaceFailureDiagnostics(error) {
+  try {
+    let current = error;
+    for (let depth = 0; depth < DIAGNOSTIC_MAX_CAUSE_DEPTH; depth++) {
+      if (current === null || (typeof current !== "object" && typeof current !== "function")) break;
+      const record = workspaceFailureDiagnostics.get(current);
+      if (record !== undefined) return freezeFailureDiagnostics(record, depth);
+      current = current instanceof AggregateError ? current.errors?.[0] : current.cause;
+    }
+  } catch {}
+  return null;
+}
+
+/** Diagnostics-only reader for a value returned by an instrumented workspace operation. */
+export function knockoutWorkspaceOperationDiagnostics(value) {
+  try {
+    if (value === null || typeof value !== "object") return null;
+    return workspaceOperationResultDiagnostics.get(value) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function registerOperationBudget(operationTimeoutMs, commandTimeoutMs, operation = null) {
   const effectiveUid = currentEffectiveUid();
   if (effectiveUid === null) {
     fail(
@@ -2782,29 +3059,41 @@ function registerOperationBudget(operationTimeoutMs, commandTimeoutMs) {
       "the platform cannot report the effective filesystem principal",
     );
   }
+  const startedNs = process.hrtime.bigint();
   const budget = Object.freeze({
     commandTimeoutMs: Math.min(commandTimeoutMs, operationTimeoutMs),
-    deadlineNs: process.hrtime.bigint() + BigInt(operationTimeoutMs) * 1_000_000n,
+    deadlineNs: startedNs + BigInt(operationTimeoutMs) * 1_000_000n,
     effectiveUid,
     operationTimeoutMs,
   });
   operationBudgets.add(budget);
+  try {
+    operationBudgetDiagnostics.set(budget, newOperationDiagnosticState(
+      operation,
+      operationTimeoutMs,
+      budget.commandTimeoutMs,
+      startedNs,
+    ));
+  } catch {}
   return budget;
 }
 
-function createOperationBudget(timeoutMs) {
+function createOperationBudget(timeoutMs, operation = null) {
   const bounded = requireCommandTimeoutMs(timeoutMs);
-  return registerOperationBudget(bounded, bounded);
+  return registerOperationBudget(bounded, bounded, operation);
 }
 
 function createCaptureOperationBudget(operationTimeoutMs, commandTimeoutMs) {
   return registerOperationBudget(
     requireCaptureOperationTimeoutMs(operationTimeoutMs),
     requireCommandTimeoutMs(commandTimeoutMs),
+    "CAPTURE",
   );
 }
 
-function remainingOperationMs(budget, label = "workspace operation") {
+// `launchKind` is diagnostics-only: it names the child whose timeout this check is about to grant,
+// so an exhausted budget is reported as exhausted before launch rather than as a child timeout.
+function remainingOperationMs(budget, label = "workspace operation", launchKind = null) {
   if (
     budget === null || typeof budget !== "object" ||
     !operationBudgets.has(budget) || typeof budget.deadlineNs !== "bigint" ||
@@ -2822,13 +3111,23 @@ function remainingOperationMs(budget, label = "workspace operation") {
       { expectedEffectiveUid: budget.effectiveUid, observedEffectiveUid },
     );
   }
-  const remainingNs = budget.deadlineNs - process.hrtime.bigint();
+  const nowNs = process.hrtime.bigint();
+  const diagnosticState = diagnosticStateOf(budget);
+  if (diagnosticState !== null) closePendingLaunch(diagnosticState, nowNs);
+  const remainingNs = budget.deadlineNs - nowNs;
   if (remainingNs <= 0n) {
-    fail(
+    const beforeLaunch = DIAGNOSTIC_LAUNCH_KINDS.includes(launchKind);
+    throw annotateWorkspaceFailure(workspaceError(
       KNOCKOUT_WORKSPACE_ERROR_CODES.OPERATION_DEADLINE_EXCEEDED,
       `${label} exceeded its ${budget.operationTimeoutMs}ms deadline`,
       { timeoutMs: budget.operationTimeoutMs },
-    );
+    ), {
+      budget: diagnosticState === null ? null : operationDiagnosticSnapshot(diagnosticState, nowNs),
+      deadlineCause: beforeLaunch
+        ? "BUDGET_EXHAUSTED_BEFORE_LAUNCH"
+        : "BUDGET_EXHAUSTED_AT_CHECKPOINT",
+      pendingLaunchKind: beforeLaunch ? launchKind : null,
+    });
   }
   const roundedUpMs = (remainingNs + 999_999n) / 1_000_000n;
   return Number(roundedUpMs > BigInt(budget.commandTimeoutMs)
@@ -3732,7 +4031,7 @@ function boundEntryStat(bound, name, label, { code, operationBudget = null } = {
       killSignal: "SIGKILL",
       maxBuffer: 64 * 1024,
       stdio: ["ignore", "pipe", "pipe", bound.fd],
-      timeout: metadataTimeout(operationBudget, `bound entry stat for ${label}`),
+      timeout: metadataTimeout(operationBudget, `bound entry stat for ${label}`, "entryStat"),
     },
   );
   const stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString("utf8") : "";
@@ -4387,6 +4686,7 @@ function toolResult(
   input = null,
   metadataFailureToken = null,
 ) {
+  const launchGrant = consumeGrantedLaunch(timeoutMs);
   const boundedTimeoutMs = requireCommandTimeoutMs(timeoutMs);
   if (!Number.isInteger(directoryFd) || directoryFd < 0) {
     fail(
@@ -4441,7 +4741,7 @@ function toolResult(
     const stableCode = processFailureCode === code && metadataFailureToken !== null
       ? metadataHelperFailureCode(result, metadataFailureToken, code)
       : processFailureCode;
-    fail(
+    const refusal = workspaceError(
       stableCode,
       `cannot inspect ${label}`,
       {
@@ -4459,6 +4759,22 @@ function toolResult(
       },
       result.error,
     );
+    const timedOut = result.error?.code === "ETIMEDOUT";
+    throw annotateWorkspaceFailure(refusal, {
+      budget: launchGrant === null ? null : operationDiagnosticSnapshot(launchGrant.state),
+      deadlineCause: timedOut ? "CHILD_TIMED_OUT" : null,
+      launch: Object.freeze({
+        kind: launchGrant?.kind ?? null,
+        executable: diagnosticExecutable(executable),
+        timeoutMs: boundedTimeoutMs,
+        timedOut,
+        status: Number.isSafeInteger(result.status) ? result.status : null,
+        signal: typeof result.signal === "string" && DIAGNOSTIC_CODE.test(result.signal)
+          ? result.signal : null,
+        errorCode: typeof result.error?.code === "string" && DIAGNOSTIC_CODE.test(result.error.code)
+          ? result.error.code : null,
+      }),
+    });
   }
   return result.stdout;
 }
@@ -4490,10 +4806,12 @@ function metadataHelperFailureCode(result, expectedToken, fallback) {
     : KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED;
 }
 
-function metadataTimeout(operationBudget, label) {
-  return operationBudget === null
+function metadataTimeout(operationBudget, label, launchKind = null, launchNodes = 1) {
+  const timeoutMs = operationBudget === null
     ? MAX_CHILD_PROCESS_DURATION_MS
-    : remainingOperationMs(operationBudget, label);
+    : remainingOperationMs(operationBudget, label, launchKind);
+  noteOperationLaunch(operationBudget, launchKind, launchNodes, timeoutMs);
+  return timeoutMs;
 }
 
 function parseMetadataHelperCanonicalJson(output, code, label) {
@@ -4718,7 +5036,7 @@ function observeLinuxMetadata(abs, operand, isSymlink, operationBudget, director
     ["--absolute-names", "--omit-header", ...(isSymlink ? ["--physical"] : []), operand],
     KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
     `ACLs for ${abs}`,
-    metadataTimeout(operationBudget, `metadata inspection for ${abs}`),
+    metadataTimeout(operationBudget, `metadata inspection for ${abs}`, "acl"),
     directoryFd,
   ).toString("utf8");
   const aclEntries = acl.split("\n").filter((line) => line.length > 0 && !line.startsWith("#"));
@@ -4735,7 +5053,7 @@ function observeLinuxMetadata(abs, operand, isSymlink, operationBudget, director
     ["--absolute-names", "--dump", "--match=-", ...(isSymlink ? ["--no-dereference"] : []), operand],
     KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
     `extended attributes for ${abs}`,
-    metadataTimeout(operationBudget, `metadata inspection for ${abs}`),
+    metadataTimeout(operationBudget, `metadata inspection for ${abs}`, "xattr"),
     directoryFd,
   ).toString("utf8");
   const names = xattrs
@@ -5019,6 +5337,8 @@ function observeDescriptorMetadataBatch(
       });
 
       const misses = records.filter((record) => !record.cacheHit);
+      countOperationDiagnostic(operationBudget, "requested", records.length);
+      countOperationDiagnostic(operationBudget, "cacheHit", records.length - misses.length);
       for (const record of misses) {
         if (operationBudget !== null) {
           remainingOperationMs(
@@ -5094,6 +5414,7 @@ function observeDescriptorMetadataBatch(
           );
         }
         const failureToken = crypto.randomBytes(32).toString("hex");
+        countOperationDiagnostic(operationBudget, "attempted", misses.length);
         const combinedOutput = toolResult(
           MAC_METADATA_HELPER,
           [
@@ -5104,7 +5425,12 @@ function observeDescriptorMetadataBatch(
           ],
           KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
           `batched ${backend.label} ACLs and extended attributes`,
-          metadataTimeout(operationBudget, `batched ${backend.label} metadata inspection`),
+          metadataTimeout(
+            operationBudget,
+            `batched ${backend.label} metadata inspection`,
+            backend === DESCRIPTOR_METADATA_BACKENDS.linux ? "linuxMetadataHelper" : "macMetadataHelper",
+            misses.length,
+          ),
           directoryFd,
           openedNodeFds,
           expectedInput,
@@ -5118,6 +5444,7 @@ function observeDescriptorMetadataBatch(
         if (operationBudget !== null) {
           remainingOperationMs(operationBudget, `batched ${backend.label} metadata inspection`);
         }
+        countOperationDiagnostic(operationBudget, "completed", misses.length);
       }
 
       for (const record of records) {
@@ -5405,9 +5732,12 @@ function observeMetadata(
       : `${anchorRoot.identity}\0${isSymlink ? "symlink" : "node"}\0${context.operand}`;
     const cached = cacheKey === null ? undefined : cacheState.entries.get(cacheKey);
     const cacheHit = cached !== undefined && cached.pathChainSha256 === beforeSha256;
+    countOperationDiagnostic(operationBudget, "requested");
     if (cacheHit) {
+      countOperationDiagnostic(operationBudget, "cacheHit");
       metadata = cached.metadata;
     } else if (process.platform === "linux") {
+      countOperationDiagnostic(operationBudget, "attempted");
       metadata = observeLinuxMetadata(
         context.absolute,
         context.operand,
@@ -5415,6 +5745,7 @@ function observeMetadata(
         operationBudget,
         directoryFd,
       );
+      countOperationDiagnostic(operationBudget, "completed");
     } else {
       fail(
         KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
@@ -6354,16 +6685,17 @@ export function censusWorkspace(root, options = {}) {
     remainingOperationMs(operationBudget, `workspace census at ${relDir}`);
   };
 
-  walk(physical, ".", 0);
+  measureSubphase(operationBudget, "censusWalk", () => walk(physical, ".", 0));
   if (pendingNodeReservations !== 0) {
     fail(KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE, "workspace node reservations leaked");
   }
-  const metadata = observeMetadataBatch(
+  countOperationNodes(operationBudget, provisional);
+  const metadata = measureSubphase(operationBudget, "metadataBatch", () => observeMetadataBatch(
     metadataRequests,
     operationBudget,
     workspaceDirectory,
     metadataCache,
-  );
+  ));
   if (metadata.length !== provisional.length) {
     fail(
       KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
@@ -7805,7 +8137,7 @@ function descriptorPrivateTreeCensus(
       killSignal: "SIGKILL",
       maxBuffer: Math.min(MAX_TOOL_OUTPUT_BYTES, Math.max(64 * 1024, maxNodes * 1024)),
       stdio: ["ignore", "pipe", "pipe", rootBound.fd],
-      timeout: metadataTimeout(operationBudget, `${label} descriptor census`),
+      timeout: metadataTimeout(operationBudget, `${label} descriptor census`, "descriptorCensus"),
     },
   );
   if (result.error !== undefined) {
@@ -9272,6 +9604,7 @@ function fsyncDirectory(directory, operationBudget = null) {
       fail(KNOCKOUT_WORKSPACE_ERROR_CODES.PRIVATE_ROOT_UNSAFE, `${directory} is not a directory`);
     }
     fs.fsyncSync(fd);
+    countOperationDiagnostic(operationBudget, "fsyncCount");
     if (operationBudget !== null) remainingOperationMs(operationBudget, `directory fsync for ${directory}`);
   } catch (error) {
     pendingError = error instanceof KnockoutWorkspaceError
@@ -11020,7 +11353,9 @@ function writeExclusivePrivateFile(abs, bytes, mode = 0o600, operationBudget = n
     );
     fs.fchmodSync(fd, mode);
     writeAll(fd, bytes, null, operationBudget, `private-file write for ${abs}`);
+    countOperationDiagnostic(operationBudget, "bytesWritten", bytes.length);
     fs.fsyncSync(fd);
+    countOperationDiagnostic(operationBudget, "fsyncCount");
     if (operationBudget !== null) remainingOperationMs(operationBudget, `private-file write for ${abs}`);
   } catch (error) {
     pendingError = error instanceof KnockoutWorkspaceError
@@ -11227,11 +11562,11 @@ function copyLiveWorktree(sourceCensus, destinationRoot, options = {}) {
       if (operationBudget !== null) remainingOperationMs(operationBudget, `worktree copy at ${node.path}`);
       continue;
     }
-    copyLiveFile(sourceRoot, destinationRoot, node, {
+    measureSubphase(operationBudget, "fileCopy", () => copyLiveFile(sourceRoot, destinationRoot, node, {
       limits,
       operationBudget,
       sourceMismatchCode: sourceMismatchCode ?? KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
-    });
+    }));
     if (node.hardlinkGroup !== null) hardlinkPrimary.set(node.hardlinkGroup, destination);
   }
   for (const node of sourceCensus.nodes) {
@@ -11253,16 +11588,21 @@ function copyLiveWorktree(sourceCensus, destinationRoot, options = {}) {
     ...directoryNodes.map((node) => path.join(destinationRoot, ...node.path.split("/"))),
     destinationRoot,
   ].sort((left, right) => right.split(path.sep).length - left.split(path.sep).length);
-  for (const directory of directories) fsyncDirectory(directory, operationBudget);
+  measureSubphase(operationBudget, "directoryFsync", () => {
+    for (const directory of directories) fsyncDirectory(directory, operationBudget);
+  });
   if (operationBudget !== null) remainingOperationMs(operationBudget, "worktree copy completion");
   confirmSourceRoot("source root after worktree copy");
-  const copied = censusWorkspace(destinationRoot, {
-    expectedRoot: expectedDestinationRoot,
-    limits,
-    metadataCache,
-    operationBudget,
-    rootGitPolicy,
-  });
+  const copied = measureSubphase(operationBudget, "destinationCensus", () => censusWorkspace(
+    destinationRoot,
+    {
+      expectedRoot: expectedDestinationRoot,
+      limits,
+      metadataCache,
+      operationBudget,
+      rootGitPolicy,
+    },
+  ));
   if (!copiedWorktreeEquivalent(sourceCensus, copied)) {
     fail(
       KNOCKOUT_WORKSPACE_ERROR_CODES.COPY_INCOMPLETE,
@@ -14028,7 +14368,7 @@ export function openKnockoutCustody(captureCapability, options = {}) {
     snapshot.maxRetainedArms,
     snapshot.maxRetainedBytes,
   );
-  const operationBudget = createOperationBudget(commandTimeoutMs);
+  const operationBudget = createOperationBudget(commandTimeoutMs, "CUSTODY_OPEN");
   const metadataCache = captureDescriptor.metadataCache;
   if (!metadataObservationCacheStates.has(metadataCache)) {
     fail(
@@ -14138,7 +14478,7 @@ export function acquireSourceLease(custodyCapability) {
       custodyState.retainedRoots,
     );
   }
-  const operationBudget = createOperationBudget(custodyState.commandTimeoutMs);
+  const operationBudget = createOperationBudget(custodyState.commandTimeoutMs, "SOURCE_LEASE_ACQUIRE");
   custodyState.status = "ACQUIRING";
   let observedSource;
   try {
@@ -14635,7 +14975,10 @@ export async function acquireCooperativeSourceLease(sourceLease, options = {}) {
   const handshakeTimeoutMs = requireCommandTimeoutMs(
     snapshot.handshakeTimeoutMs ?? COOPERATIVE_SOURCE_LEASE_DEFAULT_HANDSHAKE_MS,
   );
-  const operationBudget = createOperationBudget(leaseState.custodyState.commandTimeoutMs);
+  const operationBudget = createOperationBudget(
+    leaseState.custodyState.commandTimeoutMs,
+    "COOPERATIVE_LEASE_ACQUIRE",
+  );
   confirmLeaseBoundaries(leaseState, operationBudget);
   const sourceDirectory = requireRealDirectory(
     leaseState.sourceBound.path,
@@ -14822,7 +15165,7 @@ export function admitArmPlan(cooperativeLease, options) {
   if (!Array.isArray(snapshot.arms) || snapshot.arms.length < 1) {
     fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "arm plan must contain at least one arm");
   }
-  const operationBudget = createOperationBudget(leaseState.custodyState.commandTimeoutMs);
+  const operationBudget = createOperationBudget(leaseState.custodyState.commandTimeoutMs, "ARM_ADMISSION");
   confirmLeaseBoundaries(leaseState, operationBudget);
   observeExactLeaseSeed(leaseState, operationBudget, "before arm-plan admission");
   const seenBatchIds = new Set();
@@ -14956,14 +15299,15 @@ export function materializeArm(planCapability, armId) {
       { block: custodyState.workerExecutionBlock },
     );
   }
-  const operationBudget = createOperationBudget(custodyState.commandTimeoutMs);
+  const operationBudget = createOperationBudget(custodyState.commandTimeoutMs, "ARM_MATERIALIZATION");
   let armRoot = null;
   let reservationConsumed = false;
   record.status = "MATERIALIZING";
   try {
     requireHeldCooperativeSourceLease(planState.cooperativeState.cooperativeLease);
     confirmLeaseBoundaries(leaseState, operationBudget);
-    observeExactLeaseSeed(leaseState, operationBudget, `before arm ${armId} materialization`);
+    measureSubphase(operationBudget, "seedObservation", () =>
+      observeExactLeaseSeed(leaseState, operationBudget, `before arm ${armId} materialization`));
     const outstandingBytes = custodyState.reservedBytes - custodyState.consumedReservationBytes;
     if (!Number.isSafeInteger(outstandingBytes) || outstandingBytes < record.reservationBytes) {
       fail(KNOCKOUT_WORKSPACE_ERROR_CODES.CAPABILITY_INVALID, "arm reservation ledger is inconsistent");
@@ -15045,16 +15389,21 @@ export function materializeArm(planCapability, armId) {
         parentMismatchCode: KNOCKOUT_WORKSPACE_ERROR_CODES.ARM_IDENTITY_MISMATCH,
       },
     );
-    const copied = copyLiveWorktree(custodyState.seedCensus, workspaceRoot.path, {
-      expectedDestinationRoot: workspaceRoot,
-      expectedSourceRoot: leaseState.workspaceBound,
-      limits: custodyState.limits,
-      metadataCache: custodyState.metadataCache,
-      operationBudget,
-      rootGitPolicy: "include",
-      sourceMismatchCode: KNOCKOUT_WORKSPACE_ERROR_CODES.ARM_IDENTITY_MISMATCH,
-    });
-    observeExactLeaseSeed(leaseState, operationBudget, `after arm ${armId} materialization`);
+    const copied = measureSubphase(operationBudget, "worktreeCopy", () => copyLiveWorktree(
+      custodyState.seedCensus,
+      workspaceRoot.path,
+      {
+        expectedDestinationRoot: workspaceRoot,
+        expectedSourceRoot: leaseState.workspaceBound,
+        limits: custodyState.limits,
+        metadataCache: custodyState.metadataCache,
+        operationBudget,
+        rootGitPolicy: "include",
+        sourceMismatchCode: KNOCKOUT_WORKSPACE_ERROR_CODES.ARM_IDENTITY_MISMATCH,
+      },
+    ));
+    measureSubphase(operationBudget, "seedObservation", () =>
+      observeExactLeaseSeed(leaseState, operationBudget, `after arm ${armId} materialization`));
     const sourceIdentities = new Set(custodyState.seedCensus.nodes.map((node) =>
       node.observation.identity));
     const aliasedNode = copied.nodes.find((node) => sourceIdentities.has(node.observation.identity));
@@ -15167,13 +15516,16 @@ export function materializeArm(planCapability, armId) {
     custodyState.armCapabilities.add(armCapability);
     record.capability = armCapability;
     record.status = "MATERIALIZED";
-    return armCapability;
+    return recordOperationResultDiagnostics(armCapability, {
+      materialization: operationBudgetSnapshot(operationBudget),
+    });
   } catch (caught) {
     if (!reservationConsumed) {
       custodyState.consumedReservationBytes += record.reservationBytes;
       reservationConsumed = true;
     }
     record.status = "FAILED_RETAINED";
+    annotateOperationBudgetFailure(caught, operationBudget);
     custodyState.retainedRoots.push(...retainedPrivateRoots(caught?.details));
     if (armRoot !== null) custodyState.retainedRoots.push(retainCreatedPrivateTree(armRoot));
     throw reportRetainedPrivateRoots(caught, custodyState.retainedRoots);
@@ -16098,7 +16450,7 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
   armState.valid = false;
   record.status = "PREPARING";
 
-  const operationBudget = createOperationBudget(custodyState.commandTimeoutMs);
+  const operationBudget = createOperationBudget(custodyState.commandTimeoutMs, "WORKER_PREPARATION");
   let initialArm;
   try {
     validateWorkerEvidenceReferences(
@@ -16110,7 +16462,8 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
     );
     await confirmCooperativeSourceLeaseState(cooperativeState);
     confirmLeaseBoundaries(cooperativeState.leaseState, operationBudget);
-    initialArm = observeExactInitialArm(armState, operationBudget);
+    initialArm = measureSubphase(operationBudget, "initialArmObservation", () =>
+      observeExactInitialArm(armState, operationBudget));
     const workerNode = initialArm.nodes.find((node) => node.path === subject.workerRelativePath);
     if (workerNode?.type !== "file" || workerNode.sha256 !== subject.subject.worker.sha256) {
       fail(
@@ -16121,6 +16474,7 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
     await confirmCooperativeSourceLeaseState(cooperativeState);
   } catch (error) {
     record.status = "FAILED_RETAINED";
+    annotateOperationBudgetFailure(error, operationBudget);
     custodyState.workerExecutionBlock = cooperativeState.status === "LOST"
       ? "COOPERATIVE_SOURCE_LEASE_LOST"
       : "WORKER_PREPARATION_FAILED";
@@ -16139,6 +16493,7 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
   transferState.status = "ISSUING";
   record.status = "ISSUING";
 
+  const workerExecutionStartedNs = process.hrtime.bigint();
   let child;
   try {
     child = spawn(
@@ -16466,7 +16821,8 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
     custodyState.activeWorkerTransfer = null;
     throw reportRetainedPrivateRoots(error, custodyState.retainedRoots);
   }
-  const publicationBudget = createOperationBudget(custodyState.commandTimeoutMs);
+  const workerExecutionMs = diagnosticMs(process.hrtime.bigint() - workerExecutionStartedNs);
+  const publicationBudget = createOperationBudget(custodyState.commandTimeoutMs, "WORKER_PUBLICATION");
   confirmLeaseBoundaries(cooperativeState.leaseState, publicationBudget);
   confirmArmDescriptorIdentities(armState.descriptor, publicationBudget);
   let retainedTargetCustody = null;
@@ -16474,12 +16830,13 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
   let retainedTargets = null;
   if (abnormalReason === null && acceptedWorkerResult !== null) {
     try {
-      const retained = acquireRetainedMutantTargetEvidence(
-        armState,
-        workerCapability,
-        acceptedWorkerResult,
-        publicationBudget,
-      );
+      const retained = measureSubphase(publicationBudget, "retainedTargets", () =>
+        acquireRetainedMutantTargetEvidence(
+          armState,
+          workerCapability,
+          acceptedWorkerResult,
+          publicationBudget,
+        ));
       retainedTargetCustody = retained.custody;
       retainedTargets = retained.evidence;
     } catch (error) {
@@ -16494,11 +16851,12 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
   let publicationFailure = null;
   try {
     retainedTargetCustody?.confirm("before worker-result publication");
-    resultPublication = publishWorkerResultEvidence(
-      transferState,
-      resultSnapshot,
-      publicationBudget,
-    );
+    resultPublication = measureSubphase(publicationBudget, "resultPublication", () =>
+      publishWorkerResultEvidence(
+        transferState,
+        resultSnapshot,
+        publicationBudget,
+      ));
     retainedTargetCustody?.confirm("after worker-result publication");
     const cleanAcceptedResult = abnormalReason === null && acceptedWorkerResult !== null;
     const terminalStatus = cleanAcceptedResult ? acceptedWorkerResult.status : "INDETERMINATE";
@@ -16545,16 +16903,17 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
       }),
     });
     const terminalBytes = canonicalJsonBytes(terminal);
-    terminalPublication = publishArmTerminalEvidence(
-      transferState,
-      terminalBytes,
-      resultPublication,
-      publicationBudget,
-      retainedTargetCustody,
-    );
+    terminalPublication = measureSubphase(publicationBudget, "terminalPublication", () =>
+      publishArmTerminalEvidence(
+        transferState,
+        terminalBytes,
+        resultPublication,
+        publicationBudget,
+        retainedTargetCustody,
+      ));
     retainedTargetCustody?.confirm("after arm-terminal publication");
   } catch (error) {
-    publicationFailure = error;
+    publicationFailure = annotateOperationBudgetFailure(error, publicationBudget);
   }
   if (retainedTargetCustody !== null) {
     try { retainedTargetCustody.release(publicationFailure); }
@@ -16580,7 +16939,7 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
   if (terminalPublication.terminal.status !== "COMPLETE") {
     custodyState.workerExecutionBlock = `WORKER_${terminalPublication.terminal.status}`;
   }
-  return Object.freeze({
+  return recordOperationResultDiagnostics(Object.freeze({
     armId: record.armId,
     originalProcessGroupAbsent: true,
     processContainmentScope: "ORIGINAL_POSIX_PROCESS_GROUP_ONLY_REGROUPING_ESCAPE_NOT_EXCLUDED",
@@ -16589,6 +16948,11 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
     terminalPublication,
     workerResult: acceptedWorkerResult,
     workspaceRoot: armState.descriptor.workspaceRoot,
+  }), {
+    preparation: operationBudgetSnapshot(operationBudget),
+    workerExecutionMs,
+    workerTimeoutMs: timeoutMs,
+    publication: operationBudgetSnapshot(publicationBudget),
   });
 }
 
@@ -16698,7 +17062,7 @@ function releaseSourceLeaseInternal(sourceLease, cooperativeState = null) {
       "source lease cannot release while a worker transfer is active or process closure is uncertain",
     );
   }
-  const operationBudget = createOperationBudget(custodyState.commandTimeoutMs);
+  const operationBudget = createOperationBudget(custodyState.commandTimeoutMs, "SOURCE_RELEASE");
   leaseState.status = "RELEASING";
   let primaryError = null;
   let finalSource = null;
@@ -16782,15 +17146,16 @@ function releaseSourceLeaseInternal(sourceLease, cooperativeState = null) {
   }
 
   if (primaryError !== null) {
+    annotateOperationBudgetFailure(primaryError, operationBudget);
     throw reportRetainedPrivateRoots(primaryError, custodyState.retainedRoots);
   }
-  return Object.freeze({
+  return recordOperationResultDiagnostics(Object.freeze({
     candidateManifestSha256: custodyState.captureDescriptor.candidateManifestSha256,
     retainedPrivateRoots: uniqueRetainedPrivateRoots(custodyState.retainedRoots),
     seedObservationSha256: finalSeed.observationSha256,
     sourceSnapshotSha256: finalSource.snapshotSha256,
     status: "RELEASED",
-  });
+  }), { sourceRelease: operationBudgetSnapshot(operationBudget) });
 }
 
 export function releaseSourceLease(sourceLease) {
@@ -16844,12 +17209,16 @@ export async function closeCooperativeSourceLease(cooperativeLease) {
           "cooperative source lease failed more than one close boundary",
         );
   };
-  const terminalBudget = createOperationBudget(state.leaseState.custodyState.commandTimeoutMs);
+  const terminalBudget = createOperationBudget(
+    state.leaseState.custodyState.commandTimeoutMs,
+    "CLOSE_TERMINAL_REOPEN",
+  );
   for (const record of state.leaseState.custodyState.allArmRecords.values()) {
     if (record.status !== "TERMINAL") continue;
     try { reopenArmTerminalRecord(record, terminalBudget, { verifyRetainedTargets: false }); }
-    catch (error) { addFailure(error); }
+    catch (error) { addFailure(annotateOperationBudgetFailure(error, terminalBudget)); }
   }
+  const terminalReopenDiagnostics = operationBudgetSnapshot(terminalBudget);
   if (initialStatus === "HELD") {
     try {
       await confirmCooperativeSourceLeaseState(state, {
@@ -16896,13 +17265,16 @@ export async function closeCooperativeSourceLease(cooperativeLease) {
   }
 
   if (primaryError !== null) throw primaryError;
-  return Object.freeze({
+  return recordOperationResultDiagnostics(Object.freeze({
     helperExitCode: helperOutcome.code,
     helperReaped: true,
     helperSignal: helperOutcome.signal,
     lockScope: "COOPERATING_LOCAL_PROCESSES_SAME_PHYSICAL_SOURCE_DIRECTORY",
     sourceRelease,
     status: "RELEASED",
+  }), {
+    sourceRelease: knockoutWorkspaceOperationDiagnostics(sourceRelease)?.sourceRelease ?? null,
+    terminalReopen: terminalReopenDiagnostics,
   });
 }
 
@@ -18036,9 +18408,11 @@ export function captureAndSealCandidate(options) {
       });
       remainingOperationMs(operationBudget, "candidate capture before capability registration");
       sealedCaptureCapabilities.set(captureCapability, capabilityDescriptor);
-      return captureCapability;
+      return recordOperationResultDiagnostics(captureCapability, {
+        capture: operationBudgetSnapshot(operationBudget),
+      });
     } catch (caught) {
-      let error = caught;
+      let error = annotateOperationBudgetFailure(caught, operationBudget);
       retainedRoots.push(...retainedPrivateRoots(error?.details));
       if (created !== null) retainedRoots.push(retainCreatedPrivateTree(created));
       error = reportRetainedPrivateRoots(error, retainedRoots);
