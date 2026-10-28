@@ -40,8 +40,8 @@ func TestStrictBytesManifestThroughVerifyChainBytes(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatalf("strict-bytes manifest: %v", err)
 	}
-	if len(m.Cases) != 13 {
-		t.Fatalf("strict-bytes manifest: %d cases, want the 13 authored cases", len(m.Cases))
+	if len(m.Cases) != 14 {
+		t.Fatalf("strict-bytes manifest: %d cases, want the 14 authored cases", len(m.Cases))
 	}
 	krBytes, err := os.ReadFile(filepath.Join(strictBytesDir, m.Keyring))
 	if err != nil {

@@ -672,6 +672,14 @@ write("malformed/reversed-surrogate-pair.json", '["x\\udc00\\ud800y"]\n');
   if (agentAt < 0) throw new Error("strict-bytes/invalid-utf8: agent id not found");
   invalidUtf8[agentAt] = 0xff; // 0xFF is never valid UTF-8
 
+  // The genesis chain.seq written as the integer token -0: the same parsed value (JCS(0) = "0"), different
+  // bytes. Native handling of -0 differs between ports today (Rust refuses it as a float), so only the
+  // strict expectation is authored.
+  const seqMember = '"seq":0';
+  const seqAt = canonicalText.indexOf(seqMember);
+  if (seqAt < 0 || /[0-9]/.test(canonicalText.charAt(seqAt + seqMember.length))) throw new Error("strict-bytes/negative-zero: genesis seq member not found");
+  const negativeZero = canonicalText.slice(0, seqAt) + '"seq":-0' + canonicalText.slice(seqAt + seqMember.length);
+
   const reversed = canonicalize([chain[2], chain[1], chain[0]]);
   const badsigText = canonicalize(badsig);
 
@@ -694,6 +702,7 @@ write("malformed/reversed-surrogate-pair.json", '["x\\udc00\\ud800y"]\n');
     { name: "reversed-order", bytes: utf8(reversed), native: VALID, strict: { ...VALID, discriminator: null }, construction: "guard: UTF8(JCS([seq 2, seq 1, seq 0])) — canonical in presented order; the verifier orders by seq afterwards" },
     { name: "wrong-signature-canonical", bytes: utf8(badsigText), native: TAMPERED, strict: { ...TAMPERED, discriminator: null }, construction: "guard: UTF8(JCS(attack/wrong-signature chain)) — canonical bytes, bad signature" },
     { name: "wrong-signature-noncanonical", bytes: formatting("wrong-signature-noncanonical", utf8(interReceiptSpace(members(badsig))), badsigText), native: TAMPERED, strict: NCB, construction: "guard: the wrong-signature chain with the extra-space mutation — the byte mismatch outranks the bad signature" },
+    { name: "negative-zero", bytes: formatting("negative-zero", utf8(negativeZero), canonicalText), native: null, strict: NCB, construction: "guard: the genesis chain.seq written as the integer token -0 (native per-language handling differs and is not asserted)" },
   ];
   const sha256 = (b: Buffer): string => createHash("sha256").update(b).digest("hex");
   for (const c of cases) write(`${SB}/${c.name}.json`, c.bytes);
@@ -725,7 +734,7 @@ write("malformed/reversed-surrogate-pair.json", '["x\\udc00\\ud800y"]\n');
     note:
       "Authored expectations for the opt-in strict-bytes verifier profile; never derived from verifier output. " +
       "native = the default profile with the keyring; strict = --profile strict-bytes with the keyring. " +
-      "native null = transport-invalid input whose existing per-language native outcome is preserved and not asserted. " +
+      "native null = an input whose existing per-language native outcome is preserved and not asserted (transport-invalid bytes, and the -0 token, whose native handling differs between ports). " +
       "strict.discriminator NON_CANONICAL_BYTES must lead the TS reason / the port's detail; null = not asserted.",
     cases: cases.map((c) => ({ name: c.name, file: `${c.name}.json`, sha256: sha256(c.bytes), construction: c.construction, native: c.native, strict: c.strict })),
     cose: [

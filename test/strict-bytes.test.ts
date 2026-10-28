@@ -36,7 +36,7 @@ const bytesOf = (file: string): Uint8Array => readFileSync(join(SB, file));
 const EXPECTED_CASES = [
   "canonical", "extra-space", "member-order", "escaped-string", "trailing-lf", "pretty",
   "leading-space", "trailing-crlf", "bom", "invalid-utf8", "reversed-order",
-  "wrong-signature-canonical", "wrong-signature-noncanonical",
+  "wrong-signature-canonical", "wrong-signature-noncanonical", "negative-zero",
 ];
 
 test("strict-bytes manifest: exactly the authored case set, every file present with its pinned SHA-256", () => {

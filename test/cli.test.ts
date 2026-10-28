@@ -63,7 +63,7 @@ test("CLI --profile strict-bytes: every manifest case exits as authored; native 
       return undefined;
     }
   };
-  assert.equal(manifest.cases.length, 13, "the strict-bytes corpus has 13 authored cases");
+  assert.equal(manifest.cases.length, 14, "the strict-bytes corpus has 14 authored cases");
   const kr = join(SB, manifest.keyring);
   for (const c of manifest.cases) {
     const file = join(SB, c.file);

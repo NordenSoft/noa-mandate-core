@@ -22,7 +22,7 @@
 | `malleability` | PASS (45) | PASS (45) | PASS (15) | PASS (15) | PASS (15) |
 | `unicode` | PASS (9) | PASS (9) | PASS (3) | PASS (3) | PASS (3) |
 | `tenant` | PASS (5) | PASS (4) | PASS (4) | PASS (4) | PASS (4) |
-| `strict-bytes` | PASS (26) | PASS (32) | PASS (28) | PASS (28) | PASS (28) |
+| `strict-bytes` | PASS (27) | PASS (33) | PASS (29) | PASS (29) | PASS (29) |
 
 † "not asserted here" (TS/Python columns) means `impl-py/conformance.mjs` does not run an explicitly-tagged check for that implementation in that class (usually because the vector predates the `[TS ...]`/`[PY verifier]` tagging convention and only exercises the Python CLI directly). It does NOT mean untested: TS's own behavior for that vector class is unit-tested elsewhere (`test/verify.test.ts`, `test/safe-json.test.ts`, `test/identity-binding.test.ts`) and gated by `npm test`. Currently `hash`, `impersonation` and `dup-key` carry this caveat for the TS column.
 
@@ -32,7 +32,7 @@
 - **Rust (`impl-rust/`):** PASS (7) — see `impl-rust/conformance.sh` for the full list.
 - **C# (`impl-csharp/`):** PASS (8) — see `impl-csharp/conformance.sh` for the full list.
 
-Total checks in this run — `node impl-py/conformance.mjs`: **241** checks, exit **0** (0 = every check agreed). · `bash impl-go/conformance_test.sh`: **98** checks (90 in the table above, 8 additional), exit **0**. · `bash impl-rust/conformance.sh`: **89** checks (82 in the table above, 7 additional), exit **0**. · `bash impl-csharp/conformance.sh`: **91** checks (83 in the table above, 8 additional), exit **0**.
+Total checks in this run — `node impl-py/conformance.mjs`: **243** checks, exit **0** (0 = every check agreed). · `bash impl-go/conformance_test.sh`: **99** checks (91 in the table above, 8 additional), exit **0**. · `bash impl-rust/conformance.sh`: **90** checks (83 in the table above, 7 additional), exit **0**. · `bash impl-csharp/conformance.sh`: **92** checks (84 in the table above, 8 additional), exit **0**.
 
 **`correlation-composition` (S4) — not asserted for Python/Go/Rust/C#.** The D7 composition corpus (fixed receipt + grant → `noa.action-digest/0.1` → seeded correlation nonce → settlement-evidence verdict; `packages/rail-x402/conformance/settlement-evidence/vectors.json`, octet framing pinned in `docs/settlement-evidence-spec.md` §3) is currently consumed by the TS suite only (`packages/rail-x402`, gated by its own `npm test`). No vector in the shared file-based corpus exercises the composition for the other four implementations, and none of their suites loads the rail corpus — so no composition cell is claimed for them. Treat this as an open coverage gap, not a passing claim: porting the corpus into a language's own runner is what closes it for real, as the file-based `strict-ed25519/` vectors did for the `malleability` class.
 

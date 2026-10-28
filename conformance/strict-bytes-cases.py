@@ -29,7 +29,7 @@ import sys
 AUTHORED = {
     "canonical", "extra-space", "member-order", "escaped-string", "trailing-lf", "pretty",
     "leading-space", "trailing-crlf", "bom", "invalid-utf8", "reversed-order",
-    "wrong-signature-canonical", "wrong-signature-noncanonical",
+    "wrong-signature-canonical", "wrong-signature-noncanonical", "negative-zero",
 }
 STATUSES = {"VALID", "UNVERIFIED", "TAMPERED", "MALFORMED", "UNTRUSTED"}
 DISC = "NON_CANONICAL_BYTES"

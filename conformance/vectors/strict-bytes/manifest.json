@@ -1,7 +1,7 @@
 {
   "spec": "noa.strict-bytes-vectors/0.1",
   "keyring": "../keyring.json",
-  "note": "Authored expectations for the opt-in strict-bytes verifier profile; never derived from verifier output. native = the default profile with the keyring; strict = --profile strict-bytes with the keyring. native null = transport-invalid input whose existing per-language native outcome is preserved and not asserted. strict.discriminator NON_CANONICAL_BYTES must lead the TS reason / the port's detail; null = not asserted.",
+  "note": "Authored expectations for the opt-in strict-bytes verifier profile; never derived from verifier output. native = the default profile with the keyring; strict = --profile strict-bytes with the keyring. native null = an input whose existing per-language native outcome is preserved and not asserted (transport-invalid bytes, and the -0 token, whose native handling differs between ports). strict.discriminator NON_CANONICAL_BYTES must lead the TS reason / the port's detail; null = not asserted.",
   "cases": [
     {
       "name": "canonical",
@@ -186,6 +186,18 @@
         "status": "TAMPERED",
         "exit": 2
       },
+      "strict": {
+        "status": "MALFORMED",
+        "exit": 3,
+        "discriminator": "NON_CANONICAL_BYTES"
+      }
+    },
+    {
+      "name": "negative-zero",
+      "file": "negative-zero.json",
+      "sha256": "b5af99ef5c75562342c3d563bc03d141e69f8c4816875b956c0efdc43e2ff3e9",
+      "construction": "guard: the genesis chain.seq written as the integer token -0 (native per-language handling differs and is not asserted)",
+      "native": null,
       "strict": {
         "status": "MALFORMED",
         "exit": 3,

@@ -877,7 +877,7 @@ expect("USAGE (--identity is the last token, no keyring) [PY verifier]", pyVerif
   const SBD = join(import.meta.dirname, "..", "conformance", "vectors", "strict-bytes");
   const AUTHORED = [
     "bom", "canonical", "escaped-string", "extra-space", "invalid-utf8", "leading-space", "member-order",
-    "pretty", "reversed-order", "trailing-crlf", "trailing-lf", "wrong-signature-canonical", "wrong-signature-noncanonical",
+    "negative-zero", "pretty", "reversed-order", "trailing-crlf", "trailing-lf", "wrong-signature-canonical", "wrong-signature-noncanonical",
   ];
   const line = (label, ok, got, want) => {
     console.log(`${ok ? "✓" : "✗"} ${label}: ${got} (want ${want})`);
