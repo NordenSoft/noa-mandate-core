@@ -154,11 +154,14 @@ function selftestFailureDiagnosticLine(details) {
 // Telemetry printed beside, never inside, the verdict output. Every record is re-sanitized here:
 // allowlisted key shapes, safe integers, booleans, null and short identifier-shaped strings only, in
 // the producer's fixed field order. Each line is capped at DIAGNOSTIC_LINE_MAX_BYTES UTF-8 bytes
-// (largest nested sections are dropped first and named in `omitted`), and a report's diagnostic
-// lines are capped at DIAGNOSTIC_REPORT_MAX_BYTES in total. Arbitrary details, messages and
-// stderr are never printed through this path.
+// (largest nested sections are dropped first and named in `omitted`). Every diagnostic byte of a
+// report (streamed records, the truncation marker and the final failure/cleanup lines) is counted
+// against one DIAGNOSTIC_REPORT_MAX_BYTES budget, with space reserved up front for the marker and
+// the final lines. Arbitrary details, messages and stderr are never printed through this path.
 export const DIAGNOSTIC_LINE_MAX_BYTES = 4096;
 export const DIAGNOSTIC_REPORT_MAX_BYTES = 1024 * 1024;
+const DIAGNOSTIC_MARKER_MAX_BYTES = 160;
+const DIAGNOSTIC_FINAL_RESERVE_BYTES = 2 * (DIAGNOSTIC_LINE_MAX_BYTES + 1);
 const DIAGNOSTIC_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const DIAGNOSTIC_STRING_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const DIAGNOSTIC_MAX_DEPTH = 5;
@@ -212,28 +215,56 @@ export function boundedDiagnosticLine(label, record) {
   }
 }
 
-/** A report-wide diagnostic writer: each line bounded, all lines together capped once. */
-export function createDiagnosticPrinter(write, maxBytes = DIAGNOSTIC_REPORT_MAX_BYTES) {
+/**
+ * One report-wide diagnostic budget. `record` streams bounded lines until the stream share is
+ * spent, then writes one truncation marker from its reserved space; `final` admits a final
+ * failure/cleanup line only while the whole report stays within `maxBytes`. Each emitted line
+ * costs its UTF-8 bytes plus one newline.
+ */
+export function createDiagnosticReport(write, {
+  finalReserveBytes = DIAGNOSTIC_FINAL_RESERVE_BYTES,
+  maxBytes = DIAGNOSTIC_REPORT_MAX_BYTES,
+} = {}) {
+  const streamLimit = Math.max(0, maxBytes - finalReserveBytes - DIAGNOSTIC_MARKER_MAX_BYTES);
   let usedBytes = 0;
   let truncated = false;
-  return (record) => {
-    if (truncated) return;
-    try {
-      const label = record?.event === "summary" ? "  progress-timing" : "  knockout-diagnostic";
-      const line = boundedDiagnosticLine(label, record);
-      const bytes = Buffer.byteLength(line, "utf8") + 1;
-      if (usedBytes + bytes > maxBytes) {
-        truncated = true;
-        write(`  knockout-diagnostic-truncated {"reportCapBytes":${maxBytes},"usedBytes":${usedBytes}}`);
-        return;
+  const cost = (line) => Buffer.byteLength(line, "utf8") + 1;
+  return Object.freeze({
+    record(record) {
+      if (truncated) return;
+      try {
+        const label = record?.event === "summary" ? "  progress-timing" : "  knockout-diagnostic";
+        const line = boundedDiagnosticLine(label, record);
+        if (usedBytes + cost(line) > streamLimit) {
+          truncated = true;
+          const marker = `  knockout-diagnostic-truncated {"reportCapBytes":${maxBytes},"streamedBytes":${usedBytes}}`;
+          if (usedBytes + cost(marker) <= maxBytes) {
+            usedBytes += cost(marker);
+            write(marker);
+          }
+          return;
+        }
+        usedBytes += cost(line);
+        write(line);
+      } catch {}
+    },
+    final(line) {
+      try {
+        if (typeof line !== "string" || usedBytes + cost(line) > maxBytes) return false;
+        usedBytes += cost(line);
+        return true;
+      } catch {
+        return false;
       }
-      usedBytes += bytes;
-      write(line);
-    } catch {}
-  };
+    },
+    usedBytes: () => usedBytes,
+  });
 }
 
-export function isolatedSweepFailureLines(error) {
+// The CLI's one report budget; isolatedSweepFailureLines charges its final lines against it.
+let activeDiagnosticReport = null;
+
+export function isolatedSweepFailureLines(error, report = activeDiagnosticReport) {
   const code = typeof error?.code === "string" ? error.code : "ISOLATED_SWEEP_FAILED";
   const lines = [`\n${code}: ${String(error?.message ?? error)}`];
   if (code === "SELFTEST_FAILED") lines.push(selftestFailureDiagnosticLine(error?.details));
@@ -243,8 +274,12 @@ export function isolatedSweepFailureLines(error) {
   // Present only for a failure the isolated sweep itself snapshotted (primary before cleanup).
   const sweep = isolatedSweepFailureDiagnostics(error);
   if (sweep !== null) {
-    lines.push(boundedDiagnosticLine("  failure diagnostic:", sweep.primary));
-    lines.push(boundedDiagnosticLine("  cleanup diagnostic:", sweep.cleanup));
+    for (const line of [
+      boundedDiagnosticLine("  failure diagnostic:", sweep.primary),
+      boundedDiagnosticLine("  cleanup diagnostic:", sweep.cleanup),
+    ]) {
+      if (report === null || report.final(line)) lines.push(line);
+    }
   }
   return Object.freeze(lines);
 }
@@ -7093,14 +7128,14 @@ if (DIRECT_ENTRY) {
   const shardLabel = SHARD ? `shard ${SHARD.index}/${SHARD.total} ` : "";
   // Per-phase cost telemetry (capture, custody, admission, materialization, worker, close), bounded
   // per line and per report; it is printed beside the verdict lines and never feeds them.
-  const printDiagnostic = createDiagnosticPrinter((line) => process.stdout.write(`${line}\n`));
+  activeDiagnosticReport = createDiagnosticReport((line) => process.stdout.write(`${line}\n`));
   let sweep = null;
   try {
     sweep = await runIsolatedKnockoutSweep({
       captureTimeoutMs: ISOLATED_KNOCKOUT_SWEEP_TIMEOUTS.captureTimeoutMs,
       maxRetainedArms: KNOCKOUT_WORKSPACE_ARM_LIMITS.maxRetainedArms,
       maxRetainedBytes: KNOCKOUT_WORKSPACE_ARM_LIMITS.maxRetainedBytes,
-      onDiagnostic: printDiagnostic,
+      onDiagnostic: activeDiagnosticReport.record,
       onProgress: ({ completed, detail, id, suite, total, verdict }) => {
         process.stdout.write(`  progress ${shardLabel}${completed}/${total} ${verdict} ${id}\n`);
         // Preserve the completed control's diagnostic even if a later arm or the job times out.

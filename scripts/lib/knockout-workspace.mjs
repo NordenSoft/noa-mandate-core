@@ -2801,7 +2801,7 @@ const DIAGNOSTIC_NODE_TYPES = Object.freeze(["directory", "file", "symlink", "ot
 const DIAGNOSTIC_MAX_SUBPHASE_DEPTH = 16;
 const DIAGNOSTIC_MAX_CAUSE_DEPTH = 8;
 const DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
-const DIAGNOSTIC_EXECUTABLES = new Set(["getfacl", "getfattr", "perl", "python3", "stat"]);
+const DIAGNOSTIC_EXECUTABLES = new Set(["getfacl", "getfattr", "node", "perl", "python3", "stat"]);
 // The one launch grant whose timeout the next metadata child will receive. metadataTimeout() is
 // evaluated as an argument immediately before its synchronous launch, so the launch site can bind
 // its own failure to the granting budget without a new parameter on every launch helper.
@@ -3012,6 +3012,30 @@ function diagnosticExecutable(executable) {
   return DIAGNOSTIC_EXECUTABLES.has(name) ? name : "other";
 }
 
+/** Typed failure fields of one granted metadata child launch, from its actual spawnSync result. */
+function launchFailureDiagnostics(launchGrant, executable, timeoutMs, result) {
+  try {
+    const errorCode = result?.error?.code;
+    const timedOut = errorCode === "ETIMEDOUT";
+    return {
+      budget: launchGrant === null ? null : operationDiagnosticSnapshot(launchGrant.state),
+      deadlineCause: timedOut ? "CHILD_TIMED_OUT" : null,
+      launch: Object.freeze({
+        kind: launchGrant?.kind ?? null,
+        executable: diagnosticExecutable(executable),
+        timeoutMs: diagnosticCount(timeoutMs),
+        timedOut,
+        status: Number.isSafeInteger(result?.status) ? result.status : null,
+        signal: typeof result?.signal === "string" && DIAGNOSTIC_CODE.test(result.signal)
+          ? result.signal : null,
+        errorCode: typeof errorCode === "string" && DIAGNOSTIC_CODE.test(errorCode) ? errorCode : null,
+      }),
+    };
+  } catch {
+    return {};
+  }
+}
+
 function freezeFailureDiagnostics(record, causeDepth) {
   const launch = record.launch ?? null;
   return Object.freeze({
@@ -3025,18 +3049,29 @@ function freezeFailureDiagnostics(record, causeDepth) {
 }
 
 /**
- * Diagnostics-only reader for a workspace failure: the first annotated error on the bounded cause
- * chain (AggregateError follows its primary member). Returns null rather than throwing.
+ * Diagnostics-only reader for a workspace failure. It merges every annotation on the bounded
+ * primary-cause chain (AggregateError follows its primary member): a field recorded closer to the
+ * original failure wins over one an outer owner or wrapper added later, so a wrapper's budget
+ * snapshot never hides the original child-timeout launch or deadline snapshot. `causeDepth` is
+ * the depth of the innermost annotated error. Returns null rather than throwing.
  */
 export function knockoutWorkspaceFailureDiagnostics(error) {
   try {
+    const merged = {};
+    let causeDepth = null;
     let current = error;
     for (let depth = 0; depth < DIAGNOSTIC_MAX_CAUSE_DEPTH; depth++) {
       if (current === null || (typeof current !== "object" && typeof current !== "function")) break;
       const record = workspaceFailureDiagnostics.get(current);
-      if (record !== undefined) return freezeFailureDiagnostics(record, depth);
+      if (record !== undefined) {
+        causeDepth = depth;
+        for (const [key, value] of Object.entries(record)) {
+          if (value !== undefined && value !== null) merged[key] = value;
+        }
+      }
       current = current instanceof AggregateError ? current.errors?.[0] : current.cause;
     }
+    if (causeDepth !== null) return freezeFailureDiagnostics(merged, causeDepth);
   } catch {}
   return null;
 }
@@ -4022,6 +4057,12 @@ function boundEntryStat(bound, name, label, { code, operationBudget = null } = {
       `descriptor-relative observation is unsupported on ${process.platform}`,
     );
   }
+  const entryStatTimeoutMs = metadataTimeout(
+    operationBudget,
+    `bound entry stat for ${label}`,
+    "entryStat",
+  );
+  const entryStatGrant = consumeGrantedLaunch(entryStatTimeoutMs);
   const result = spawnSync(
     METADATA_FCHDIR_LAUNCHER,
     ["-e", METADATA_FCHDIR_SCRIPT, "--", executable, ...args],
@@ -4031,7 +4072,7 @@ function boundEntryStat(bound, name, label, { code, operationBudget = null } = {
       killSignal: "SIGKILL",
       maxBuffer: 64 * 1024,
       stdio: ["ignore", "pipe", "pipe", bound.fd],
-      timeout: metadataTimeout(operationBudget, `bound entry stat for ${label}`, "entryStat"),
+      timeout: entryStatTimeoutMs,
     },
   );
   const stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString("utf8") : "";
@@ -4039,7 +4080,7 @@ function boundEntryStat(bound, name, label, { code, operationBudget = null } = {
     const failureCode = result.error?.code === "ENOENT"
       ? KNOCKOUT_WORKSPACE_ERROR_CODES.SOURCE_GIT_OBSERVATION_FAILED
       : childProcessFailureCode(result.error, code);
-    fail(
+    throw annotateWorkspaceFailure(workspaceError(
       failureCode,
       `cannot observe ${label} relative to its bound directory`,
       {
@@ -4049,7 +4090,7 @@ function boundEntryStat(bound, name, label, { code, operationBudget = null } = {
         timedOut: result.error?.code === "ETIMEDOUT",
       },
       result.error,
-    );
+    ), launchFailureDiagnostics(entryStatGrant, executable, entryStatTimeoutMs, result));
   }
   if (result.status !== 0) {
     if (result.status === 1 && /No such file or directory/u.test(stderr)) return null;
@@ -4759,22 +4800,10 @@ function toolResult(
       },
       result.error,
     );
-    const timedOut = result.error?.code === "ETIMEDOUT";
-    throw annotateWorkspaceFailure(refusal, {
-      budget: launchGrant === null ? null : operationDiagnosticSnapshot(launchGrant.state),
-      deadlineCause: timedOut ? "CHILD_TIMED_OUT" : null,
-      launch: Object.freeze({
-        kind: launchGrant?.kind ?? null,
-        executable: diagnosticExecutable(executable),
-        timeoutMs: boundedTimeoutMs,
-        timedOut,
-        status: Number.isSafeInteger(result.status) ? result.status : null,
-        signal: typeof result.signal === "string" && DIAGNOSTIC_CODE.test(result.signal)
-          ? result.signal : null,
-        errorCode: typeof result.error?.code === "string" && DIAGNOSTIC_CODE.test(result.error.code)
-          ? result.error.code : null,
-      }),
-    });
+    throw annotateWorkspaceFailure(
+      refusal,
+      launchFailureDiagnostics(launchGrant, executable, boundedTimeoutMs, result),
+    );
   }
   return result.stdout;
 }
@@ -8134,6 +8163,12 @@ function descriptorPrivateTreeCensus(
   if (operationBudget !== null) {
     remainingOperationMs(operationBudget, `${label} descriptor census`);
   }
+  const censusTimeoutMs = metadataTimeout(
+    operationBudget,
+    `${label} descriptor census`,
+    "descriptorCensus",
+  );
+  const censusGrant = consumeGrantedLaunch(censusTimeoutMs);
   const result = spawnSync(
     METADATA_FCHDIR_LAUNCHER,
     [
@@ -8151,11 +8186,11 @@ function descriptorPrivateTreeCensus(
       killSignal: "SIGKILL",
       maxBuffer: Math.min(MAX_TOOL_OUTPUT_BYTES, Math.max(64 * 1024, maxNodes * 1024)),
       stdio: ["ignore", "pipe", "pipe", rootBound.fd],
-      timeout: metadataTimeout(operationBudget, `${label} descriptor census`, "descriptorCensus"),
+      timeout: censusTimeoutMs,
     },
   );
   if (result.error !== undefined) {
-    fail(
+    throw annotateWorkspaceFailure(workspaceError(
       childProcessFailureCode(result.error, code),
       `cannot execute ${label} descriptor census`,
       {
@@ -8164,7 +8199,7 @@ function descriptorPrivateTreeCensus(
         timedOut: result.error?.code === "ETIMEDOUT",
       },
       result.error,
-    );
+    ), launchFailureDiagnostics(censusGrant, process.execPath, censusTimeoutMs, result));
   }
   const stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString("utf8") : "";
   if (result.status !== 0 || stderr.length !== 0) {
@@ -16507,6 +16542,8 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
   transferState.status = "ISSUING";
   record.status = "ISSUING";
 
+  // Frozen before spawn: worker execution and publication must not inflate preparation time.
+  const preparationDiagnostics = operationBudgetSnapshot(operationBudget);
   const workerExecutionStartedNs = process.hrtime.bigint();
   let child;
   try {
@@ -16963,7 +17000,7 @@ export async function runArmWorker(cooperativeLease, armCapability, options) {
     workerResult: acceptedWorkerResult,
     workspaceRoot: armState.descriptor.workspaceRoot,
   }), {
-    preparation: operationBudgetSnapshot(operationBudget),
+    preparation: preparationDiagnostics,
     workerExecutionMs,
     workerTimeoutMs: timeoutMs,
     publication: operationBudgetSnapshot(publicationBudget),

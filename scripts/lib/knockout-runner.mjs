@@ -7035,12 +7035,8 @@ export async function runIsolatedKnockoutSweep({
   if (!(onProgress === null || typeof onProgress === "function")) {
     throw isolatedSweepFailure("PROGRESS_CALLBACK_INVALID", "isolated knockout progress callback is malformed");
   }
-  if (!(onDiagnostic === null || typeof onDiagnostic === "function")) {
-    throw isolatedSweepFailure(
-      "DIAGNOSTIC_CALLBACK_INVALID",
-      "isolated knockout diagnostic callback is malformed",
-    );
-  }
+  // Telemetry is optional and never a new refusal: anything but a function disables the sink.
+  const diagnosticSink = typeof onDiagnostic === "function" ? onDiagnostic : null;
   const selectedEntries = selected.map((entry) => {
     const canonical = registryById.get(entry?.id);
     if (canonical === undefined) {
@@ -7108,9 +7104,15 @@ export async function runIsolatedKnockoutSweep({
   let diagnosticContext = null;
   const armTimings = new Map();
   const emitDiagnostic = (record) => {
-    if (onDiagnostic === null) return;
-    try { onDiagnostic(Object.freeze({ protocol: SWEEP_DIAGNOSTIC_PROTOCOL, ...record })); }
-    catch {}
+    if (diagnosticSink === null) return;
+    try {
+      const returned = diagnosticSink(Object.freeze({ protocol: SWEEP_DIAGNOSTIC_PROTOCOL, ...record }));
+      // An async sink is never awaited; its rejection is observed so it cannot terminate the run.
+      if (returned !== null && (typeof returned === "object" || typeof returned === "function")) {
+        const then = returned.then;
+        if (typeof then === "function") Reflect.apply(then, returned, [undefined, () => {}]);
+      }
+    } catch {}
   };
   const elapsedSinceMs = (startedMs) => Math.max(0, Math.round(performance.now() - startedMs));
   const contextFields = () => ({
