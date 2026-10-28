@@ -22,6 +22,23 @@ All notable changes to `noa-receipt` are documented here. The format follows
   unknown outcome yields exactly one executed or refused row, and `NON-CLAIMS.md` gains NC-S9.16
   (`docs/gate-effect-owner.md`, "An unknown outcome").
 
+- Receipt verification, all five verifiers: a chain in which two receipts carry the same `id` is now
+  reported. `docs/receipt-spec.md` §2 states the producer obligation that every receipt of one
+  `scope.chain` MUST carry a distinct `id`, compared as exact strings after JSON parsing (no Unicode
+  normalization, case-sensitive), and that producers SHOULD make ids globally unique. §5 step 6c adds
+  the stable warning code `duplicate-id: seq N` for every receipt whose `id` equals that of a receipt
+  with a lower `seq`, in `seq` order; within one `seq` it follows the timestamp-order code. It is a
+  warning, never a verdict: a `noa.receipt/0.1` verifier MUST NOT reject a duplicate `id`, because a
+  stricter rule would refuse inputs this version accepts; a later format version may make it a
+  rejection. Before, all five verifiers accepted such a chain as `VALID` without a word. The TypeScript
+  reference returns the code in `warnings`, and the Python, Go, Rust and C# CLIs print it in their
+  `warnings` array. `conformance/vectors/duplicate-id/` pins two holders of one id, three holders (also
+  stored out of `seq` order), ids that differ only in case or only in Unicode normalization (no
+  warning), an id spelled with a JSON escape (one id), and a receipt that also goes back in time (both
+  codes, the timestamp-order code first); every runner checks these codes for parity, and
+  `conformance/warning-parity.py` reads them like the timestamp-order codes. Verdicts and accepted
+  inputs are unchanged.
+
 ### Changed
 
 - `NON-CLAIMS.md` NC-S9.9: the reference gate no longer signs a caller's `action.reversible`. For an

@@ -71,6 +71,15 @@ Canonicalized per **RFC 8785 (JCS)** — with NOA hardening (§4) — before has
   and enum/id fields. Unknown fields are rejected, but PII placed in a known opaque field is not.
 - **Integer-only:** all numbers are JSON integers in the safe range. Floats/exponents are
   rejected (removes number-serialization ambiguity entirely).
+- **`id` is unique within its chain (producer obligation).** Every receipt in one `scope.chain`
+  MUST carry a distinct `id`. Ids are compared as exact strings after JSON parsing: there is no
+  Unicode normalization and no case folding, so `rcpt_A` and `rcpt_a` are different ids, and so are
+  the NFC and NFD spellings of the same visible text (the JSON strings `"café"` and
+  `"café"`; an NFD `id`
+  already breaks the NFC rule of §4), while a JSON escape such as `e` spells the same id as the
+  character it encodes. Producers SHOULD make ids globally unique, for example with a sortable
+  ULID- or UUIDv7-style value. A verifier of this version reports a repeated `id` as the warning
+  `duplicate-id` and never rejects the chain for it (§5).
 - **`paramsHash`** is `sha256:<hex>` or, recommended for low-entropy params,
   `hmac-sha256:<hex>` with a tenant-scoped key (plain SHA-256 of an amount/id/bool is
   brute-forceable and identical across tenants → correlation; see THREAT-MODEL §params).
@@ -240,6 +249,9 @@ verify(receipts, { keyring?, checkpoint?, identityManifest? }):
   6. linkage: seq 0 => prevHash null; else prevHash == prev.hash && seq == prev.seq+1
   6b. timestamp order (a WARNING, never a verdict): ts vs the previous receipt's ts at full
        precision after offset normalization -> ts-backwards / ts-not-comparable (see below)
+  6c. id uniqueness (a WARNING, never a verdict): id equal to the id of a receipt with a lower
+       seq, as exact strings after JSON parsing -> duplicate-id (see below); for one seq it
+       follows that seq's 6b warning
   7. if checkpoint: assert head matches checkpoint (tail-truncation); and (if identityManifest
        supplied) the checkpoint sig.kid MUST be authorized for the GENESIS agent.id (the chain
        OPENER, seq 0) — NOT the mutable head — else UNTRUSTED (closes the re-heading attack); warn
@@ -255,7 +267,8 @@ CLI exit codes: `0` VALID · `1` UNVERIFIED (no keyring supplied) · `2` TAMPERE
 by design: without a keyring, signatures are reported UNVERIFIED, never VALID; without a
 checkpoint, the reference verifier emits an explicit tail-truncation warning; and it always emits a
 fork/equivocation caveat (an offline verifier sees only the branch it was given). Every verifier
-reports the timestamp-order warnings (see "Timestamp-order warnings" below).
+reports the timestamp-order warnings and the duplicate-id warning (see "Timestamp-order warnings"
+and "Duplicate-id warning" below).
 
 **Tenant consistency (step 2b).** `scope.tenant` is optional, but within one `scope.chain` every
 present value MUST equal the last present one in `seq` order; a different present value is a
@@ -289,13 +302,37 @@ accepted timestamp is never skipped without a report.
 correctly ordered pair across a real leap second can receive it: `2016-12-31T23:59:60.5Z` then
 `2017-01-01T00:00:00.2Z` is in order as a leap second and backwards as an overflow.
 
+**Duplicate-id warning (stable code).** For each receipt, in `seq` order, a verifier compares its
+`id` with the ids of every receipt of a lower `seq` in the chain, as exact strings after JSON
+parsing (§2: no Unicode normalization, case-sensitive). Every conformant verifier uses exactly this
+code:
+
+- `duplicate-id: seq N` — the `id` of the receipt at `seq` N equals the `id` of a receipt with a
+  lower `seq`. The first receipt that carries an `id` gets no warning and every later one gets one,
+  so an `id` held at `seq` 0, 2 and 3 yields `duplicate-id: seq 2`, then `duplicate-id: seq 3`,
+  whatever the order of the receipts in the input array.
+
+The result is a warning, never a verdict: it changes no status and no accepted input. When one
+receipt receives both a timestamp-order code and `duplicate-id`, the timestamp-order code comes
+first (`ts-backwards: seq 1`, then `duplicate-id: seq 1`), so the stable codes of a run are ordered
+by `seq` and, within one `seq`, step 6b before step 6c. A repeated `id` is not evidence of
+tampering: every receipt is still hashed, signed and linked. It records that the producer broke the
+§2 obligation, and a consumer that keys receipts by `id` cannot rely on one `id` naming one receipt
+unless the run reported no `duplicate-id`.
+
+**Compatibility (duplicate ids).** A `noa.receipt/0.1` verifier MUST NOT reject a chain because two
+of its receipts carry the same `id`. This version has accepted such chains, so a stricter rule would
+refuse inputs this version accepts; it can only come with a later format version, which may make a
+repeated `id` a rejection.
+
 The reference library returns the codes in `warnings`; every CLI prints them, in `seq` order, in the
 `warnings` array of its JSON result, which the Python, Go, Rust and C# CLIs add only when it is
-non-empty. These two codes are the only warnings that every verifier reports in the same form. Other
-warnings differ between implementations: only the reference reports the tail-truncation and
-fork/equivocation caveats in `warnings`, and the Go and Rust verifiers do not report the
-opener-scoped checkpoint caveat. A consumer that compares verifiers compares these two codes only.
-Pinned for all five verifiers by `conformance/vectors/ts-order/`.
+non-empty. These three codes (`ts-backwards`, `ts-not-comparable`, `duplicate-id`) are the only
+warnings that every verifier reports in the same form. Other warnings differ between
+implementations: only the reference reports the tail-truncation and fork/equivocation caveats and a
+non-NFC string in `warnings`, and the Go and Rust verifiers do not report the opener-scoped
+checkpoint caveat. A consumer that compares verifiers compares these three codes only. Pinned for all
+five verifiers by `conformance/vectors/ts-order/` and `conformance/vectors/duplicate-id/`.
 
 **Retired keys (optional lifecycle trust root).** The static keyring above has no notion of
 retirement. A verifier that also accepts the `noa.signing-key-lifecycle/0.1` trust root (the

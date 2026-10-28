@@ -33,6 +33,7 @@ dotnet run --project "$SCRIPT_DIR/selfcheck/selfcheck.csproj" -c Release -- conf
 
 TOTAL=0; PASS=0; FAIL=0
 WARN_SEEN=0 # warning-parity cases on which impl-py printed at least one timestamp-order warning
+DUP_SEEN=0  # warning-parity cases on which impl-py printed at least one duplicate-id warning
 
 run_case() {
   label="$1"; shift
@@ -62,10 +63,11 @@ run_case() {
   fi
 }
 
-# WARNING PARITY (scripts/gen-vectors.ts 10c and 10d, spec §5 and §2). run_case compares exit codes only,
-# so it cannot see a missing or different warning. For each ts-order/ and independent-fields/ chain both
-# verifiers must exit with the same code AND print the same timestamp-order warnings ("ts-backwards:
-# seq N" / "ts-not-comparable: seq N"), in the same order; impl-py/conformance.mjs pins impl-py's exit
+# WARNING PARITY (scripts/gen-vectors.ts 10c, 10d and 10e, spec §5 and §2). run_case compares exit codes
+# only, so it cannot see a missing or different warning. For each ts-order/, independent-fields/ and
+# duplicate-id/ chain both verifiers must exit with the same code AND print the same stable warnings
+# ("ts-backwards: seq N" / "ts-not-comparable: seq N" / "duplicate-id: seq N"), in the same order;
+# impl-py/conformance.mjs pins impl-py's exit
 # code and expected list. conformance/warning-parity.py reads each JSON result with a JSON parser: a
 # "warnings" member that is not an array of strings, or a code anywhere else in the result, fails the
 # case on either side. These lines start with "WARN-" on purpose: warning parity is not a verdict class
@@ -121,6 +123,7 @@ run_warn_case() {
   cs_out="$(dotnet "$EXE" "$@" 2>/dev/null)"; cs_code=$?
   warn_agree "$py_out" "$cs_out"; agree=$?
   case "$WARN_REF" in '["'*) WARN_SEEN=$((WARN_SEEN+1)) ;; esac
+  case "$WARN_REF" in *'"duplicate-id: seq '*) DUP_SEEN=$((DUP_SEEN+1)) ;; esac
   TOTAL=$((TOTAL+1))
   if [ "$py_code" = "$cs_code" ] && [ "$agree" -eq 0 ]; then
     PASS=$((PASS+1))
@@ -243,6 +246,28 @@ run_warn_case "independent-fields/risk-class-vs-reversible + kr"     "$IND/risk-
 run_warn_case "independent-fields/mode-vs-verdict-and-approval + kr" "$IND/mode-vs-verdict-and-approval.json" "$KR"
 run_warn_case "independent-fields/compliance-deny-vs-executed + kr"  "$IND/compliance-deny-vs-executed.json" "$KR"
 run_warn_case "independent-fields/approval-at-after-ts + kr"         "$IND/approval-at-after-ts.json" "$KR"
+echo
+echo "== conformance/vectors/duplicate-id (warning parity; every chain stays VALID) =="
+# Spec §5 step 6c (scripts/gen-vectors.ts 10e): every receipt whose id equals the id of a lower seq is
+# reported as "duplicate-id: seq N", in seq order and after that seq's timestamp-order code; ids are exact
+# strings after JSON parsing. impl-py/conformance.mjs pins impl-py's exit code and expected list.
+DUP="conformance/vectors/duplicate-id"
+run_warn_case "duplicate-id/pair + kr"                   "$DUP/pair.json" "$KR"
+run_warn_case "duplicate-id/pair (no keyring)"           "$DUP/pair.json"
+# The shuffled file stores the same receipts in the array order seq 1, seq 3, seq 0, seq 2; verifiers
+# order by chain.seq, so both must print "duplicate-id: seq 2" then "duplicate-id: seq 3".
+run_warn_case "duplicate-id/three-holders + kr"          "$DUP/three-holders.json" "$KR"
+run_warn_case "duplicate-id/three-holders-shuffled + kr" "$DUP/three-holders-shuffled.json" "$KR"
+run_warn_case "duplicate-id/case-differs + kr"           "$DUP/case-differs.json" "$KR"
+run_warn_case "duplicate-id/nfc-vs-nfd + kr"             "$DUP/nfc-vs-nfd.json" "$KR"
+run_warn_case "duplicate-id/with-ts-backwards + kr"      "$DUP/with-ts-backwards.json" "$KR"
+run_warn_case "duplicate-id/escaped-spelling + kr"       "$DUP/escaped-spelling.json" "$KR"
+# ANTI-VACUITY: six of those cases must carry an impl-py duplicate-id warning, so none seen is a broken
+# runner (the ts-order cases never carry one).
+if [ "$DUP_SEEN" -eq 0 ]; then
+  TOTAL=$((TOTAL+1)); FAIL=$((FAIL+1))
+  printf '  WARN-FAIL  vacuous: impl-py printed no duplicate-id warning on any duplicate-id case\n'
+fi
 echo
 echo "== conformance/vectors/malformed (parser/structural rejects) =="
 for f in deep-nest duplicate-key float-number lone-high-surrogate lone-low-surrogate pii-smuggle proto-pollution reversed-surrogate-pair trailing-garbage; do
