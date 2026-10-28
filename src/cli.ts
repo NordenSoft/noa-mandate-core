@@ -31,6 +31,14 @@
  * `--max-anchor-age-ms` enforces §4/§6 currency (now = wall clock; a confirm older than n ms is STALE).
  * Omitting the witness flags leaves behavior byte-for-byte identical to the pre-witness CLI.
  *
+ * Verifier profile (opt-in): `--profile native` (the default, identical to omitting the flag)
+ * verifies parsed receipt values and does not judge the received encoding. `--profile strict-bytes`
+ * additionally requires the receipts file to be byte-for-byte the UTF-8 JCS serialization of its
+ * parsed array (no BOM, no whitespace, no final newline); a mismatch exits 3 (MALFORMED) with a
+ * `reason` starting NON_CANONICAL_BYTES. It applies to current-use bare chains only: combining it
+ * with --purpose historical or the witness flags is a usage error, and auxiliary files keep their
+ * existing rules.
+ *
  * Hostile-input hardened: input is read with a size cap and parsed by the strict safeParse
  * (duplicate-key reject, depth bound, prototype-pollution guard, float reject).
  */
@@ -85,7 +93,7 @@ function historicalResultToExit(result: {
 function usage(msg?: string): never {
   if (msg) process.stderr.write(`error: ${msg}\n`);
   process.stderr.write(
-    "usage: noa verify <receipts.json> [--purpose current|historical] [--keyring <keyring.json>] " +
+    "usage: noa verify <receipts.json> [--profile native|strict-bytes] [--purpose current|historical] [--keyring <keyring.json>] " +
       "[--checkpoint <checkpoint.json>] [--checkpoint-keyring <keyring.json>] " +
       "[--identity <manifest.json>] [--anchors <anchors.json> --trust-set <trust.json> [--max-anchor-age-ms <n>]]\n" +
       "       noa --serve [--frame-timeout-ms <n>]   (PROTOCOL REHEARSAL, ADR-0002 Stage 0.5 — NOT a security\n" +
@@ -104,6 +112,15 @@ function usage(msg?: string): never {
  * for it. The size cap stays here because it is a property of reading a FILE, not of the document.
  */
 function readDocumentText(path: string): string {
+  return readDocumentBytes(path).toString("utf8");
+}
+
+/**
+ * The same bounded, no-follow read, returning the file's bytes exactly as read. The native path
+ * keeps its long-standing lossy UTF-8 conversion above; the strict-bytes profile hands these bytes
+ * to the kernel unconverted, because its comparison is over the bytes the file actually holds.
+ */
+function readDocumentBytes(path: string): Buffer {
   const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
   let fd: number;
   try {
@@ -111,7 +128,7 @@ function readDocumentText(path: string): string {
   } catch {
     usage(`cannot open file: ${path}`);
   }
-  let text: string;
+  let bytes: Buffer;
   try {
     let st: ReturnType<typeof fstatSync>;
     try {
@@ -133,14 +150,14 @@ function readDocumentText(path: string): string {
         if (total > MAX_FILE_BYTES) usage(`file too large (>${MAX_FILE_BYTES} bytes): ${path}`);
         chunks.push(Buffer.from(chunk.subarray(0, n)));
       }
-      text = Buffer.concat(chunks, total).toString("utf8");
+      bytes = Buffer.concat(chunks, total);
     } catch {
       usage(`cannot read file: ${path}`);
     }
   } finally {
     closeSync(fd);
   }
-  return text;
+  return bytes;
 }
 
 /** Map a receipt-chain verdict to its exit code (shared by the default and witness paths). */
@@ -190,10 +207,18 @@ function main(argv: string[]): number {
   let trustSetPath: string | undefined;
   let maxAnchorAgeMs: number | undefined;
   let purpose: "current" | "historical" = "current";
+  let profile: "native" | "strict-bytes" | undefined;
 
   for (let i = 1; i < args.length; i++) {
     const a = args[i]!;
-    if (a === "--purpose") {
+    if (a === "--profile") {
+      // Closed set, exactly once: a missing, unknown or repeated profile is a usage error, never a
+      // silent fall-back to the default (that would quietly drop the check the caller asked for).
+      const v = args[++i];
+      if (profile !== undefined) usage("--profile may be given only once");
+      if (v !== "native" && v !== "strict-bytes") usage("--profile must be native or strict-bytes");
+      profile = v;
+    } else if (a === "--purpose") {
       const v = args[++i];
       if (v !== "current" && v !== "historical") usage("--purpose must be current or historical");
       purpose = v;
@@ -254,8 +279,14 @@ function main(argv: string[]): number {
   if (purpose === "historical" && keyringPath === undefined) {
     usage("--purpose historical requires --keyring");
   }
+  // strict-bytes is defined for current-use bare-chain verification only (this release); refusing
+  // the combination is the honest alternative to silently verifying without it.
+  const strictBytes = profile === "strict-bytes";
+  if (strictBytes && purpose === "historical") usage("--profile strict-bytes cannot be combined with --purpose historical");
+  if (strictBytes && witnessMode) usage("--profile strict-bytes cannot be combined with federation --anchors/--trust-set");
 
-  let receipts: string;
+  // Native: the long-standing text read. strict-bytes: the file's own bytes, unconverted.
+  let receipts: string | Uint8Array;
   const opts: VerifyOptions = {};
   let anchors: string | undefined;
   let trustSet: string | undefined;
@@ -264,7 +295,7 @@ function main(argv: string[]): number {
   let checkpointDocument: string | undefined;
   let identityDocument: string | undefined;
   try {
-    receipts = readDocumentText(receiptsPath);
+    receipts = strictBytes ? readDocumentBytes(receiptsPath) : readDocumentText(receiptsPath);
     if (keyringPath) {
       receiptKeyring = readDocumentText(keyringPath);
       if (purpose === "current") opts.keyring = receiptKeyring;
@@ -327,6 +358,7 @@ function main(argv: string[]): number {
     return EXIT.WITNESS_INCOMPLETE;
   }
 
+  if (strictBytes) opts.profile = "strict-bytes";
   const result = verifyChain(receipts, opts);
   process.stdout.write(JSON.stringify(result, null, 2) + "\n");
   noteRetiredKey(result.status);

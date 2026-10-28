@@ -3,7 +3,8 @@
 //!   - integers emitted as their shortest decimal (values are already range-checked at parse; floats
 //!     never reach here — the parser rejects them),
 //!   - object keys sorted by UTF-16 code units (NOT Unicode scalar / UTF-8 byte order — they differ for
-//!     astral code points, which encode as surrogate pairs 0xD800..0xDFFF, sorting AFTER 0xE000..0xFFFF),
+//!     astral code points, which encode as surrogate pairs 0xD800..0xDFFF and therefore sort BEFORE
+//!     0xE000..0xFFFF in UTF-16 order, although they sort after them in scalar / UTF-8 order),
 //!   - strings: escape " \ \b \f \n \r \t and control chars < 0x20 as \u00xx (lowercase); every other
 //!     code point emitted literally as UTF-8, NO \u-escaping of non-controls, NO Unicode normalization.
 //!

@@ -15,6 +15,9 @@ import { receiptHashInput } from "../src/canonicalize.js";
 import { signEd25519 } from "../src/keys.js";
 import { signingMessage, RECEIPT_SIG_DOMAIN } from "../src/signing.js";
 import { opaqueApproverId } from "../src/pii.js";
+import { canonicalize } from "../src/jcs.js";
+import { coseSign1 } from "../src/cose/cose-sign1.js";
+import { createHash } from "node:crypto";
 import type { Receipt, BuildInput } from "../src/index.js";
 
 /** Re-hash + re-sign a hand-mutated receipt so it is self-consistent (valid hash + sig under
@@ -96,7 +99,8 @@ function clone<T>(v: T): T {
 function write(rel: string, data: unknown): void {
   const path = join(OUT, rel);
   mkdirSync(dirname(path), { recursive: true });
-  const text = typeof data === "string" ? data : JSON.stringify(data, null, 2) + "\n";
+  // Bytes are written exactly as given (strict-bytes fixtures); strings and objects as before.
+  const text = data instanceof Uint8Array || typeof data === "string" ? data : JSON.stringify(data, null, 2) + "\n";
   writeFileSync(path, text);
 }
 
@@ -624,6 +628,119 @@ write("malformed/deep-nest.json", deep + "\n");
 write("malformed/lone-high-surrogate.json", '["transfer\\ud800"]\n');
 write("malformed/lone-low-surrogate.json", '["transfer\\udfff"]\n');
 write("malformed/reversed-surrogate-pair.json", '["x\\udc00\\ud800y"]\n');
+
+// --- 12. STRICT-BYTES PROFILE (opt-in `--profile strict-bytes`; native acceptance unchanged) ---
+//
+// Byte-exact chain files over the genuine 3-receipt chain above, written as BYTES (never through the
+// pretty-printing object branch of `write`). The expectations below are AUTHORED CONSTANTS, the
+// contract every consumer asserts; nothing here runs a verifier. Native: the parsed-value verdict,
+// with the corpus keyring. Strict: the same keyring under --profile strict-bytes, where the WHOLE file
+// must equal UTF8(JCS(parse(file))) — the complete array in presented order — before any receipt
+// check, and a mismatch is MALFORMED (exit 3) carrying NON_CANONICAL_BYTES. `native: null` marks a
+// transport-invalid input whose existing per-language native outcome is preserved, not asserted.
+{
+  const SB = "strict-bytes";
+  const utf8 = (s: string): Buffer => Buffer.from(s, "utf8");
+  const members = (c: Receipt[]): string[] => c.map((r) => canonicalize(r));
+  const canonicalText = canonicalize(chain);
+  const rj = members(chain);
+  if (canonicalText !== "[" + rj.join(",") + "]") throw new Error("strict-bytes: array JCS is not the bracketed member join");
+
+  /** A formatting mutation must keep the parsed value and must change the bytes — else it pins nothing. */
+  const formatting = (name: string, bytes: Buffer, valueCanonical: string): Buffer => {
+    if (bytes.equals(utf8(valueCanonical))) throw new Error(`strict-bytes/${name}: the mutation did not change the bytes`);
+    if (canonicalize(JSON.parse(bytes.toString("utf8"))) !== valueCanonical) throw new Error(`strict-bytes/${name}: the mutation changed the parsed value`);
+    return bytes;
+  };
+  /** One space after the FIRST separator BETWEEN RECEIPTS — invisible to a per-receipt comparison. */
+  const interReceiptSpace = (m: string[]): string => "[" + m[0] + ", " + m.slice(1).join(",") + "]";
+
+  // Genesis receipt with its first two members (action, agent) swapped, each member's bytes kept.
+  const g = chain[0] as unknown as Record<string, unknown>;
+  const gKeys = Object.keys(g).sort();
+  if (gKeys[0] !== "action" || gKeys[1] !== "agent") throw new Error("strict-bytes/member-order: unexpected genesis member order");
+  const swapped = ["agent", "action", ...gKeys.slice(2)];
+  const genesisSwapped = "{" + swapped.map((k) => canonicalize(k) + ":" + canonicalize(g[k])).join(",") + "}";
+
+  const specMember = '"spec":"noa.receipt/0.1"';
+  const specAt = canonicalText.indexOf(specMember);
+  if (specAt < 0) throw new Error("strict-bytes/escaped-string: spec member not found");
+  const escaped = canonicalText.slice(0, specAt) + '"spec":"\\u006eoa.receipt/0.1"' + canonicalText.slice(specAt + specMember.length);
+
+  const invalidUtf8 = Buffer.from(utf8(canonicalText));
+  const agentAt = invalidUtf8.indexOf(utf8("agent-refunds"));
+  if (agentAt < 0) throw new Error("strict-bytes/invalid-utf8: agent id not found");
+  invalidUtf8[agentAt] = 0xff; // 0xFF is never valid UTF-8
+
+  const reversed = canonicalize([chain[2], chain[1], chain[0]]);
+  const badsigText = canonicalize(badsig);
+
+  type Outcome = { status: string; exit: number };
+  type StrictOutcome = Outcome & { discriminator: "NON_CANONICAL_BYTES" | null };
+  const VALID: Outcome = { status: "VALID", exit: 0 };
+  const TAMPERED: Outcome = { status: "TAMPERED", exit: 2 };
+  const NCB: StrictOutcome = { status: "MALFORMED", exit: 3, discriminator: "NON_CANONICAL_BYTES" };
+  const cases: Array<{ name: string; bytes: Buffer; native: Outcome | null; strict: StrictOutcome; construction: string }> = [
+    { name: "canonical", bytes: utf8(canonicalText), native: VALID, strict: { ...VALID, discriminator: null }, construction: "UTF8(JCS(chain))" },
+    { name: "extra-space", bytes: formatting("extra-space", utf8(interReceiptSpace(rj)), canonicalText), native: VALID, strict: NCB, construction: "U+0020 after the first array separator between receipts" },
+    { name: "member-order", bytes: formatting("member-order", utf8("[" + genesisSwapped + "," + rj.slice(1).join(",") + "]"), canonicalText), native: VALID, strict: NCB, construction: "the genesis receipt's action/agent members swapped, member bytes kept" },
+    { name: "escaped-string", bytes: formatting("escaped-string", utf8(escaped), canonicalText), native: VALID, strict: NCB, construction: "the first \"noa.receipt/0.1\" written as \"\\u006eoa.receipt/0.1\"" },
+    { name: "trailing-lf", bytes: formatting("trailing-lf", utf8(canonicalText + "\n"), canonicalText), native: VALID, strict: NCB, construction: "canonical bytes followed by 0A" },
+    { name: "pretty", bytes: formatting("pretty", utf8(JSON.stringify(JSON.parse(canonicalText), null, 2)), canonicalText), native: VALID, strict: NCB, construction: "two-space pretty serialization of parse(canonical), no final newline" },
+    { name: "leading-space", bytes: formatting("leading-space", utf8(" " + canonicalText), canonicalText), native: VALID, strict: NCB, construction: "guard: one U+0020 before the canonical bytes" },
+    { name: "trailing-crlf", bytes: formatting("trailing-crlf", utf8(canonicalText + "\r\n"), canonicalText), native: VALID, strict: NCB, construction: "guard: canonical bytes followed by 0D 0A" },
+    { name: "bom", bytes: Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), utf8(canonicalText)]), native: null, strict: { status: "MALFORMED", exit: 3, discriminator: null }, construction: "guard: EF BB BF before the canonical bytes (refused at input admission)" },
+    { name: "invalid-utf8", bytes: invalidUtf8, native: null, strict: { status: "MALFORMED", exit: 3, discriminator: null }, construction: "guard: canonical bytes with the first byte of the genesis agent.id replaced by FF (refused at input admission)" },
+    { name: "reversed-order", bytes: utf8(reversed), native: VALID, strict: { ...VALID, discriminator: null }, construction: "guard: UTF8(JCS([seq 2, seq 1, seq 0])) — canonical in presented order; the verifier orders by seq afterwards" },
+    { name: "wrong-signature-canonical", bytes: utf8(badsigText), native: TAMPERED, strict: { ...TAMPERED, discriminator: null }, construction: "guard: UTF8(JCS(attack/wrong-signature chain)) — canonical bytes, bad signature" },
+    { name: "wrong-signature-noncanonical", bytes: formatting("wrong-signature-noncanonical", utf8(interReceiptSpace(members(badsig))), badsigText), native: TAMPERED, strict: NCB, construction: "guard: the wrong-signature chain with the extra-space mutation — the byte mismatch outranks the bad signature" },
+  ];
+  const sha256 = (b: Buffer): string => createHash("sha256").update(b).digest("hex");
+  for (const c of cases) write(`${SB}/${c.name}.json`, c.bytes);
+
+  // COSE: the complete genesis receipt as the attached payload. The space is inserted BEFORE signing,
+  // so the outer COSE signature and the receipt's own native signature are both genuine; only the
+  // whole-payload canonical check (src/cose/receipt-cose.ts) can refuse it.
+  const genesisText = canonicalize(chain[0]);
+  const coseCanonical = coseSign1(utf8(genesisText), signer);
+  const coseExtraSpace = coseSign1(formatting("extra-space.cose", utf8("{ " + genesisText.slice(1)), genesisText), signer);
+  write(`${SB}/canonical.cose`, coseCanonical);
+  write(`${SB}/extra-space.cose`, coseExtraSpace);
+
+  // JCS literal bytes (decision 3): an authored input and its authored RFC 8785 output. Keys U+1F600
+  // (a surrogate pair, D83D...) and U+E000 pin UTF-16 order (astral BEFORE U+E000); the values pin
+  // the short escapes, lowercase \u00XX controls, a literal DEL, a literal "/", literal non-ASCII,
+  // decomposed text kept decomposed (no normalization), and the safe-integer bounds.
+  const jcsInput =
+    '{"\\ue000":1,"\\ud83d\\ude00":2,"a":["\\"\\\\\\/","\\u0001\\u001f\\u007f","\\u00e9","e\\u0301","\\u2028\\u2029","\\b\\f\\n\\r\\t"],"n":[9007199254740991,-9007199254740991]}';
+  const jcsExpected =
+    '{"a":["\\"\\\\/","\\u0001\\u001f\u007f","\u00e9","e\u0301","\u2028\u2029","\\b\\f\\n\\r\\t"],"n":[9007199254740991,-9007199254740991],"\ud83d\ude00":2,"\ue000":1}';
+  if (canonicalize(JSON.parse(jcsInput)) !== jcsExpected) throw new Error("strict-bytes: the authored JCS literal does not match the reference canonicalizer");
+  write(`${SB}/jcs-literal-input.json`, utf8(jcsInput));
+  write(`${SB}/jcs-literal-expected.json`, utf8(jcsExpected));
+
+  write(`${SB}/manifest.json`, {
+    spec: "noa.strict-bytes-vectors/0.1",
+    keyring: "../keyring.json",
+    note:
+      "Authored expectations for the opt-in strict-bytes verifier profile; never derived from verifier output. " +
+      "native = the default profile with the keyring; strict = --profile strict-bytes with the keyring. " +
+      "native null = transport-invalid input whose existing per-language native outcome is preserved and not asserted. " +
+      "strict.discriminator NON_CANONICAL_BYTES must lead the TS reason / the port's detail; null = not asserted.",
+    cases: cases.map((c) => ({ name: c.name, file: `${c.name}.json`, sha256: sha256(c.bytes), construction: c.construction, native: c.native, strict: c.strict })),
+    cose: [
+      { file: "canonical.cose", sha256: sha256(coseCanonical), coseSign1Verify: true, receiptFromCose: true },
+      { file: "extra-space.cose", sha256: sha256(coseExtraSpace), coseSign1Verify: true, receiptFromCose: false },
+    ],
+    coseCoverage: "TypeScript only (test/cose/cose.test.ts); Python, Go, Rust and C# have no COSE implementation — unavailable, not passed.",
+    jcsLiteral: {
+      input: "jcs-literal-input.json",
+      inputSha256: sha256(utf8(jcsInput)),
+      expected: "jcs-literal-expected.json",
+      expectedSha256: sha256(utf8(jcsExpected)),
+    },
+  });
+}
 
 const attackCount = readdirSync(join(OUT, "attack")).length;
 const malformedCount = readdirSync(join(OUT, "malformed")).length;

@@ -19,6 +19,7 @@ import { verifyChain, verifyChainText, complianceCommit } from "../dist/src/inde
 import { safeParse } from "../dist/src/safe-json.js";
 import { keyHolderRCases } from "../dist/test/helpers/ed25519-keyholder.js";
 import { writeFileSync, readFileSync, mkdtempSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -866,6 +867,109 @@ expect("USAGE (--identity is the last token, no keyring) [PY verifier]", pyVerif
   console.log(`${tsTenantOk ? "✓" : "✗"} MALFORMED (scope.tenant is a number, not a string) [TS verifyChain]: ${tsTenant} (want MALFORMED)`);
   if (!tsTenantOk) failures++;
   expect("MALFORMED (scope.tenant is a number, not a string) [PY verifier]", pyVerify([tenantPath, keyringPath]).code, 3);
+}
+
+// 15. STRICT-BYTES PROFILE (opt-in; scripts/gen-vectors.ts section 12). Every manifest case is held
+// to its AUTHORED native and strict expectation on BOTH sides — the TS API over the file's own bytes
+// and the Python CLI over the same file — never to parity alone. A missing manifest, a missing or
+// altered file, an absent case and unparseable verifier output each fail a line here.
+{
+  const SBD = join(import.meta.dirname, "..", "conformance", "vectors", "strict-bytes");
+  const AUTHORED = [
+    "bom", "canonical", "escaped-string", "extra-space", "invalid-utf8", "leading-space", "member-order",
+    "pretty", "reversed-order", "trailing-crlf", "trailing-lf", "wrong-signature-canonical", "wrong-signature-noncanonical",
+  ];
+  const line = (label, ok, got, want) => {
+    console.log(`${ok ? "✓" : "✗"} ${label}: ${got} (want ${want})`);
+    if (!ok) failures++;
+  };
+  let manifest = null;
+  try {
+    manifest = JSON.parse(readFileSync(join(SBD, "manifest.json"), "utf8"));
+  } catch {
+    manifest = null;
+  }
+  const cases = Array.isArray(manifest?.cases) ? manifest.cases : [];
+  const names = cases.map((c) => c.name).sort().join(" ");
+  const pinsHold = cases.every((c) => {
+    try {
+      return createHash("sha256").update(readFileSync(join(SBD, c.file))).digest("hex") === c.sha256;
+    } catch {
+      return false;
+    }
+  });
+  const setOk = names === AUTHORED.join(" ") && pinsHold;
+  line("strict-bytes manifest carries exactly the authored cases with matching SHA-256 pins [PY verifier]", setOk, setOk ? `${cases.length} cases` : "mismatch", `${AUTHORED.length} cases`);
+
+  const sbKeyring = join(SBD, manifest?.keyring ?? "../keyring.json");
+  const sbKeyringBytes = bytesOf(sbKeyring);
+  const leads = (text, disc) => disc === null || (typeof text === "string" && text.startsWith(disc));
+  const fmt = (status, disc) => (disc ? `${status} ${disc}` : status);
+  // The decoded status is held to the authored one as well as the exit code (security round 1,
+  // finding 2): a result reading VALID beside exit 3 must fail here.
+  const pyResult = (out) => {
+    try {
+      const v = JSON.parse(out);
+      return { status: v.status, detail: v.detail };
+    } catch {
+      return { status: undefined, detail: undefined };
+    }
+  };
+  for (const c of cases) {
+    const file = join(SBD, c.file);
+    const disc = c.strict.discriminator;
+    const tsStrict = verifyChain(bytesOf(file), { keyring: sbKeyringBytes, profile: "strict-bytes" });
+    const tsStrictOk = tsStrict.status === c.strict.status && leads(tsStrict.reason, disc);
+    line(`strict-bytes/${c.name} with --profile strict-bytes [TS verifyChain]`, tsStrictOk, tsStrictOk ? fmt(tsStrict.status, disc) : tsStrict.status, fmt(c.strict.status, disc));
+    const py = pyVerify(["--profile", "strict-bytes", file, sbKeyring]);
+    const pyR = pyResult(py.out);
+    const pyOk = py.code === c.strict.exit && pyR.status === c.strict.status && leads(pyR.detail, disc);
+    line(`strict-bytes/${c.name} with --profile strict-bytes [PY verifier]`, pyOk, fmt(`exit ${py.code} ${pyR.status}`, pyOk ? disc : null), fmt(`exit ${c.strict.exit} ${c.strict.status}`, disc));
+    if (c.native === null) continue; // transport-invalid input: per-language native outcome preserved, not asserted
+    const tsNative = verifyChain(bytesOf(file), { keyring: sbKeyringBytes });
+    line(`strict-bytes/${c.name} native profile [TS verifyChain]`, tsNative.status === c.native.status, tsNative.status, c.native.status);
+    const pyNative = pyVerify([file, sbKeyring]);
+    const pyNativeStatus = pyResult(pyNative.out).status;
+    const pyNativeOk = pyNative.code === c.native.exit && pyNativeStatus === c.native.status;
+    line(`strict-bytes/${c.name} native profile [PY verifier]`, pyNativeOk, `exit ${pyNative.code} ${pyNativeStatus}`, `exit ${c.native.exit} ${c.native.status}`);
+  }
+
+  const canonicalFile = join(SBD, "canonical.json");
+  const tsText = verifyChain(readFileSync(canonicalFile, "utf8"), { keyring: sbKeyringBytes, profile: "strict-bytes" });
+  line("strict-bytes refuses text input, the profile compares original bytes [TS verifyChain]", tsText.status === "MALFORMED", tsText.status, "MALFORMED");
+  const tsBadProfile = verifyChain(bytesOf(canonicalFile), { keyring: sbKeyringBytes, profile: "strict" });
+  line("strict-bytes refuses a profile value outside the closed set [TS verifyChain]", tsBadProfile.status === "MALFORMED", tsBadProfile.status, "MALFORMED");
+
+  const pyMissing = pyVerify([canonicalFile, "--profile"]).code;
+  line("strict-bytes usage, --profile without a value [PY verifier]", pyMissing === 4, `exit ${pyMissing}`, "exit 4");
+  const pyUnknown = pyVerify(["--profile", "strict", canonicalFile]).code;
+  line("strict-bytes usage, unknown --profile value [PY verifier]", pyUnknown === 4, `exit ${pyUnknown}`, "exit 4");
+  const pyRepeated = pyVerify(["--profile", "native", "--profile", "strict-bytes", canonicalFile]).code;
+  line("strict-bytes usage, repeated --profile [PY verifier]", pyRepeated === 4, `exit ${pyRepeated}`, "exit 4");
+  const pyHistorical = pyVerify(["--profile", "strict-bytes", "--purpose", "historical", canonicalFile, sbKeyring]).code;
+  line("strict-bytes usage, combined with --purpose historical [PY verifier]", pyHistorical === 4, `exit ${pyHistorical}`, "exit 4");
+
+  // The byte-entry API itself (verify_chain_bytes), beside the CLI: the gate refuses, then the native verdict.
+  const pyApi = (rel) => {
+    try {
+      return execFileSync("python3", ["-c", "import sys; sys.path.insert(0, sys.argv[1]); import noa_verify as n; k = n.strict_load_text(open(sys.argv[3], encoding='utf-8').read()); s, d = n.verify_chain_bytes(open(sys.argv[2], 'rb').read(), k, profile='strict-bytes'); print(s + ' ' + ('NON_CANONICAL_BYTES' if (d or '').startswith('NON_CANONICAL_BYTES') else '-'))", import.meta.dirname, join(SBD, rel), sbKeyring], { encoding: "utf8" }).trim();
+    } catch {
+      return "error";
+    }
+  };
+  const apiMismatch = pyApi("extra-space.json");
+  line("strict-bytes API verify_chain_bytes on extra-space [PY verifier]", apiMismatch === "MALFORMED NON_CANONICAL_BYTES", apiMismatch, "MALFORMED NON_CANONICAL_BYTES");
+  const apiCanonical = pyApi("canonical.json");
+  line("strict-bytes API verify_chain_bytes on canonical [PY verifier]", apiCanonical === "VALID -", apiCanonical, "VALID -");
+
+  // Shared JCS literal bytes, through Python's own parser and canonicalizer.
+  let jcsLiteral;
+  try {
+    jcsLiteral = execFileSync("python3", ["-c", "import sys; sys.path.insert(0, sys.argv[1]); import noa_verify as n; out = n.jcs(n.strict_load_text(open(sys.argv[2], encoding='utf-8').read())).encode('utf-8'); print('equal' if out == open(sys.argv[3], 'rb').read() else 'differ')", import.meta.dirname, join(SBD, "jcs-literal-input.json"), join(SBD, "jcs-literal-expected.json")], { encoding: "utf8" }).trim();
+  } catch {
+    jcsLiteral = "error";
+  }
+  line("strict-bytes JCS literal bytes, astral key before U+E000, escapes, no normalization [PY verifier]", jcsLiteral === "equal", jcsLiteral, "equal");
 }
 
 if (failures) { console.error(`\nCROSS-IMPL CONFORMANCE FAILED: ${failures} mismatch(es)`); process.exit(1); }

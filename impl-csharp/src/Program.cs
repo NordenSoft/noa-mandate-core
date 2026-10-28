@@ -14,7 +14,7 @@ namespace NoaReceipt;
 public static class Program
 {
     private const string Usage =
-        "usage: noa-verify <receipts.json> [keyring.json] [--purpose current|historical] [--identity <m.json>] [--checkpoint <cp.json>] [--checkpoint-keyring <k.json>]";
+        "usage: noa-verify <receipts.json> [keyring.json] [--profile native|strict-bytes] [--purpose current|historical] [--identity <m.json>] [--checkpoint <cp.json>] [--checkpoint-keyring <k.json>]";
 
     private static int ExitCode(VerifyStatus s) => s switch
     {
@@ -30,13 +30,21 @@ public static class Program
     {
         string? receiptsPath = null, keyringPath = null, identityPath = null, checkpointPath = null, checkpointKeyringPath = null;
         string purpose = "current";
+        string? profile = null;
 
         for (int i = 0; i < args.Length; i++)
         {
             string a = args[i];
             // A trailing --identity/--checkpoint with NO following path must NOT silently drop the
             // control (fail-open); emit usage + exit 4, exactly like the Python/TS CLI.
-            if (a == "--purpose")
+            if (a == "--profile")
+            {
+                // Closed set, exactly once: missing, unknown or repeated is usage (exit 4), never a silent default.
+                if (profile is not null || i + 1 >= args.Length || !Verifier.IsProfile(args[i + 1]))
+                { Console.Error.WriteLine(Usage); return 4; }
+                profile = args[++i];
+            }
+            else if (a == "--purpose")
             {
                 if (i + 1 >= args.Length || (args[i + 1] != "current" && args[i + 1] != "historical"))
                 { Console.Error.WriteLine(Usage); return 4; }
@@ -71,6 +79,9 @@ public static class Program
         if (purpose == "historical" && keyringPath is null) { Console.Error.WriteLine(Usage); return 4; }
         if (purpose == "current" && checkpointKeyringPath is not null) { Console.Error.WriteLine(Usage); return 4; }
         if (checkpointKeyringPath is not null && checkpointPath is null) { Console.Error.WriteLine(Usage); return 4; }
+        // strict-bytes covers current-use bare chains only.
+        bool strictBytes = profile == Verifier.ProfileStrictBytes;
+        if (strictBytes && purpose == "historical") { Console.Error.WriteLine(Usage); return 4; }
 
         JVal receipts, keyring = null!, identity = null!, checkpoint = null!, checkpointKeyring = null!;
         bool haveKeyring = keyringPath is not null;
@@ -79,7 +90,22 @@ public static class Program
         bool haveCheckpointKeyring = checkpointKeyringPath is not null;
         try
         {
-            receipts = StrictJson.Parse(File.ReadAllText(receiptsPath));
+            if (strictBytes)
+            {
+                // ReadAllBytes keeps every byte (ReadAllText would detect and drop a BOM); the gate
+                // decodes, parses and compares them once, before any other input is read.
+                JVal? admitted = Verifier.AdmitChainBytes(File.ReadAllBytes(receiptsPath), Verifier.ProfileStrictBytes, out string strictDetail);
+                if (admitted is null)
+                {
+                    PrintCompact("MALFORMED", strictDetail);
+                    return 3;
+                }
+                receipts = admitted;
+            }
+            else
+            {
+                receipts = StrictJson.Parse(File.ReadAllText(receiptsPath));
+            }
             if (haveKeyring) keyring = StrictJson.Parse(File.ReadAllText(keyringPath!));
             if (haveIdentity) identity = StrictJson.Parse(File.ReadAllText(identityPath!));
             if (haveCheckpoint) checkpoint = StrictJson.Parse(File.ReadAllText(checkpointPath!));

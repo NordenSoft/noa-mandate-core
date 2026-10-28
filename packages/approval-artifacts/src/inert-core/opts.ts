@@ -93,12 +93,18 @@ const _freeze = Object.freeze;
  * field; `inertOptions` rejects such a schema at the first call rather than recursing. An exact
  * schema whose depth is unbounded is not an exact schema.
  */
-export type OptionKind = "boolean" | "count" | "document" | "nested";
+export type OptionKind = "boolean" | "count" | "document" | "nested" | "enum";
 
 export interface OptionField {
   readonly kind: OptionKind;
   /** Mandatory for `count`: an option without a ceiling is an unbounded value. */
   readonly max?: number;
+  /**
+   * Mandatory for `enum`: the CLOSED set of admitted string values, owned and frozen by the schema
+   * author. A value outside it is refused, never mapped to a default: an unrecognised profile name
+   * silently selecting another profile is the misconfiguration this kind exists to refuse.
+   */
+  readonly values?: readonly string[];
   /** Mandatory for `nested`: the exact schema the sub-object is admitted against. */
   readonly schema?: OptionSchema;
 }
@@ -122,6 +128,14 @@ export type InertRecord = object;
  */
 export function inertOptions<T extends InertRecord>(schema: OptionSchema, input: unknown, what: string): OptionsResult<T> {
   return admit(schema, input, what, 0);
+}
+
+/** Membership in an `enum` field's schema-owned value list: an index walk with `===`, no lookup a caller can reach. */
+function closedSetHas(values: readonly string[], value: string): boolean {
+  for (let j = 0; j < values.length; j++) {
+    if (values[j] === value) return true;
+  }
+  return false;
 }
 
 /** The one allowed nesting depth. A `nested` field inside a `nested` schema is a schema error. */
@@ -219,6 +233,19 @@ function admit<T extends InertRecord>(schema: OptionSchema, input: unknown, what
       const inner = admit<InertRecord>(field.schema, raw, `${what}.${key}`, depth + 1);
       if (!inner.ok) return { ok: false, reason: inner.reason };
       out[key] = inner.value;
+      continue;
+    }
+    if (field.kind === "enum") {
+      // The value came out of the own DATA descriptor read above (never an accessor) and is compared
+      // by `===` against the schema's own frozen list: no coercion, no caller method is called.
+      const values = field.values;
+      if (values === undefined) {
+        return { ok: false, reason: `${what}: option "${key}" is declared enum without a value set — an open enum is not a closed one` };
+      }
+      if (typeof raw !== "string" || !closedSetHas(values, raw)) {
+        return { ok: false, reason: `${what}: option "${key}" must be one of ${_arrayJoin(values, ", ")}` };
+      }
+      out[key] = raw;
       continue;
     }
     // field.kind === "document" — bytes or text, decoded exactly once into the inert record.
