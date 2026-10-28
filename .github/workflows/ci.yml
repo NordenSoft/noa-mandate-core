@@ -730,7 +730,7 @@ jobs:
     # Divide the same registry into thirty-two slices so the expensive boundary suite no longer
     # fills one eighteen-control job. Preserve every control, per-arm deadline and job limit;
     # the additional setup/baseline work trades runner minutes for a bounded completion path.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 180
     strategy:
       # fail-fast DEFAULTS TO TRUE, which would cancel every queued and in-progress sibling the
