@@ -8,7 +8,7 @@ use crate::json::{Json, SAFE_INT_MAX};
 use crate::keys::verify_sig;
 use crate::schema::{is_hash, is_rfc3339_instant, ts_order, validate_receipt_shape, TsOrder};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const RECEIPT_DOMAIN: &[u8] = b"NOA-Receipt-v0.1-sig:";
 const CHECKPOINT_DOMAIN: &[u8] = b"NOA-Checkpoint-v0.1-sig:";
@@ -190,7 +190,7 @@ pub(crate) fn verify_checkpoint(cp: &Json, keyring: Option<&Json>) -> &'static s
 
 /// Verify a receipt chain. Pure, offline, deterministic. Never panics — malformed shape → MALFORMED.
 /// When `warnings` is supplied, a VALID/UNVERIFIED run appends its warnings to it in order (the
-/// timestamp-order codes, spec §5); a refusal appends nothing, like the TS reference.
+/// timestamp-order and duplicate-id codes, spec §5); a refusal appends nothing, like the TS reference.
 pub fn verify_chain(
     receipts: &Json,
     keyring: Option<&Json>,
@@ -311,6 +311,7 @@ pub fn verify_chain(
     let mut pinned: HashMap<String, String> = HashMap::new();
     let mut prev_hash: Option<String> = None;
     let mut prev_ts: Option<&str> = None;
+    let mut seen_ids: HashSet<&str> = HashSet::new(); // receipt ids of the lower seqs (duplicate-id)
     let mut run_warnings: Vec<String> = Vec::new();
     for s in 0..n as i64 {
         let idx = match by_seq.get(&s) {
@@ -406,6 +407,14 @@ pub fn verify_chain(
             }
         }
         prev_ts = Some(ts);
+
+        // 4f. id uniqueness (spec §5 step 6c): a warning, never a verdict, after this seq's
+        // timestamp-order code. Exact string equality after JSON parsing: no Unicode normalization,
+        // case-sensitive.
+        let rid = r.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if !seen_ids.insert(rid) {
+            run_warnings.push(format!("duplicate-id: seq {s}"));
+        }
     }
 
     // Step 5: tail-truncation via checkpoint.
