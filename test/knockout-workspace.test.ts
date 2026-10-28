@@ -3638,24 +3638,30 @@ test("Linux descriptor metadata batches cover every node in fixed chunks and kee
   requiredExecutable(["/usr/bin/getfacl", "/bin/getfacl"], "getfacl");
   requiredExecutable(["/usr/bin/getfattr", "/bin/getfattr"], "getfattr");
   const root = fs.realpathSync(privateTemp("noa-kws-linux-metadata-batch-"));
-  const directory = path.join(root, "directory");
   const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
   assert.ok(spawnDescriptor !== undefined);
   const originalSpawnSync = childProcess.spawnSync;
-  const batches: Array<{ anchor: string; nodes: string[] }> = [];
-  const legacyCalls: Array<{ operand: string; tool: string }> = [];
+  // One ordered log of every metadata child: a helper batch is its node identities in descriptor
+  // order, a per-node tool call is "<tool> <operand>".
+  const calls: Array<{ batch: string[] } | { tool: string }> = [];
+  const rootIdentity = lstatIdentity(root);
   try {
-    fs.mkdirSync(directory, { mode: 0o700 });
-    for (let index = 0; index < 126; index++) {
-      fs.writeFileSync(path.join(directory, `file-${index.toString().padStart(3, "0")}`), "x", {
-        mode: 0o600,
-      });
+    // Two sibling directories, each holding 63 regular files and one symlink. Whatever readdir
+    // order the filesystem yields, the census preorder visits one directory's symlink before the
+    // other directory node, so a regular node always follows a symlink in request order.
+    for (const name of ["A", "B"]) {
+      const directory = path.join(root, name);
+      fs.mkdirSync(directory, { mode: 0o700 });
+      for (let index = 0; index < (name === "A" ? 62 : 63); index++) {
+        fs.writeFileSync(path.join(directory, `file-${index.toString().padStart(3, "0")}`), "x", {
+          mode: 0o600,
+        });
+      }
+      if (name === "A") {
+        fs.writeFileSync(path.join(directory, "line\nname\tfile"), "unusual\n", { mode: 0o600 });
+      }
+      fs.symlinkSync("file-000", path.join(directory, "link"));
     }
-    fs.writeFileSync(path.join(directory, "line\nname\tfile"), "unusual\n", { mode: 0o600 });
-    // Two symlinks at the root mix with the regular nodes in the census request order (readdir
-    // order); neither may enter a descriptor batch.
-    fs.symlinkSync(path.join("directory", "file-001"), path.join(root, "a-link"));
-    fs.symlinkSync(path.join("directory", "file-000"), path.join(root, "link"));
     Object.defineProperty(childProcess, "spawnSync", {
       ...spawnDescriptor,
       value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
@@ -3664,16 +3670,14 @@ test("Linux descriptor metadata batches cover every node in fixed chunks and kee
           const { anchorFd, nodeFds } = descriptorMetadataHelperFds(args);
           assert.ok(nodeFds.length >= 1 && nodeFds.length <= 64);
           assert.equal(Number(childArgs?.at(-3)), nodeFds.length);
-          batches.push({
-            anchor: descriptorMetadataStat(anchorFd).identity,
-            nodes: nodeFds.map((fd) => descriptorMetadataStat(fd).identity),
-          });
+          assert.equal(descriptorMetadataStat(anchorFd).identity, rootIdentity);
+          calls.push({ batch: nodeFds.map((fd) => descriptorMetadataStat(fd).identity) });
         } else if (Array.isArray(childArgs)) {
           const tool = childArgs.find((argument) =>
             typeof argument === "string" &&
             ["getfacl", "getfattr"].includes(path.basename(argument)));
           if (typeof tool === "string") {
-            legacyCalls.push({ operand: String(childArgs.at(-1)), tool: path.basename(tool) });
+            calls.push({ tool: `${path.basename(tool)} ${String(childArgs.at(-1))}` });
           }
         }
         return Reflect.apply(originalSpawnSync, childProcess, args);
@@ -3686,28 +3690,64 @@ test("Linux descriptor metadata batches cover every node in fixed chunks and kee
       rootGitPolicy: "absent",
     });
     assert.equal(census.nodeCount, 131);
-    const regularNodes = census.nodes.filter((node) => node.type !== "symlink");
-    assert.equal(regularNodes.length, 129);
-    assert.deepEqual(batches.map((batch) => batch.nodes.length), [64, 64, 1]);
-    const rootIdentity = lstatIdentity(root);
-    assert.ok(batches.every((batch) => batch.anchor === rootIdentity));
-    const batchedIdentities = batches.flatMap((batch) => batch.nodes);
-    assert.equal(new Set(batchedIdentities).size, batchedIdentities.length, "a node was batched twice");
-    assert.deepEqual(
-      [...batchedIdentities].sort(),
-      regularNodes.map((node) => lstatIdentity(path.join(root, ...node.path.split("/")))).sort(),
-      "the descriptor batches did not cover exactly the regular files and directories",
+    assert.equal(census.nodes.filter((node) => node.type !== "symlink").length, 129);
+
+    // The census request order is a preorder walk in the filesystem's own readdir order (opendir,
+    // unsorted). Rebuild it independently and derive the exact streamed call sequence: contiguous
+    // regular nodes flushed in batches of at most 64 before each symlink and at the end, each
+    // symlink observed in place by getfacl then getfattr.
+    const requestOrder: Array<{ identity: string; relative: string; symlink: boolean }> = [];
+    const walk = (relative: string) => {
+      const absolute = relative === "." ? root : path.join(root, ...relative.split("/"));
+      requestOrder.push({ identity: lstatIdentity(absolute), relative, symlink: false });
+      const directory = fs.opendirSync(absolute);
+      const names: string[] = [];
+      try {
+        for (let entry = directory.readSync(); entry !== null; entry = directory.readSync()) {
+          names.push(entry.name);
+        }
+      } finally { directory.closeSync(); }
+      for (const name of names) {
+        const child = relative === "." ? name : `${relative}/${name}`;
+        const stat = fs.lstatSync(path.join(absolute, name));
+        if (stat.isDirectory()) walk(child);
+        else {
+          requestOrder.push({
+            identity: lstatIdentity(path.join(absolute, name)),
+            relative: child,
+            symlink: stat.isSymbolicLink(),
+          });
+        }
+      }
+    };
+    walk(".");
+    assert.equal(requestOrder.length, census.nodeCount);
+    const expectedCalls: Array<{ batch: string[] } | { tool: string }> = [];
+    let run: string[] = [];
+    const flush = () => {
+      if (run.length > 0) expectedCalls.push({ batch: run });
+      run = [];
+    };
+    for (const request of requestOrder) {
+      if (!request.symlink) {
+        run.push(request.identity);
+        if (run.length === 64) flush();
+        continue;
+      }
+      flush();
+      const operand = `.${path.sep}${request.relative.split("/").join(path.sep)}`;
+      expectedCalls.push({ tool: `getfacl ${operand}` }, { tool: `getfattr ${operand}` });
+    }
+    flush();
+    assert.deepEqual(calls, expectedCalls, "metadata observations did not stream in request order");
+    const firstToolCall = calls.findIndex((call) => "tool" in call);
+    assert.ok(firstToolCall > 0, "no helper batch preceded the first symlink");
+    assert.ok(
+      calls.slice(firstToolCall).some((call) => "batch" in call),
+      "no helper batch followed a symlink, so the interleaving was not exercised",
     );
-    assert.deepEqual(
-      legacyCalls.map((call) => `${call.tool} ${call.operand}`).sort(),
-      [
-        `getfacl .${path.sep}a-link`,
-        `getfacl .${path.sep}link`,
-        `getfattr .${path.sep}a-link`,
-        `getfattr .${path.sep}link`,
-      ],
-      "only symbolic links may use the per-node metadata tools",
-    );
+    const batchedIdentities = calls.flatMap((call) => "batch" in call ? call.batch : []);
+    assert.equal(new Set(batchedIdentities).size, 129, "a regular node was skipped or batched twice");
     for (const node of census.nodes) {
       assert.deepEqual(node.provenance, {
         classification: "NON_SEMANTIC_OS_MANAGED_PATH_LOCAL",
@@ -3716,8 +3756,8 @@ test("Linux descriptor metadata batches cover every node in fixed chunks and kee
         sha256: null,
       }, `unexpected metadata for ${JSON.stringify(node.path)}`);
     }
-    assert.equal(census.nodes.find((node) => node.path === "link")?.type, "symlink");
-    assert.equal(census.nodes.find((node) => node.path === "a-link")?.type, "symlink");
+    assert.equal(census.nodes.find((node) => node.path === "A/link")?.type, "symlink");
+    assert.equal(census.nodes.find((node) => node.path === "B/link")?.type, "symlink");
   } finally {
     Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
     syncBuiltinESMExports();
@@ -3935,6 +3975,91 @@ test("Linux descriptor metadata helper errors and malformed output fail closed",
         removeFixturePath(root);
       }
     });
+  }
+});
+
+test("the exact Linux metadata helper refuses a real native ACL API failure", (t) => {
+  if (process.platform !== "linux") {
+    t.skip("requires the Linux descriptor metadata backend");
+    return;
+  }
+  const python = requiredExecutable(["/usr/bin/python3"], "python3");
+  // The helper source is a String.raw literal, so its runtime value is the literal source text.
+  const moduleSource = fs.readFileSync(
+    path.join(repositoryRoot, "scripts/lib/knockout-workspace.mjs"),
+    "utf8",
+  );
+  const marker = "const LINUX_METADATA_HELPER_SCRIPT = String.raw`";
+  const scriptStart = moduleSource.indexOf(marker);
+  assert.ok(scriptStart >= 0, "the Linux helper source was not found");
+  const scriptEnd = moduleSource.indexOf("\n`;", scriptStart + marker.length);
+  assert.ok(scriptEnd > scriptStart);
+  const helperScript = moduleSource.slice(scriptStart + marker.length, scriptEnd + 1);
+  assert.equal(helperScript.includes("${"), false);
+  assert.equal(helperScript.includes("\\`"), false);
+  assert.ok(helperScript.includes('REFUSAL_PREFIX = "NOA_LINUX_METADATA_REFUSAL_V1"'));
+
+  const root = fs.realpathSync(privateTemp("noa-kws-linux-native-failure-"));
+  const leaf = path.join(root, "leaf");
+  fs.writeFileSync(leaf, "stable\n", { mode: 0o600 });
+  // open(2): an O_PATH descriptor "can be used for fstat(2)" while fgetxattr(2) "fail[s] with the
+  // error EBADF"; Linux fs/xattr.c path_getxattrat uses CLASS(fd) = fdget(), which is
+  // __fget_light(fd, FMODE_PATH) in fs/file.c and so rejects O_PATH files. libacl acl_get_fd
+  // returns NULL for that errno. The helper therefore sees a regular file whose stat matches and
+  // whose ACL read fails natively, with no privilege, mock, or filesystem quirk involved.
+  const oPath = (fs.constants as Record<string, number | undefined>).O_PATH ?? 0o10000000;
+  const anchorFd = fs.openSync(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  const pathFd = fs.openSync(leaf, oPath | fs.constants.O_NOFOLLOW);
+  const readableFd = fs.openSync(leaf, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    assert.throws(
+      () => fs.readSync(pathFd, Buffer.alloc(1), 0, 1, 0),
+      (error: NodeJS.ErrnoException) => error.code === "EBADF",
+      "the fixture descriptor is not an O_PATH descriptor",
+    );
+    const runHelper = (nodeFd: number) => {
+      const stat = descriptorMetadataStat(nodeFd);
+      assert.equal(stat.type, "file");
+      const token = crypto.randomBytes(32).toString("hex");
+      // Same argv, environment, inherited-descriptor layout and expectation framing as the
+      // production launch (anchor at fd 3, node descriptors from fd 4).
+      const result = childProcess.spawnSync(python, [
+        "-I", "-S", "-c", helperScript, "both",
+        String(64 * 1024 * 1024), String(32 * 1024 * 1024), "1", String(64 * 1024), token,
+      ], {
+        encoding: null,
+        env: { LANG: "C", LC_ALL: "C", PATH: "/usr/bin:/bin" },
+        input: Buffer.from(`${JSON.stringify([stat])}\n`),
+        killSignal: "SIGKILL",
+        stdio: ["pipe", "pipe", "pipe", anchorFd, nodeFd],
+        timeout: 30_000,
+      });
+      return { result, stat, token };
+    };
+
+    const control = runHelper(readableFd);
+    assert.equal(control.result.error, undefined);
+    assert.equal(control.result.status, 0, String(control.result.stderr));
+    assert.equal(control.result.stderr.length, 0);
+    assert.deepEqual(JSON.parse(control.result.stdout.toString("utf8")), {
+      acl: [{ fd: 4, present: false, stat: control.stat }],
+      xattr: [{ fd: 4, namesBase64: [], provenanceBase64: null, stat: control.stat }],
+    }, "the readable control descriptor was not admitted by the exact helper");
+
+    const failure = runHelper(pathFd);
+    assert.equal(failure.result.error, undefined);
+    assert.equal(failure.result.status, 70);
+    assert.equal(failure.result.stdout.length, 0, "a failed ACL read produced metadata output");
+    assert.equal(
+      failure.result.stderr.toString("utf8"),
+      `NOA_LINUX_METADATA_REFUSAL_V1 token=${failure.token} phase=acl stage=acl_get_fd errno=${os.constants.errno.EBADF}\n`,
+      "the native acl_get_fd failure did not refuse at its own stage",
+    );
+  } finally {
+    fs.closeSync(readableFd);
+    fs.closeSync(pathFd);
+    fs.closeSync(anchorFd);
+    removeFixturePath(root);
   }
 });
 

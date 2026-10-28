@@ -5582,13 +5582,15 @@ function requireCompleteMetadataResults(results, label) {
 // Linux census metadata: regular files and directories go through bounded descriptor batches (one
 // helper launch per MAC_METADATA_BATCH_NODE_LIMIT uncached nodes instead of two pathname tool
 // launches per node); symbolic links keep the per-node --physical/--no-dereference observation.
-// Each result is written back to its original request index, and every index must be covered.
+// Requests are observed as one stream in their original order: each contiguous run of regular
+// files and directories is flushed in batches of at most MAC_METADATA_BATCH_NODE_LIMIT before the
+// next symbolic link, and every symbolic link is observed at its own position, so no observation
+// is deferred past later requests. Each result is written back to its original request index, and
+// every index must be covered.
 function observeLinuxMetadataBatch(requests, operationBudget, anchorRoot, metadataCache) {
   if (!Array.isArray(requests)) {
     fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "metadata batch is malformed");
   }
-  const descriptorIndexes = [];
-  const symlinkIndexes = [];
   for (let index = 0; index < requests.length; index++) {
     const request = requests[index];
     if (
@@ -5597,26 +5599,37 @@ function observeLinuxMetadataBatch(requests, operationBudget, anchorRoot, metada
     ) {
       fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "metadata batch entry is malformed");
     }
-    (request.isSymlink ? symlinkIndexes : descriptorIndexes).push(index);
   }
   const results = new Array(requests.length);
-  const descriptorResults = observeDescriptorMetadataBatch(
-    descriptorIndexes.map((index) => requests[index]),
-    operationBudget,
-    anchorRoot,
-    metadataCache,
-  );
-  if (descriptorResults.length !== descriptorIndexes.length) {
-    fail(
-      KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
-      "Linux descriptor metadata batch returned an incomplete observation",
+  let pendingIndexes = [];
+  const flushDescriptorRun = () => {
+    if (pendingIndexes.length === 0) return;
+    const runIndexes = pendingIndexes;
+    pendingIndexes = [];
+    const runResults = observeDescriptorMetadataBatch(
+      runIndexes.map((index) => requests[index]),
+      operationBudget,
+      anchorRoot,
+      metadataCache,
     );
-  }
-  for (let position = 0; position < descriptorIndexes.length; position++) {
-    results[descriptorIndexes[position]] = descriptorResults[position];
-  }
-  for (const index of symlinkIndexes) {
+    if (runResults.length !== runIndexes.length) {
+      fail(
+        KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+        "Linux descriptor metadata batch returned an incomplete observation",
+      );
+    }
+    for (let position = 0; position < runIndexes.length; position++) {
+      results[runIndexes[position]] = runResults[position];
+    }
+  };
+  for (let index = 0; index < requests.length; index++) {
     const request = requests[index];
+    if (!request.isSymlink) {
+      pendingIndexes.push(index);
+      if (pendingIndexes.length === MAC_METADATA_BATCH_NODE_LIMIT) flushDescriptorRun();
+      continue;
+    }
+    flushDescriptorRun();
     results[index] = observeMetadata(
       request.abs,
       true,
@@ -5626,6 +5639,7 @@ function observeLinuxMetadataBatch(requests, operationBudget, anchorRoot, metada
       metadataCache,
     );
   }
+  flushDescriptorRun();
   requireCompleteMetadataResults(results, "Linux metadata batch");
   return Object.freeze(results);
 }
