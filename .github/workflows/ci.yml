@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   supply-chain-audit:
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,7 +49,7 @@ jobs:
     #
     # It is a SEPARATE job on purpose: no existing job installs every declaring package, so none of
     # them can prove resolution across the full inventory. --strict requires exactly that.
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -109,7 +109,7 @@ jobs:
           node scripts/lint-publish-tarball-deps.mjs --dir packages/mcp-proxy --expect-local
 
   extended-package-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -186,7 +186,7 @@ jobs:
     # only; Go, Rust and C# were verified on developer machines and by nothing else. That is exactly
     # the shape of gap this repository keeps finding: a rule enforced in some implementations is not
     # an invariant. Every verifier that claims conformance is now checked on every push.
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -316,7 +316,7 @@ jobs:
 
   test:
     name: test (${{ matrix.label }})
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     # THE SWEEP NO LONGER RUNS HERE. It was moved to the sharded `knockout-shards` job below after
     # run 32853985529 job 97821365624 was cancelled at this job's 120-minute ceiling with the whole
     # registry unmeasured — the instruction this file already carried, to shard rather than drop
@@ -730,7 +730,7 @@ jobs:
     # Divide the same registry into thirty-two slices so the expensive boundary suite no longer
     # fills one eighteen-control job. Preserve every control, per-arm deadline and job limit;
     # the additional setup/baseline work trades runner minutes for a bounded completion path.
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 180
     strategy:
       # fail-fast DEFAULTS TO TRUE, which would cancel every queued and in-progress sibling the
