@@ -2698,14 +2698,15 @@ test("descriptor-pinned metadata prevents parent-subtree ABA laundering", {
   let swapped = false;
   let restored = false;
   try {
-    // The Darwin batch binds every pathname chain before opening its node descriptors. This
-    // fixture swaps the admitted root during that bind, so the earliest deterministic refusal is
-    // the root descriptor disagreeing with its already witnessed identity.
-    const expectedCode = process.platform === "linux" ? "ACL_UNSUPPORTED" : "SNAPSHOT_UNSTABLE";
+    // Both descriptor batches (Darwin and Linux) bind every pathname chain before opening their
+    // node descriptors. This fixture swaps the admitted root during that bind, so the earliest
+    // deterministic refusal is the root descriptor disagreeing with its already witnessed
+    // identity. The original leaf keeps a real ACL/xattr, so a metadata refusal instead of the
+    // bind refusal would fail the code check below.
+    const expectedCode = "SNAPSHOT_UNSTABLE";
     if (process.platform === "linux") {
       const setfacl = requiredExecutable(["/usr/bin/setfacl", "/bin/setfacl"], "setfacl");
-      requiredExecutable(["/usr/bin/getfacl", "/bin/getfacl"], "getfacl");
-      requiredExecutable(["/usr/bin/getfattr", "/bin/getfattr"], "getfattr");
+      requiredExecutable(["/usr/bin/python3"], "python3");
       execFileSync(setfacl, ["-m", "u:12345:r--", leaf]);
     } else {
       execFileSync("/usr/bin/xattr", ["-w", "user.noa_anchor_aba", "must-be-observed", leaf]);
@@ -2742,9 +2743,7 @@ test("descriptor-pinned metadata prevents parent-subtree ABA laundering", {
       () => workspace.censusWorkspace(root, { rootGitPolicy: "absent" }),
       (error: WorkspaceError) =>
         error.code === workspaceErrorCode(expectedCode) &&
-        (process.platform === "linux" || error.message.includes(
-          "changed while binding its metadata descriptor",
-        )),
+        error.message.includes("changed while binding its metadata descriptor"),
     );
     assert.equal(swapped, true, "parent-subtree substitution was not exercised");
   } finally {
@@ -3315,6 +3314,552 @@ test("macOS descriptor xattr framing refuses newline-bearing attribute names", (
     );
   } finally {
     removeFixturePath(root);
+  }
+});
+
+type DescriptorMetadataStat = {
+  ctimeNs: string;
+  identity: string;
+  mode: number;
+  mtimeNs: string;
+  nlink: number;
+  size: number;
+  type: string;
+  uid: number;
+};
+
+// The exact stat record both descriptor helpers report for one inherited node descriptor.
+function descriptorMetadataStat(fd: number): DescriptorMetadataStat {
+  const observed = fs.fstatSync(fd, { bigint: true });
+  return {
+    ctimeNs: String(observed.ctimeNs),
+    identity: `${observed.dev}:${observed.ino}`,
+    mode: Number(observed.mode & 0o7777n),
+    mtimeNs: String(observed.mtimeNs),
+    nlink: Number(observed.nlink),
+    size: Number(observed.size),
+    type: observed.isSymbolicLink() ? "symlink" : observed.isDirectory()
+      ? "directory" : observed.isFile() ? "file" : "other",
+    uid: Number(observed.uid),
+  };
+}
+
+function isDescriptorMetadataHelperLaunch(
+  args: Parameters<typeof childProcess.spawnSync>,
+): boolean {
+  const childArgs = args[1];
+  return args[0] === "/usr/bin/perl" && Array.isArray(childArgs) &&
+    childArgs.includes("/usr/bin/python3") && childArgs.includes("both");
+}
+
+function descriptorMetadataHelperFds(
+  args: Parameters<typeof childProcess.spawnSync>,
+): { anchorFd: number; nodeFds: number[] } {
+  const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
+  assert.ok(Array.isArray(stdio));
+  const anchorFd = stdio[3];
+  assert.equal(typeof anchorFd, "number");
+  const nodeFds = stdio.slice(4).map((fd) => {
+    assert.equal(typeof fd, "number");
+    return fd as number;
+  });
+  return { anchorFd: anchorFd as number, nodeFds };
+}
+
+function lstatIdentity(candidate: string): string {
+  const observed = fs.lstatSync(candidate, { bigint: true });
+  return `${observed.dev}:${observed.ino}`;
+}
+
+test("Linux descriptor metadata batches cover every node in fixed chunks and keep symlinks per node", (t) => {
+  if (process.platform !== "linux") {
+    t.skip("requires the Linux descriptor metadata backend");
+    return;
+  }
+  requiredExecutable(["/usr/bin/python3"], "python3");
+  requiredExecutable(["/usr/bin/getfacl", "/bin/getfacl"], "getfacl");
+  requiredExecutable(["/usr/bin/getfattr", "/bin/getfattr"], "getfattr");
+  const root = fs.realpathSync(privateTemp("noa-kws-linux-metadata-batch-"));
+  const directory = path.join(root, "directory");
+  const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+  assert.ok(spawnDescriptor !== undefined);
+  const originalSpawnSync = childProcess.spawnSync;
+  const batches: Array<{ anchor: string; nodes: string[] }> = [];
+  const legacyCalls: Array<{ operand: string; tool: string }> = [];
+  try {
+    fs.mkdirSync(directory, { mode: 0o700 });
+    for (let index = 0; index < 126; index++) {
+      fs.writeFileSync(path.join(directory, `file-${index.toString().padStart(3, "0")}`), "x", {
+        mode: 0o600,
+      });
+    }
+    fs.writeFileSync(path.join(directory, "line\nname\tfile"), "unusual\n", { mode: 0o600 });
+    // Two symlinks at the root mix with the regular nodes in the census request order (readdir
+    // order); neither may enter a descriptor batch.
+    fs.symlinkSync(path.join("directory", "file-001"), path.join(root, "a-link"));
+    fs.symlinkSync(path.join("directory", "file-000"), path.join(root, "link"));
+    Object.defineProperty(childProcess, "spawnSync", {
+      ...spawnDescriptor,
+      value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
+        const childArgs = args[1];
+        if (isDescriptorMetadataHelperLaunch(args)) {
+          const { anchorFd, nodeFds } = descriptorMetadataHelperFds(args);
+          assert.ok(nodeFds.length >= 1 && nodeFds.length <= 64);
+          assert.equal(Number(childArgs?.at(-3)), nodeFds.length);
+          batches.push({
+            anchor: descriptorMetadataStat(anchorFd).identity,
+            nodes: nodeFds.map((fd) => descriptorMetadataStat(fd).identity),
+          });
+        } else if (Array.isArray(childArgs)) {
+          const tool = childArgs.find((argument) =>
+            typeof argument === "string" &&
+            ["getfacl", "getfattr"].includes(path.basename(argument)));
+          if (typeof tool === "string") {
+            legacyCalls.push({ operand: String(childArgs.at(-1)), tool: path.basename(tool) });
+          }
+        }
+        return Reflect.apply(originalSpawnSync, childProcess, args);
+      }) as typeof childProcess.spawnSync,
+    });
+    syncBuiltinESMExports();
+
+    const census = workspace.censusWorkspace(root, {
+      commandTimeoutMs: 10_000,
+      rootGitPolicy: "absent",
+    });
+    assert.equal(census.nodeCount, 131);
+    const regularNodes = census.nodes.filter((node) => node.type !== "symlink");
+    assert.equal(regularNodes.length, 129);
+    assert.deepEqual(batches.map((batch) => batch.nodes.length), [64, 64, 1]);
+    const rootIdentity = lstatIdentity(root);
+    assert.ok(batches.every((batch) => batch.anchor === rootIdentity));
+    const batchedIdentities = batches.flatMap((batch) => batch.nodes);
+    assert.equal(new Set(batchedIdentities).size, batchedIdentities.length, "a node was batched twice");
+    assert.deepEqual(
+      [...batchedIdentities].sort(),
+      regularNodes.map((node) => lstatIdentity(path.join(root, ...node.path.split("/")))).sort(),
+      "the descriptor batches did not cover exactly the regular files and directories",
+    );
+    assert.deepEqual(
+      legacyCalls.map((call) => `${call.tool} ${call.operand}`).sort(),
+      [
+        `getfacl .${path.sep}a-link`,
+        `getfacl .${path.sep}link`,
+        `getfattr .${path.sep}a-link`,
+        `getfattr .${path.sep}link`,
+      ],
+      "only symbolic links may use the per-node metadata tools",
+    );
+    for (const node of census.nodes) {
+      assert.deepEqual(node.provenance, {
+        classification: "NON_SEMANTIC_OS_MANAGED_PATH_LOCAL",
+        length: 0,
+        present: false,
+        sha256: null,
+      }, `unexpected metadata for ${JSON.stringify(node.path)}`);
+    }
+    assert.equal(census.nodes.find((node) => node.path === "link")?.type, "symlink");
+    assert.equal(census.nodes.find((node) => node.path === "a-link")?.type, "symlink");
+  } finally {
+    Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+    syncBuiltinESMExports();
+    removeFixturePath(root);
+  }
+});
+
+test("Linux descriptor metadata helper errors and malformed output fail closed", async (t) => {
+  if (process.platform !== "linux") {
+    t.skip("requires the Linux descriptor metadata backend");
+    return;
+  }
+  type LinuxHelperResponse =
+    "acl-present" | "api-error" | "dropped-acl" | "dropped-xattr" | "duplicate-acl" |
+    "extra-acl" | "mac-marker" | "missing-helper" | "noncanonical" | "nonzero-exit" |
+    "output-buffer" | "partial-envelope" | "phantom-provenance" | "provenance-exception" |
+    "reordered-xattr" | "stat-mismatch" | "stderr-on-success" | "timeout" | "truncated" |
+    "unauthenticated-error" | "wrong-fd" | "xattr-name";
+  const cases: Array<{
+    expectedCode: string;
+    label: string;
+    phase?: "acl" | "xattr";
+    response: LinuxHelperResponse;
+    stage?: string;
+  }> = [
+    { expectedCode: "ACL_UNSUPPORTED", label: "authenticated ACL API error", phase: "acl",
+      response: "api-error", stage: "acl_get_fd" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "authenticated missing libacl", phase: "acl",
+      response: "api-error", stage: "libacl_unavailable" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "authenticated default-ACL API error", phase: "acl",
+      response: "api-error", stage: "acl_get_file_default" },
+    { expectedCode: "XATTR_UNSUPPORTED", label: "authenticated flistxattr failure", phase: "xattr",
+      response: "api-error", stage: "flistxattr_size" },
+    ...(["acl", "xattr"] as const).flatMap((phase) => [
+      {
+        expectedCode: phase === "acl" ? "ACL_UNSUPPORTED" : "XATTR_UNSUPPORTED",
+        label: `${phase} within-helper descriptor race retains original refusal taxonomy`,
+        phase,
+        response: "api-error" as const,
+        stage: "descriptor_changed",
+      },
+      {
+        expectedCode: "SNAPSHOT_UNSTABLE",
+        label: `${phase} parent-bound descriptor mismatch retains snapshot taxonomy`,
+        phase,
+        response: "api-error" as const,
+        stage: "expected_descriptor_changed",
+      },
+    ]),
+    { expectedCode: "ACL_UNSUPPORTED", label: "a macOS marker cannot select Linux xattr taxonomy",
+      phase: "xattr", response: "mac-marker" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "unauthenticated xattr diagnostic", phase: "xattr",
+      response: "unauthenticated-error" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "nonzero exit without a marker", response: "nonzero-exit" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "missing helper executable", response: "missing-helper" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "stderr beside complete output", response: "stderr-on-success" },
+    { expectedCode: "OPERATION_DEADLINE_EXCEEDED", label: "child timeout beats an authenticated marker",
+      phase: "xattr", response: "timeout" },
+    { expectedCode: "RESOURCE_LIMIT_EXCEEDED", label: "oversize output beats an authenticated marker",
+      phase: "xattr", response: "output-buffer" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "partial combined envelope", response: "partial-envelope" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "truncated output", response: "truncated" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "noncanonical output framing", response: "noncanonical" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "dropped ACL record", response: "dropped-acl" },
+    { expectedCode: "XATTR_UNSUPPORTED", label: "dropped xattr record", response: "dropped-xattr" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "extra ACL record", response: "extra-acl" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "duplicate ACL record", response: "duplicate-acl" },
+    { expectedCode: "XATTR_UNSUPPORTED", label: "reordered xattr records", response: "reordered-xattr" },
+    { expectedCode: "XATTR_UNSUPPORTED", label: "wrong descriptor ordinal", response: "wrong-fd" },
+    { expectedCode: "SNAPSHOT_UNSTABLE", label: "helper stat differs in nanoseconds", response: "stat-mismatch" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "reported ACL presence", response: "acl-present" },
+    { expectedCode: "XATTR_UNSUPPORTED", label: "any reported xattr name", response: "xattr-name" },
+    { expectedCode: "XATTR_UNSUPPORTED", label: "Linux admits no provenance exception",
+      response: "provenance-exception" },
+    { expectedCode: "XATTR_UNSUPPORTED", label: "provenance value without its name",
+      response: "phantom-provenance" },
+  ];
+  for (const fixtureCase of cases) {
+    await t.test(fixtureCase.label, () => {
+      const root = fs.realpathSync(privateTemp("noa-kws-linux-metadata-refusal-"));
+      fs.writeFileSync(path.join(root, "leaf-a"), "a\n", { mode: 0o600 });
+      fs.writeFileSync(path.join(root, "leaf-b"), "b\n", { mode: 0o600 });
+      const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+      const closeDescriptor = Object.getOwnPropertyDescriptor(fs, "closeSync");
+      assert.ok(spawnDescriptor !== undefined);
+      assert.ok(closeDescriptor !== undefined);
+      const originalSpawnSync = childProcess.spawnSync;
+      const originalClose = fs.closeSync;
+      let injected = 0;
+      const injectedFds: number[] = [];
+      const closedAfterInjection = new Set<number>();
+      try {
+        Object.defineProperty(childProcess, "spawnSync", {
+          ...spawnDescriptor,
+          value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
+            if (injected !== 0 || !isDescriptorMetadataHelperLaunch(args)) {
+              return Reflect.apply(originalSpawnSync, childProcess, args);
+            }
+            injected += 1;
+            const { anchorFd, nodeFds } = descriptorMetadataHelperFds(args);
+            injectedFds.push(anchorFd, ...nodeFds);
+            assert.equal(nodeFds.length, 3);
+            const stats = nodeFds.map(descriptorMetadataStat);
+            const at = <T>(values: T[], index: number): T => {
+              const value = values[index];
+              assert.ok(value !== undefined);
+              return value;
+            };
+            let acl: Array<Record<string, unknown>> = stats.map((stat, index) => ({
+              fd: index + 4, present: false, stat,
+            }));
+            let xattr: Array<Record<string, unknown>> = stats.map((stat, index) => ({
+              fd: index + 4, namesBase64: [] as string[], provenanceBase64: null as string | null, stat,
+            }));
+            let envelope: Record<string, unknown> | null = null;
+            const b64 = (value: string) => Buffer.from(value).toString("base64");
+            switch (fixtureCase.response) {
+              case "dropped-acl": acl = acl.slice(0, -1); break;
+              case "dropped-xattr": xattr = xattr.slice(0, -1); break;
+              case "extra-acl": acl = [...acl, { fd: 7, present: false, stat: at(stats, 2) }]; break;
+              case "duplicate-acl": acl = [at(acl, 0), at(acl, 0), at(acl, 2)]; break;
+              case "reordered-xattr": xattr = [at(xattr, 1), at(xattr, 0), at(xattr, 2)]; break;
+              case "wrong-fd": at(xattr, 0).fd = 99; break;
+              case "stat-mismatch": {
+                const stat = at(stats, 1);
+                at(acl, 1).stat = { ...stat, mtimeNs: String(BigInt(stat.mtimeNs) + 1n) };
+                break;
+              }
+              case "acl-present": at(acl, 2).present = true; break;
+              case "xattr-name": at(xattr, 1).namesBase64 = [b64("user.noa")]; break;
+              case "provenance-exception":
+                at(xattr, 1).namesBase64 = [b64("com.apple.provenance")];
+                at(xattr, 1).provenanceBase64 = Buffer.from([0, 1]).toString("base64");
+                break;
+              case "phantom-provenance":
+                at(xattr, 1).provenanceBase64 = Buffer.from([0, 1]).toString("base64");
+                break;
+              case "partial-envelope": envelope = { acl }; break;
+              default: break;
+            }
+            const value = envelope ?? { acl, xattr };
+            const failureToken = String(args[1]?.at(-1));
+            const markerPrefix = fixtureCase.response === "mac-marker"
+              ? "NOA_MAC_METADATA_REFUSAL_V1"
+              : "NOA_LINUX_METADATA_REFUSAL_V1";
+            const markerToken = fixtureCase.response === "unauthenticated-error"
+              ? "0".repeat(64)
+              : failureToken;
+            const marker = `${markerPrefix} token=${markerToken} phase=${fixtureCase.phase ?? "acl"} stage=${fixtureCase.stage ?? "injected"} errno=5\n`;
+            const markerCase = [
+              "api-error", "mac-marker", "output-buffer", "timeout", "unauthenticated-error",
+            ].includes(fixtureCase.response);
+            let stdout = Buffer.from(JSON.stringify(value));
+            let stderr = Buffer.alloc(0);
+            let status: number | null = 0;
+            if (markerCase) {
+              stdout = Buffer.alloc(0);
+              stderr = Buffer.from(marker);
+              status = 70;
+            } else if (fixtureCase.response === "nonzero-exit") {
+              stdout = Buffer.alloc(0);
+              stderr = Buffer.from("Traceback (most recent call last):\n");
+              status = 1;
+            } else if (fixtureCase.response === "missing-helper") {
+              stdout = Buffer.alloc(0);
+              stderr = Buffer.from("metadata tool exec failed at -e line 1.\n");
+              status = 2;
+            } else if (fixtureCase.response === "stderr-on-success") {
+              stderr = Buffer.from("warning\n");
+            } else if (fixtureCase.response === "truncated") {
+              stdout = stdout.subarray(0, Math.floor(stdout.length / 2));
+            } else if (fixtureCase.response === "noncanonical") {
+              stdout = Buffer.concat([Buffer.from(" "), stdout]);
+            }
+            const error = ["output-buffer", "timeout"].includes(fixtureCase.response)
+              ? Object.assign(new Error("injected child-process failure"), {
+                  code: fixtureCase.response === "timeout" ? "ETIMEDOUT" : "ENOBUFS",
+                })
+              : undefined;
+            return {
+              ...(error === undefined ? {} : { error }),
+              output: [null, stdout, stderr],
+              pid: 123,
+              signal: null,
+              status,
+              stderr,
+              stdout,
+            };
+          }) as typeof childProcess.spawnSync,
+        });
+        Object.defineProperty(fs, "closeSync", {
+          ...closeDescriptor,
+          value: (...args: Parameters<typeof fs.closeSync>) => {
+            if (injected !== 0) closedAfterInjection.add(args[0]);
+            return Reflect.apply(originalClose, fs, args);
+          },
+        });
+        syncBuiltinESMExports();
+        assert.throws(
+          () => workspace.censusWorkspace(root, {
+            commandTimeoutMs: 10_000,
+            rootGitPolicy: "absent",
+          }),
+          (error: WorkspaceError) => error.code === workspaceErrorCode(fixtureCase.expectedCode),
+        );
+        assert.equal(injected, 1, "the Linux helper fault was not injected");
+        assert.equal(injectedFds.length, 4);
+        for (const fd of injectedFds) {
+          assert.ok(closedAfterInjection.has(fd), `batch descriptor ${fd} was not closed`);
+        }
+      } finally {
+        Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+        Object.defineProperty(fs, "closeSync", closeDescriptor);
+        syncBuiltinESMExports();
+        removeFixturePath(root);
+      }
+    });
+  }
+});
+
+test("Linux descriptor metadata refuses named and default ACLs and any xattr among clean nodes", async (t) => {
+  if (process.platform !== "linux") {
+    t.skip("requires the Linux descriptor metadata backend");
+    return;
+  }
+  const python = requiredExecutable(["/usr/bin/python3"], "python3");
+  const setfacl = requiredExecutable(["/usr/bin/setfacl", "/bin/setfacl"], "setfacl");
+  const newlineName = "user.noa\nambiguous";
+  const cases: Array<{
+    expectedCode: string;
+    label: string;
+    // Returns the pathname of the one node that carries the refused metadata.
+    prepare: (root: string) => string;
+    refusal: (error: WorkspaceError) => boolean;
+  }> = [
+    {
+      expectedCode: "ACL_UNSUPPORTED",
+      label: "named access ACL on one file among clean nodes",
+      prepare: (root) => {
+        const target = path.join(root, "file-068");
+        execFileSync(setfacl, ["-m", "u:12345:r--", target]);
+        return target;
+      },
+      refusal: (error) => String(error.details?.stderr ?? "").includes(" phase=acl stage=acl_extended_entry "),
+    },
+    {
+      expectedCode: "ACL_UNSUPPORTED",
+      label: "default ACL on one empty directory among clean nodes",
+      prepare: (root) => {
+        const directory = path.join(root, "zz-default");
+        fs.mkdirSync(directory, { mode: 0o700 });
+        execFileSync(setfacl, ["-d", "-m", "u:12345:rwx", directory]);
+        return directory;
+      },
+      refusal: (error) => String(error.details?.stderr ?? "").includes(" phase=acl stage=default_acl_present "),
+    },
+    {
+      expectedCode: "XATTR_UNSUPPORTED",
+      label: "newline-bearing user xattr on one file among clean nodes",
+      prepare: (root) => {
+        const target = path.join(root, "file-068");
+        execFileSync(python, [
+          "-I", "-S", "-c",
+          "import os, sys\nos.setxattr(sys.argv[1], os.fsencode(sys.argv[2]), b'value')",
+          target, newlineName,
+        ]);
+        return target;
+      },
+      refusal: (error) => Array.isArray(error.details?.names) &&
+        error.details.names.length === 1 && error.details.names[0] === newlineName,
+    },
+  ];
+  for (const fixtureCase of cases) {
+    await t.test(fixtureCase.label, () => {
+      const root = fs.realpathSync(privateTemp("noa-kws-linux-metadata-negative-"));
+      const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+      assert.ok(spawnDescriptor !== undefined);
+      const originalSpawnSync = childProcess.spawnSync;
+      const batches: string[][] = [];
+      try {
+        for (let index = 0; index < 70; index++) {
+          fs.writeFileSync(path.join(root, `file-${index.toString().padStart(3, "0")}`), "x", {
+            mode: 0o600,
+          });
+        }
+        const targetIdentity = lstatIdentity(fixtureCase.prepare(root));
+        Object.defineProperty(childProcess, "spawnSync", {
+          ...spawnDescriptor,
+          value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
+            if (isDescriptorMetadataHelperLaunch(args)) {
+              batches.push(descriptorMetadataHelperFds(args).nodeFds
+                .map((fd) => descriptorMetadataStat(fd).identity));
+            }
+            return Reflect.apply(originalSpawnSync, childProcess, args);
+          }) as typeof childProcess.spawnSync,
+        });
+        syncBuiltinESMExports();
+        assert.throws(
+          () => workspace.censusWorkspace(root, {
+            commandTimeoutMs: 10_000,
+            rootGitPolicy: "absent",
+          }),
+          (error: WorkspaceError) =>
+            error.code === workspaceErrorCode(fixtureCase.expectedCode) && fixtureCase.refusal(error),
+        );
+        // The refusing launch is the real helper batch that holds the marked node beside clean
+        // nodes; every batch before it was admitted, and no batch exceeds the fixed bound.
+        const refusingBatch = batches.at(-1);
+        assert.ok(refusingBatch !== undefined, "no Linux helper batch ran");
+        assert.ok(refusingBatch.includes(targetIdentity), "the refusing batch did not hold the marked node");
+        assert.ok(refusingBatch.length > 1, "the marked node was not observed among clean nodes");
+        assert.ok(batches.every((batch) => batch.length <= 64));
+        assert.ok(batches.slice(0, -1).every((batch) => !batch.includes(targetIdentity)));
+      } finally {
+        Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+        syncBuiltinESMExports();
+        removeFixturePath(root);
+      }
+    });
+  }
+});
+
+test("Linux descriptor metadata rechecks leaf and ancestor pathnames after the helper", async (t) => {
+  if (process.platform !== "linux") {
+    t.skip("requires the Linux descriptor metadata backend");
+    return;
+  }
+  requiredExecutable(["/usr/bin/python3"], "python3");
+  for (const target of ["ancestor", "leaf"] as const) {
+    await t.test(`${target} replaced by a symbolic link after the second helper batch`, () => {
+      const root = fs.realpathSync(privateTemp("noa-kws-linux-metadata-recheck-"));
+      const parent = path.join(root, "a");
+      const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+      assert.ok(spawnDescriptor !== undefined);
+      const originalSpawnSync = childProcess.spawnSync;
+      let helperCalls = 0;
+      let swapped = false;
+      try {
+        fs.mkdirSync(parent, { mode: 0o700 });
+        // The census binds "." and "a" first (preorder), then a's 70 files in readdir order: 62
+        // files complete the first chunk and the remaining 8 form the second chunk.
+        const fileByIdentity = new Map<string, string>();
+        for (let index = 0; index < 70; index++) {
+          const file = path.join(parent, `f-${index.toString().padStart(3, "0")}`);
+          fs.writeFileSync(file, "x", { mode: 0o600 });
+          fileByIdentity.set(lstatIdentity(file), file);
+        }
+        Object.defineProperty(childProcess, "spawnSync", {
+          ...spawnDescriptor,
+          value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
+            const leafFd = isDescriptorMetadataHelperLaunch(args)
+              ? descriptorMetadataHelperFds(args).nodeFds.at(-1)
+              : undefined;
+            const leaf = leafFd === undefined
+              ? undefined
+              : fileByIdentity.get(descriptorMetadataStat(leafFd).identity);
+            const result = Reflect.apply(originalSpawnSync, childProcess, args) as ReturnType<
+              typeof childProcess.spawnSync
+            >;
+            if (isDescriptorMetadataHelperLaunch(args)) {
+              helperCalls += 1;
+              if (helperCalls === 2) {
+                // The real helper has already observed the bound descriptors; the substitution
+                // lands between its answer and the parent's pathname recheck.
+                assert.equal(result.status, 0, "the real helper did not admit the clean batch");
+                if (target === "ancestor") {
+                  fs.renameSync(parent, path.join(root, "a-real"));
+                  fs.symlinkSync("a-real", parent);
+                } else {
+                  assert.ok(leaf !== undefined, "the second batch did not end with a fixture file");
+                  fs.renameSync(leaf, `${leaf}.real`);
+                  fs.symlinkSync(path.basename(`${leaf}.real`), leaf);
+                }
+                swapped = true;
+              }
+            }
+            return result;
+          }) as typeof childProcess.spawnSync,
+        });
+        syncBuiltinESMExports();
+        assert.throws(
+          () => workspace.censusWorkspace(root, {
+            commandTimeoutMs: 10_000,
+            rootGitPolicy: "absent",
+          }),
+          (error: WorkspaceError) =>
+            error.code === workspaceErrorCode("SNAPSHOT_UNSTABLE") &&
+            (target === "ancestor"
+              ? error.message.includes("acquired a symbolic-link component")
+              : /changed through its metadata descriptor|pathname ancestors changed during metadata inspection|acquired a symbolic-link component/u
+                .test(error.message)),
+        );
+        assert.equal(swapped, true, "the post-helper substitution was not exercised");
+        assert.equal(helperCalls, 2);
+      } finally {
+        Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+        syncBuiltinESMExports();
+        removeFixturePath(root);
+      }
+    });
   }
 });
 
@@ -9219,7 +9764,7 @@ test("Git and metadata child processes have finite fail-closed time budgets", ()
       "utf8",
     );
     const toolStart = moduleSource.indexOf("function toolResult(");
-    const toolEnd = moduleSource.indexOf("\nfunction observeMacMetadata", toolStart);
+    const toolEnd = moduleSource.indexOf("\nfunction ", toolStart + 1);
     assert.ok(toolStart >= 0 && toolEnd > toolStart, "metadata tool wrapper was not found");
     assert.match(
       moduleSource.slice(toolStart, toolEnd),
@@ -9515,6 +10060,7 @@ test("Linux metadata is observed again after an anchor close failure", (t) => {
     const sealedCapture = captured;
     const tracked = path.join(sealedCapture.workspaceRoot, "tracked.txt");
     const before = fs.lstatSync(tracked, { bigint: true });
+    const trackedIdentity = `${before.dev}:${before.ino}`;
     // A real stat change requires a fresh observation. This seed must remain refused on retry.
     fs.chmodSync(tracked, Number(before.mode & 0o777n));
     assert.notEqual(fs.lstatSync(tracked, { bigint: true }).ctimeNs, before.ctimeNs);
@@ -9522,14 +10068,19 @@ test("Linux metadata is observed again after an anchor close failure", (t) => {
       ...spawnDescriptor,
       value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
         const childArgs = args[1];
+        // The seed census observes the tracked file through the Linux descriptor batch helper,
+        // which inherits the bound workspace anchor at fd 3 and one descriptor per node from 4.
+        const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
         if (
-          Array.isArray(childArgs) &&
-          childArgs.some((argument) =>
-            typeof argument === "string" && path.basename(argument) === "getfacl") &&
-          childArgs.includes(`.${path.sep}tracked.txt`)
+          args[0] === "/usr/bin/perl" && Array.isArray(childArgs) &&
+          childArgs.includes("/usr/bin/python3") && childArgs.includes("both") &&
+          Array.isArray(stdio) && stdio.slice(4).some((nodeFd) => {
+            assert.equal(typeof nodeFd, "number");
+            const node = fs.fstatSync(nodeFd as number, { bigint: true });
+            return `${node.dev}:${node.ino}` === trackedIdentity;
+          })
         ) {
-          const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
-          const fd = Array.isArray(stdio) ? stdio[3] : null;
+          const fd = stdio[3];
           assert.equal(typeof fd, "number");
           const anchor = fs.fstatSync(fd as number, { bigint: true });
           assert.equal(`${anchor.dev}:${anchor.ino}`, sealedCapture.workspaceIdentity);
@@ -9568,6 +10119,105 @@ test("Linux metadata is observed again after an anchor close failure", (t) => {
   } finally {
     Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
     Object.defineProperty(fs, "closeSync", closeDescriptor);
+    syncBuiltinESMExports();
+    cleanupReportedScratchRoots(captured?.retainedPrivateRoots ?? []);
+    removeFixturePath(fixture.source);
+    removeFixturePath(fixture.custody);
+  }
+});
+
+test("Linux metadata deadline after a helper batch closes every descriptor and publishes no cache entry", (t) => {
+  if (process.platform !== "linux") {
+    t.skip("requires the Linux metadata backend");
+    return;
+  }
+  const fixture = minimalCaptureFixture("metadata-batch-deadline");
+  const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+  const closeDescriptor = Object.getOwnPropertyDescriptor(fs, "closeSync");
+  const hrtimeDescriptor = Object.getOwnPropertyDescriptor(process.hrtime, "bigint");
+  assert.ok(spawnDescriptor !== undefined);
+  assert.ok(closeDescriptor !== undefined);
+  assert.ok(hrtimeDescriptor !== undefined);
+  const originalSpawn = childProcess.spawnSync;
+  const originalClose = fs.closeSync;
+  const originalHrtime = process.hrtime.bigint;
+  let captured: Capture | null = null;
+  let expire = false;
+  let injected = 0;
+  let trackedBatches = 0;
+  const helperFds: number[] = [];
+  const closedAfterInjection = new Set<number>();
+  try {
+    captured = workspace.captureAndSealCandidate({
+      custodyRoot: fixture.custody,
+      maxAttempts: 1,
+      sourceRoot: fixture.source,
+    });
+    const sealedCapture = captured;
+    const tracked = path.join(sealedCapture.workspaceRoot, "tracked.txt");
+    const before = fs.lstatSync(tracked, { bigint: true });
+    const trackedIdentity = `${before.dev}:${before.ino}`;
+    // A real stat change makes the tracked file a cache miss, so the seed census must run the
+    // helper for it; this seed must remain refused on retry.
+    fs.chmodSync(tracked, Number(before.mode & 0o777n));
+    assert.notEqual(fs.lstatSync(tracked, { bigint: true }).ctimeNs, before.ctimeNs);
+    Object.defineProperty(childProcess, "spawnSync", {
+      ...spawnDescriptor,
+      value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
+        if (!isDescriptorMetadataHelperLaunch(args)) {
+          return Reflect.apply(originalSpawn, childProcess, args);
+        }
+        const { anchorFd, nodeFds } = descriptorMetadataHelperFds(args);
+        const holdsTracked = nodeFds.some((fd) =>
+          descriptorMetadataStat(fd).identity === trackedIdentity);
+        const result = Reflect.apply(originalSpawn, childProcess, args);
+        if (holdsTracked) {
+          trackedBatches += 1;
+          if (injected === 0) {
+            // The real helper admitted the batch; the single operation deadline expires before
+            // the parent accepts its answer.
+            injected += 1;
+            helperFds.push(anchorFd, ...nodeFds);
+            expire = true;
+          }
+        }
+        return result;
+      }) as typeof childProcess.spawnSync,
+    });
+    Object.defineProperty(fs, "closeSync", {
+      ...closeDescriptor,
+      value: (...args: Parameters<typeof fs.closeSync>) => {
+        if (injected !== 0) closedAfterInjection.add(args[0]);
+        return Reflect.apply(originalClose, fs, args);
+      },
+    });
+    Object.defineProperty(process.hrtime, "bigint", {
+      ...hrtimeDescriptor,
+      value: () => originalHrtime() + (expire ? 3_600_000_000_000n : 0n),
+    });
+    syncBuiltinESMExports();
+    const openCustody = () => workspace.openKnockoutCustody(sealedCapture, {
+      maxRetainedArms: 1,
+      maxRetainedBytes: 16 * 1024 * 1024,
+    });
+    assert.throws(openCustody, (error: WorkspaceError) =>
+      error.code === workspaceErrorCode("OPERATION_DEADLINE_EXCEEDED") &&
+      error.message.startsWith("batched Linux metadata inspection exceeded"));
+    assert.equal(injected, 1, "the mid-batch deadline was not injected");
+    assert.equal(trackedBatches, 1);
+    assert.ok(helperFds.length >= 2);
+    for (const fd of helperFds) {
+      assert.ok(closedAfterInjection.has(fd), `batch descriptor ${fd} stayed open after the deadline`);
+    }
+    expire = false;
+    assert.throws(openCustody, (error: WorkspaceError) =>
+      error.code === workspaceErrorCode("MANIFEST_MISMATCH"));
+    assert.equal(trackedBatches, 2, "a batch refused at its deadline left reusable metadata evidence");
+    assert.equal(fs.readFileSync(fixture.trackedPath, "utf8"), "stable source bytes\n");
+  } finally {
+    Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+    Object.defineProperty(fs, "closeSync", closeDescriptor);
+    Object.defineProperty(process.hrtime, "bigint", hrtimeDescriptor);
     syncBuiltinESMExports();
     cleanupReportedScratchRoots(captured?.retainedPrivateRoots ?? []);
     removeFixturePath(fixture.source);
@@ -9641,20 +10291,30 @@ test("capture reuses metadata evidence while each fresh arm is observed in fixed
         `${sourceTracked.dev}:${sourceTracked.ino}`,
         `${destinationTracked.dev}:${destinationTracked.ino}`,
       ]);
+      // Darwin observes every node through the descriptor helper; Linux observes regular files and
+      // directories through its descriptor helper and keeps per-node getfacl/getfattr only for
+      // symbolic links, so a Linux tracked-file observation is counted on either path.
+      const batchTrackedAnchors = metadataBatches
+        .filter((batch) => batch.nodes.some((identity) => trackedIdentities.has(identity)))
+        .map((batch) => batch.anchor);
       const trackedMetadataAnchors = process.platform === "darwin"
-        ? metadataBatches
-            .filter((batch) => batch.nodes.some((identity) => trackedIdentities.has(identity)))
-            .map((batch) => batch.anchor)
-        : legacyTrackedAclAnchors;
+        ? batchTrackedAnchors
+        : [...batchTrackedAnchors, ...legacyTrackedAclAnchors];
+      if (process.platform === "linux") {
+        assert.deepEqual(legacyTrackedAclAnchors, [], "Linux regular files must use the batch helper");
+      }
       assert.deepEqual(
         trackedMetadataAnchors.sort(),
         [`${sourceStat.dev}:${sourceStat.ino}`, sealedCapture.workspaceIdentity].sort(),
         "source/destination ACL metadata must each be externally observed exactly once",
       );
       const destinationTrackedIdentity = `${destinationTracked.dev}:${destinationTracked.ino}`;
-      const trackedObservationCount = () => process.platform === "darwin"
-        ? metadataBatches.filter((batch) => batch.nodes.includes(destinationTrackedIdentity)).length
-        : legacyTrackedAclAnchors.filter((anchor) => anchor === sealedCapture.workspaceIdentity).length;
+      const trackedObservationCount = () =>
+        metadataBatches.filter((batch) => batch.nodes.includes(destinationTrackedIdentity)).length +
+        (process.platform === "darwin"
+          ? 0
+          : legacyTrackedAclAnchors.filter((anchor) => anchor === sealedCapture.workspaceIdentity)
+            .length);
       const destinationTrackedCallsAfterCapture = trackedObservationCount();
       assert.equal(destinationTrackedCallsAfterCapture, 1);
       assert.doesNotThrow(() => workspace.verifySealedSeed(sealedCapture));
@@ -9663,7 +10323,7 @@ test("capture reuses metadata evidence while each fresh arm is observed in fixed
         destinationTrackedCallsAfterCapture,
         "unchanged seed verification re-observed cached tracked-file metadata",
       );
-      if (process.platform === "darwin") {
+      if (process.platform === "darwin" || process.platform === "linux") {
         const custody = workspace.openKnockoutCustody(sealedCapture, {
           maxRetainedArms: 1,
           maxRetainedBytes: 64 * 1024 * 1024,
@@ -9681,9 +10341,18 @@ test("capture reuses metadata evidence while each fresh arm is observed in fixed
         arm = workspace.materializeArm(plan, "metadata-batch");
         const armStat = fs.lstatSync(arm.workspaceRoot, { bigint: true });
         const armIdentity = `${armStat.dev}:${armStat.ino}`;
+        // Linux keeps symbolic links out of the descriptor batch; Darwin batches every node.
+        const countSymlinks = (directory: string): number =>
+          fs.readdirSync(directory, { withFileTypes: true }).reduce((count, entry) =>
+            count + (entry.isSymbolicLink()
+              ? 1
+              : entry.isDirectory() ? countSymlinks(path.join(directory, entry.name)) : 0), 0);
+        const expectedArmBatchNodes = sealedCapture.workspaceObservation.nodeCount -
+          (process.platform === "linux" ? countSymlinks(arm.workspaceRoot) : 0);
+        assert.ok(expectedArmBatchNodes > 0 && expectedArmBatchNodes <= 64);
         const completeArmCensusBatches = metadataBatches.filter((batch) =>
           batch.anchor === armIdentity &&
-          batch.nodes.length === sealedCapture.workspaceObservation.nodeCount);
+          batch.nodes.length === expectedArmBatchNodes);
         assert.equal(
           completeArmCensusBatches.length,
           1,

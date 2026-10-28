@@ -141,7 +141,8 @@ const MAX_GIT_DIRECTORY_ENTRIES = 4096;
 const MAX_SHARED_INDEX_CANDIDATES = 128;
 // Keep descriptor inheritance well below ordinary per-process limits. Metadata subprocess count
 // is therefore bounded by the admitted node count divided by this fixed chunk size, while every
-// node still receives its own descriptor-pinned xattr observation.
+// node still receives its own descriptor-pinned xattr observation. The same bound applies to the
+// Linux descriptor batch, so every metadata helper inherits at most this many node descriptors.
 const MAC_METADATA_BATCH_NODE_LIMIT = 64;
 // `--template=` makes the observation repository shape fixed apart from admitted split indexes.
 // Every witnessed node consumes one simultaneously held descriptor, so keep that FD surface
@@ -213,6 +214,7 @@ export const KNOCKOUT_SELFTEST_SUITE = Object.freeze([
 const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 const DIRECTORY = fs.constants.O_DIRECTORY ?? 0;
 const SYMLINK = fs.constants.O_SYMLINK ?? 0;
+const NONBLOCK = fs.constants.O_NONBLOCK ?? 0;
 const METADATA_FCHDIR_LAUNCHER = "/usr/bin/perl";
 const MAC_METADATA_HELPER = "/usr/bin/python3";
 const MAC_METADATA_EXPECTED_INPUT_BYTES = MAC_METADATA_BATCH_NODE_LIMIT * 1024;
@@ -474,6 +476,278 @@ sys.stdout.buffer.write(b',"xattr":')
 sys.stdout.buffer.write(encoded_xattr)
 sys.stdout.buffer.write(b'}')
 `;
+// Linux counterpart of the descriptor batch above. getfacl/getfattr need one pathname launch per
+// node and tool; this fixed helper observes up to MAC_METADATA_BATCH_NODE_LIMIT inherited node
+// descriptors in one launch through native APIs only: libacl's acl_get_fd for access ACLs, the
+// held /proc/self/fd/<n> magic link for directory default ACLs (libacl has no descriptor call for
+// that type), and flistxattr for attribute names. Only the three base ACL entries are accepted;
+// every API failure refuses, so no failure can read as "no metadata". Linux admits no extended
+// attribute at all, so the parent refuses every returned name. Symbolic links never reach this
+// helper; they stay on the per-node --physical/--no-dereference path.
+const LINUX_METADATA_HELPER_SCRIPT = String.raw`
+import base64
+import ctypes
+import json
+import os
+import stat
+import sys
+
+EXIT_REFUSED = 70
+ACL_TYPE_DEFAULT = 0x4000
+ACL_FIRST_ENTRY = 0
+ACL_NEXT_ENTRY = 1
+ACL_USER_OBJ = 0x01
+ACL_GROUP_OBJ = 0x04
+ACL_OTHER = 0x20
+BASE_ACL_TAGS = [ACL_USER_OBJ, ACL_GROUP_OBJ, ACL_OTHER]
+MAX_ACL_ENTRIES = 1024
+REFUSAL_PREFIX = "NOA_LINUX_METADATA_REFUSAL_V1"
+failure_token = None
+active_phase = "setup"
+
+def refuse(stage, error_number=0):
+    if failure_token is None:
+        sys.stderr.write("linux metadata helper refused " + stage + " errno=" + str(error_number) + "\n")
+    else:
+        sys.stderr.write(
+            REFUSAL_PREFIX + " token=" + failure_token + " phase=" + active_phase +
+            " stage=" + stage + " errno=" + str(error_number) + "\n"
+        )
+    raise SystemExit(EXIT_REFUSED)
+
+if sys.platform != "linux" or len(sys.argv) != 7:
+    refuse("arguments")
+
+mode = sys.argv[1]
+try:
+    output_limit = int(sys.argv[2])
+    raw_limit = int(sys.argv[3])
+    descriptor_count = int(sys.argv[4])
+    expected_input_limit = int(sys.argv[5])
+except ValueError:
+    refuse("arguments")
+candidate_token = sys.argv[6]
+if (
+    mode != "both" or output_limit < 1 or raw_limit < 1 or
+    not 1 <= descriptor_count <= 64 or expected_input_limit < 1 or
+    len(candidate_token) != 64 or
+    any(character not in "0123456789abcdef" for character in candidate_token)
+):
+    refuse("arguments")
+failure_token = candidate_token
+
+expected_input = sys.stdin.buffer.read(expected_input_limit + 1)
+if len(expected_input) > expected_input_limit:
+    refuse("expected_input_limit")
+try:
+    expected_records = json.loads(expected_input)
+except (UnicodeDecodeError, json.JSONDecodeError):
+    refuse("expected_input")
+if not isinstance(expected_records, list) or len(expected_records) != descriptor_count:
+    refuse("expected_input")
+
+try:
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.flistxattr.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t]
+    libc.flistxattr.restype = ctypes.c_ssize_t
+except (AttributeError, OSError):
+    refuse("libc_unavailable")
+
+active_phase = "acl"
+try:
+    libacl = ctypes.CDLL("libacl.so.1", use_errno=True)
+    libacl.acl_get_fd.argtypes = [ctypes.c_int]
+    libacl.acl_get_fd.restype = ctypes.c_void_p
+    libacl.acl_get_file.argtypes = [ctypes.c_char_p, ctypes.c_uint]
+    libacl.acl_get_file.restype = ctypes.c_void_p
+    libacl.acl_get_entry.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
+    ]
+    libacl.acl_get_entry.restype = ctypes.c_int
+    libacl.acl_get_tag_type.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+    libacl.acl_get_tag_type.restype = ctypes.c_int
+    libacl.acl_free.argtypes = [ctypes.c_void_p]
+    libacl.acl_free.restype = ctypes.c_int
+except (AttributeError, OSError):
+    refuse("libacl_unavailable")
+
+def stat_record(fd):
+    try:
+        observed = os.fstat(fd)
+    except OSError as error:
+        refuse("fstat", error.errno or 0)
+    if stat.S_ISLNK(observed.st_mode):
+        node_type = "symlink"
+    elif stat.S_ISDIR(observed.st_mode):
+        node_type = "directory"
+    elif stat.S_ISREG(observed.st_mode):
+        node_type = "file"
+    else:
+        node_type = "other"
+    return {
+        "ctimeNs": str(observed.st_ctime_ns),
+        "identity": str(observed.st_dev) + ":" + str(observed.st_ino),
+        "mode": observed.st_mode & 0o7777,
+        "mtimeNs": str(observed.st_mtime_ns),
+        "nlink": observed.st_nlink,
+        "size": observed.st_size,
+        "type": node_type,
+        "uid": observed.st_uid,
+    }
+
+raw_used = 0
+def reserve_raw(size):
+    global raw_used
+    if size < 0 or size > raw_limit - raw_used:
+        refuse("resource_limit")
+    raw_used += size
+
+def acl_tags(acquire, stage):
+    ctypes.set_errno(0)
+    acl = acquire()
+    if not acl:
+        refuse(stage, ctypes.get_errno())
+    tags = []
+    try:
+        entry = ctypes.c_void_p()
+        entry_id = ACL_FIRST_ENTRY
+        while True:
+            ctypes.set_errno(0)
+            status = libacl.acl_get_entry(acl, entry_id, ctypes.byref(entry))
+            if status == 0:
+                break
+            if status != 1 or not entry.value:
+                refuse(stage + "_entry", ctypes.get_errno())
+            if len(tags) >= MAX_ACL_ENTRIES:
+                refuse(stage + "_entry_limit")
+            tag = ctypes.c_int(0)
+            ctypes.set_errno(0)
+            if libacl.acl_get_tag_type(entry, ctypes.byref(tag)) != 0:
+                refuse(stage + "_tag", ctypes.get_errno())
+            tags.append(tag.value)
+            entry_id = ACL_NEXT_ENTRY
+    finally:
+        ctypes.set_errno(0)
+        if libacl.acl_free(acl) != 0:
+            refuse(stage + "_free", ctypes.get_errno())
+    return sorted(tags)
+
+def proc_identity(proc_path):
+    try:
+        observed = os.stat(proc_path)
+    except OSError as error:
+        refuse("proc_descriptor", error.errno or 0)
+    return str(observed.st_dev) + ":" + str(observed.st_ino)
+
+def list_xattrs(fd, reserve):
+    ctypes.set_errno(0)
+    needed = libc.flistxattr(fd, None, 0)
+    if needed < 0:
+        refuse("flistxattr_size", ctypes.get_errno())
+    if needed > raw_limit:
+        refuse("resource_limit")
+    if reserve:
+        reserve_raw(needed)
+    if needed == 0:
+        ctypes.set_errno(0)
+        confirmed = libc.flistxattr(fd, None, 0)
+        if confirmed != 0:
+            refuse("flistxattr_empty", ctypes.get_errno())
+        return b""
+    value = ctypes.create_string_buffer(needed)
+    ctypes.set_errno(0)
+    observed = libc.flistxattr(fd, value, needed)
+    if observed != needed:
+        refuse("flistxattr_value", ctypes.get_errno())
+    return bytes(value.raw[:observed])
+
+def split_xattr_names(raw):
+    if raw == b"":
+        return []
+    if not raw.endswith(b"\0"):
+        refuse("xattr_name_framing")
+    names = raw[:-1].split(b"\0")
+    if any(name == b"" for name in names):
+        refuse("xattr_name_framing")
+    return names
+
+acl_records = []
+for ordinal in range(descriptor_count):
+    fd = 4 + ordinal
+    before = stat_record(fd)
+    if before != expected_records[ordinal]:
+        refuse("expected_descriptor_changed")
+    if before["type"] not in ("directory", "file"):
+        refuse("node_type")
+    first = acl_tags(lambda: libacl.acl_get_fd(fd), "acl_get_fd")
+    second = acl_tags(lambda: libacl.acl_get_fd(fd), "acl_get_fd")
+    if first != second:
+        refuse("acl_changed")
+    if first != BASE_ACL_TAGS:
+        refuse("acl_extended_entry")
+    if before["type"] == "directory":
+        proc_path = ("/proc/self/fd/" + str(fd)).encode("ascii")
+        if proc_identity(proc_path) != before["identity"]:
+            refuse("proc_descriptor_mismatch")
+        default_first = acl_tags(
+            lambda: libacl.acl_get_file(proc_path, ACL_TYPE_DEFAULT), "acl_get_file_default",
+        )
+        default_second = acl_tags(
+            lambda: libacl.acl_get_file(proc_path, ACL_TYPE_DEFAULT), "acl_get_file_default",
+        )
+        if proc_identity(proc_path) != before["identity"]:
+            refuse("proc_descriptor_mismatch")
+        if default_first != default_second:
+            refuse("default_acl_changed")
+        if default_first:
+            refuse("default_acl_present")
+    after = stat_record(fd)
+    if after != before:
+        refuse("descriptor_changed")
+    acl_records.append({"fd": fd, "present": False, "stat": before})
+
+encoded_acl = json.dumps(
+    acl_records, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+).encode("ascii")
+if len(encoded_acl) > output_limit:
+    refuse("output_limit")
+
+active_phase = "xattr"
+xattr_records = []
+for ordinal in range(descriptor_count):
+    fd = 4 + ordinal
+    before = stat_record(fd)
+    if before != expected_records[ordinal]:
+        refuse("expected_descriptor_changed")
+    names_raw = list_xattrs(fd, True)
+    names = split_xattr_names(names_raw)
+    names_confirmed = list_xattrs(fd, False)
+    if names_confirmed != names_raw:
+        refuse("xattr_names_changed")
+    after = stat_record(fd)
+    if after != before:
+        refuse("descriptor_changed")
+    xattr_records.append({
+        "fd": fd,
+        "namesBase64": [base64.b64encode(name).decode("ascii") for name in names],
+        "provenanceBase64": None,
+        "stat": before,
+    })
+
+encoded_xattr = json.dumps(
+    xattr_records, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+).encode("ascii")
+if len(encoded_xattr) > output_limit:
+    refuse("output_limit")
+framing_size = len(b'{"acl":') + len(encoded_acl) + len(b',"xattr":') + len(encoded_xattr) + 1
+if framing_size > output_limit:
+    refuse("combined_output_limit")
+sys.stdout.buffer.write(b'{"acl":')
+sys.stdout.buffer.write(encoded_acl)
+sys.stdout.buffer.write(b',"xattr":')
+sys.stdout.buffer.write(encoded_xattr)
+sys.stdout.buffer.write(b'}')
+`;
 const WORKER_FCHDIR_SCRIPT = [
   "open(my $directory, q{<&=7}) or die q{worker directory descriptor unavailable};",
   "chdir($directory) or die q{worker directory cannot be entered};",
@@ -556,6 +830,22 @@ const PRIVATE_TREE_CENSUS_SCRIPT = [
 ].join("\n");
 const PROVENANCE_XATTR = "com.apple.provenance";
 const PROVENANCE_CLASSIFICATION = "NON_SEMANTIC_OS_MANAGED_PATH_LOCAL";
+// One closed descriptor-metadata backend per platform. Both share the batch lifecycle, framing,
+// and refusal taxonomy; they differ only in helper source, marker prefix, and admitted xattrs.
+const DESCRIPTOR_METADATA_BACKENDS = Object.freeze({
+  darwin: Object.freeze({
+    allowedXattrNames: Object.freeze([PROVENANCE_XATTR]),
+    label: "macOS",
+    refusalPrefix: "NOA_MAC_METADATA_REFUSAL_V1",
+    script: MAC_METADATA_HELPER_SCRIPT,
+  }),
+  linux: Object.freeze({
+    allowedXattrNames: Object.freeze([]),
+    label: "Linux",
+    refusalPrefix: "NOA_LINUX_METADATA_REFUSAL_V1",
+    script: LINUX_METADATA_HELPER_SCRIPT,
+  }),
+});
 const HASH_40 = /^[0-9a-f]{40}$/;
 const HASH_64 = /^[0-9a-f]{64}$/;
 const HASH_40_OR_64 = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -4095,7 +4385,7 @@ function toolResult(
   directoryFd,
   inheritedDescriptors = [],
   input = null,
-  macMetadataFailureToken = null,
+  metadataFailureToken = null,
 ) {
   const boundedTimeoutMs = requireCommandTimeoutMs(timeoutMs);
   if (!Number.isInteger(directoryFd) || directoryFd < 0) {
@@ -4118,8 +4408,8 @@ function toolResult(
     fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "metadata tool input is malformed");
   }
   if (
-    macMetadataFailureToken !== null &&
-    (typeof macMetadataFailureToken !== "string" || !HASH_64.test(macMetadataFailureToken))
+    metadataFailureToken !== null &&
+    (typeof metadataFailureToken !== "string" || !HASH_64.test(metadataFailureToken))
   ) {
     fail(
       KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT,
@@ -4148,8 +4438,8 @@ function toolResult(
     !Buffer.isBuffer(result.stdout) || !Buffer.isBuffer(result.stderr) || result.stderr.length !== 0
   ) {
     const processFailureCode = childProcessFailureCode(result.error, code);
-    const stableCode = processFailureCode === code && macMetadataFailureToken !== null
-      ? macMetadataHelperFailureCode(result, macMetadataFailureToken, code)
+    const stableCode = processFailureCode === code && metadataFailureToken !== null
+      ? metadataHelperFailureCode(result, metadataFailureToken, code)
       : processFailureCode;
     fail(
       stableCode,
@@ -4173,23 +4463,29 @@ function toolResult(
   return result.stdout;
 }
 
-function macMetadataHelperFailureCode(result, expectedToken, fallback) {
+function metadataHelperFailureCode(result, expectedToken, fallback) {
+  const backend = DESCRIPTOR_METADATA_BACKENDS[process.platform];
   if (
+    backend === undefined ||
     result.error !== undefined || result.status !== 70 ||
     !Buffer.isBuffer(result.stdout) || result.stdout.length !== 0 ||
     !Buffer.isBuffer(result.stderr)
   ) {
     return fallback;
   }
-  const marker = /^NOA_MAC_METADATA_REFUSAL_V1 token=([0-9a-f]{64}) phase=(acl|xattr) stage=([a-z0-9_]+) errno=([0-9]+)\n$/
+  // Only the running platform's fixed prefix authenticates a marker, and the token binds it to
+  // this one launch; anything else keeps the caller's fallback taxonomy.
+  const marker = /^(NOA_(?:MAC|LINUX)_METADATA_REFUSAL_V1) token=([0-9a-f]{64}) phase=(acl|xattr) stage=([a-z0-9_]+) errno=([0-9]+)\n$/
     .exec(result.stderr.toString("utf8"));
-  if (marker === null || marker[1] !== expectedToken) return fallback;
+  if (marker === null || marker[1] !== backend.refusalPrefix || marker[2] !== expectedToken) {
+    return fallback;
+  }
   // The new parent-expectation guard replaces the old parent stat comparison.
   // Within-helper descriptor changes retain the original ACL/xattr refusal code.
-  if (marker[3] === "expected_descriptor_changed") {
+  if (marker[4] === "expected_descriptor_changed") {
     return KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE;
   }
-  return marker[2] === "acl"
+  return marker[3] === "acl"
     ? KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED
     : KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED;
 }
@@ -4200,7 +4496,7 @@ function metadataTimeout(operationBudget, label) {
     : remainingOperationMs(operationBudget, label);
 }
 
-function parseMacMetadataHelperCanonicalJson(output, code, label) {
+function parseMetadataHelperCanonicalJson(output, code, label) {
   const text = decodeUtf8(
     output,
     label,
@@ -4227,8 +4523,8 @@ function parseMacMetadataHelperCanonicalJson(output, code, label) {
   return parsed;
 }
 
-function parseMacMetadataHelperJson(output, observations, code, label) {
-  const parsed = parseMacMetadataHelperCanonicalJson(output, code, label);
+function parseMetadataHelperJson(output, observations, code, label) {
+  const parsed = parseMetadataHelperCanonicalJson(output, code, label);
   if (!Array.isArray(parsed) || parsed.length !== observations.length) {
     fail(
       code,
@@ -4238,16 +4534,16 @@ function parseMacMetadataHelperJson(output, observations, code, label) {
   return parsed;
 }
 
-function parseMacMetadataHelperEnvelope(output) {
-  const parsed = parseMacMetadataHelperCanonicalJson(
+function parseMetadataHelperEnvelope(output, backend) {
+  const parsed = parseMetadataHelperCanonicalJson(
     output,
     KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
-    "combined macOS metadata descriptor batch",
+    `combined ${backend.label} metadata descriptor batch`,
   );
   if (!hasExactObjectKeys(parsed, ["acl", "xattr"])) {
     fail(
       KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
-      "combined macOS metadata descriptor batch has malformed sections",
+      `combined ${backend.label} metadata descriptor batch has malformed sections`,
     );
   }
   const sectionOutput = (section, label) => {
@@ -4262,12 +4558,12 @@ function parseMacMetadataHelperEnvelope(output) {
     return canonical.subarray(0, canonical.length - 1);
   };
   return Object.freeze({
-    acl: sectionOutput(parsed.acl, "macOS ACL descriptor batch"),
-    xattr: sectionOutput(parsed.xattr, "macOS extended-attribute descriptor batch"),
+    acl: sectionOutput(parsed.acl, `${backend.label} ACL descriptor batch`),
+    xattr: sectionOutput(parsed.xattr, `${backend.label} extended-attribute descriptor batch`),
   });
 }
 
-function macMetadataExpectedStat(observation) {
+function metadataHelperExpectedStat(observation) {
   return Object.freeze({
     ctimeNs: observation.opened.ctimeNs,
     identity: observation.opened.identity,
@@ -4280,8 +4576,8 @@ function macMetadataExpectedStat(observation) {
   });
 }
 
-function requireMacMetadataHelperStat(value, observation, label) {
-  const expected = macMetadataExpectedStat(observation);
+function requireMetadataHelperStat(value, observation, label) {
+  const expected = metadataHelperExpectedStat(observation);
   if (
     !hasExactObjectKeys(value, [
       "ctimeNs", "identity", "mode", "mtimeNs", "nlink", "size", "type", "uid",
@@ -4296,12 +4592,12 @@ function requireMacMetadataHelperStat(value, observation, label) {
   }
 }
 
-function parseMacAclObservations(output, observations) {
-  const parsed = parseMacMetadataHelperJson(
+function parseMetadataAclObservations(output, observations, backend) {
+  const parsed = parseMetadataHelperJson(
     output,
     observations,
     KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
-    "macOS ACL descriptor batch",
+    `${backend.label} ACL descriptor batch`,
   );
   for (let index = 0; index < observations.length; index++) {
     const value = parsed[index];
@@ -4312,10 +4608,10 @@ function parseMacAclObservations(output, observations) {
     ) {
       fail(
         KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
-        `macOS ACL output is not bound to ${observation.context.absolute}`,
+        `${backend.label} ACL output is not bound to ${observation.context.absolute}`,
       );
     }
-    requireMacMetadataHelperStat(value.stat, observation, "macOS ACL observation");
+    requireMetadataHelperStat(value.stat, observation, `${backend.label} ACL observation`);
     if (value.present) {
       fail(
         KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
@@ -4325,7 +4621,7 @@ function parseMacAclObservations(output, observations) {
   }
 }
 
-function decodeMacMetadataBase64(value, label) {
+function decodeMetadataBase64(value, label) {
   if (typeof value !== "string" || value.length > MAX_TOOL_OUTPUT_BYTES) {
     fail(KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED, `${label} is malformed`);
   }
@@ -4336,12 +4632,12 @@ function decodeMacMetadataBase64(value, label) {
   return decoded;
 }
 
-function parseMacXattrObservations(output, observations) {
-  const parsed = parseMacMetadataHelperJson(
+function parseMetadataXattrObservations(output, observations, backend) {
+  const parsed = parseMetadataHelperJson(
     output,
     observations,
     KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
-    "macOS extended-attribute descriptor batch",
+    `${backend.label} extended-attribute descriptor batch`,
   );
   const metadata = new Array(observations.length);
   for (let index = 0; index < observations.length; index++) {
@@ -4354,21 +4650,21 @@ function parseMacXattrObservations(output, observations) {
     ) {
       fail(
         KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
-        `macOS extended-attribute output is not bound to ${observation.context.absolute}`,
+        `${backend.label} extended-attribute output is not bound to ${observation.context.absolute}`,
       );
     }
-    requireMacMetadataHelperStat(
+    requireMetadataHelperStat(
       value.stat,
       observation,
-      "macOS extended-attribute observation",
+      `${backend.label} extended-attribute observation`,
     );
     const names = value.namesBase64.map((encodedName) => decodeUtf8(
-      decodeMacMetadataBase64(encodedName, "macOS extended-attribute name"),
-      "macOS extended-attribute name",
+      decodeMetadataBase64(encodedName, `${backend.label} extended-attribute name`),
+      `${backend.label} extended-attribute name`,
       KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
     ));
     if (
-      names.some((name) => name.length === 0 || name !== PROVENANCE_XATTR) ||
+      names.some((name) => name.length === 0 || !backend.allowedXattrNames.includes(name)) ||
       new Set(names).size !== names.length
     ) {
       fail(
@@ -4380,12 +4676,12 @@ function parseMacXattrObservations(output, observations) {
     if ((names.length === 1) !== (value.provenanceBase64 !== null)) {
       fail(
         KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
-        `macOS provenance presence is inconsistent for ${observation.context.absolute}`,
+        `${backend.label} provenance presence is inconsistent for ${observation.context.absolute}`,
       );
     }
     const provenance = value.provenanceBase64 === null
       ? null
-      : decodeMacMetadataBase64(value.provenanceBase64, "macOS provenance value");
+      : decodeMetadataBase64(value.provenanceBase64, `${backend.label} provenance value`);
     metadata[index] = Object.freeze({
       classification: PROVENANCE_CLASSIFICATION,
       length: provenance?.length ?? 0,
@@ -4580,7 +4876,7 @@ function expectedMetadataLeafMatches(leaf, expected) {
   );
 }
 
-function observeMacMetadataBatch(
+function observeDescriptorMetadataBatch(
   requests,
   operationBudget = null,
   anchorRoot,
@@ -4605,10 +4901,27 @@ function observeMacMetadataBatch(
       "metadata observation cache is malformed",
     );
   }
-  if (NOFOLLOW === 0 || DIRECTORY === 0 || SYMLINK === 0) {
+  const linux = process.platform === "linux";
+  const backend = DESCRIPTOR_METADATA_BACKENDS[process.platform];
+  if (backend === undefined) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
+      `descriptor metadata batching is unsupported on ${process.platform}`,
+    );
+  }
+  if (!linux && (NOFOLLOW === 0 || DIRECTORY === 0 || SYMLINK === 0)) {
     fail(
       KNOCKOUT_WORKSPACE_ERROR_CODES.XATTR_UNSUPPORTED,
       "macOS metadata batching requires O_NOFOLLOW, O_DIRECTORY, and O_SYMLINK",
+    );
+  }
+  // Linux has no O_SYMLINK: symbolic links stay on the per-node path and never reach this batch.
+  // O_NONBLOCK keeps a node replaced by a FIFO after its pathname bind from blocking the open; the
+  // fstat comparison below then refuses the substituted node type.
+  if (linux && (NOFOLLOW === 0 || DIRECTORY === 0 || NONBLOCK === 0)) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+      "Linux metadata batching requires O_NOFOLLOW, O_DIRECTORY, and O_NONBLOCK",
     );
   }
   const results = new Array(requests.length);
@@ -4654,6 +4967,12 @@ function observeMacMetadataBatch(
         if (request === null || typeof request !== "object" || Array.isArray(request) ||
             typeof request.isSymlink !== "boolean") {
           fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "metadata batch entry is malformed");
+        }
+        if (linux && request.isSymlink) {
+          fail(
+            KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT,
+            "Linux descriptor metadata batches admit no symbolic links",
+          );
         }
         const context = metadataPathContext(request.abs, anchorRoot);
         if (context.anchor !== firstContext.anchor) {
@@ -4701,9 +5020,22 @@ function observeMacMetadataBatch(
 
       const misses = records.filter((record) => !record.cacheHit);
       for (const record of misses) {
+        if (operationBudget !== null) {
+          remainingOperationMs(
+            operationBudget,
+            `metadata descriptor bind for ${record.context.absolute}`,
+          );
+        }
+        if (linux && !["directory", "file"].includes(record.beforeLeaf.type)) {
+          fail(
+            KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+            `${record.context.absolute} is not a regular file or directory for metadata inspection`,
+            { type: record.beforeLeaf.type },
+          );
+        }
         const flags = record.isSymlink
           ? fs.constants.O_RDONLY | SYMLINK
-          : fs.constants.O_RDONLY | NOFOLLOW |
+          : fs.constants.O_RDONLY | NOFOLLOW | (linux ? NONBLOCK : 0) |
             (record.beforeLeaf.type === "directory" ? DIRECTORY : 0);
         let fd;
         try { fd = fs.openSync(record.context.absolute, flags); }
@@ -4742,7 +5074,7 @@ function observeMacMetadataBatch(
           "-I",
           "-S",
           "-c",
-          MAC_METADATA_HELPER_SCRIPT,
+          backend.script,
         ];
         const helperLimits = [
           String(MAX_TOOL_OUTPUT_BYTES),
@@ -4750,11 +5082,11 @@ function observeMacMetadataBatch(
           String(misses.length),
           String(MAC_METADATA_EXPECTED_INPUT_BYTES),
         ];
-        const expectedInput = canonicalJsonBytes(misses.map(macMetadataExpectedStat));
+        const expectedInput = canonicalJsonBytes(misses.map(metadataHelperExpectedStat));
         if (expectedInput.length > MAC_METADATA_EXPECTED_INPUT_BYTES) {
           fail(
             KNOCKOUT_WORKSPACE_ERROR_CODES.RESOURCE_LIMIT_EXCEEDED,
-            "macOS metadata descriptor expectations exceed their fixed byte limit",
+            `${backend.label} metadata descriptor expectations exceed their fixed byte limit`,
             {
               limitBytes: MAC_METADATA_EXPECTED_INPUT_BYTES,
               observedBytes: expectedInput.length,
@@ -4771,16 +5103,21 @@ function observeMacMetadataBatch(
             failureToken,
           ],
           KNOCKOUT_WORKSPACE_ERROR_CODES.ACL_UNSUPPORTED,
-          "batched macOS ACLs and extended attributes",
-          metadataTimeout(operationBudget, "batched macOS metadata inspection"),
+          `batched ${backend.label} ACLs and extended attributes`,
+          metadataTimeout(operationBudget, `batched ${backend.label} metadata inspection`),
           directoryFd,
           openedNodeFds,
           expectedInput,
           failureToken,
         );
-        const sections = parseMacMetadataHelperEnvelope(combinedOutput);
-        parseMacAclObservations(sections.acl, misses);
-        parseMacXattrObservations(sections.xattr, misses);
+        const sections = parseMetadataHelperEnvelope(combinedOutput, backend);
+        parseMetadataAclObservations(sections.acl, misses, backend);
+        parseMetadataXattrObservations(sections.xattr, misses, backend);
+        // The helper's child timeout was the remaining operation budget, not a fresh allowance;
+        // a batch that returned at or after that deadline is not admitted.
+        if (operationBudget !== null) {
+          remainingOperationMs(operationBudget, `batched ${backend.label} metadata inspection`);
+        }
       }
 
       for (const record of records) {
@@ -4828,7 +5165,16 @@ function observeMacMetadataBatch(
           { path: firstContext.anchor },
         );
       }
+      if (operationBudget !== null) {
+        remainingOperationMs(operationBudget, "batched metadata confirmation");
+      }
       for (const record of records) {
+        if (record.metadata === null || typeof record.metadata !== "object") {
+          fail(
+            KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+            `${record.context.absolute} has no complete metadata observation`,
+          );
+        }
         if (!record.cacheHit && record.cacheKey !== null) {
           cacheUpdates.push(Object.freeze({
             key: record.cacheKey,
@@ -4891,12 +5237,78 @@ function observeMacMetadataBatch(
       }
     }
   }
+  requireCompleteMetadataResults(results, "descriptor metadata batch");
+  return Object.freeze(results);
+}
+
+function requireCompleteMetadataResults(results, label) {
+  for (let index = 0; index < results.length; index++) {
+    if (results[index] === undefined || results[index] === null) {
+      fail(
+        KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+        `${label} left request ${index} without an observation`,
+      );
+    }
+  }
+}
+
+// Linux census metadata: regular files and directories go through bounded descriptor batches (one
+// helper launch per MAC_METADATA_BATCH_NODE_LIMIT uncached nodes instead of two pathname tool
+// launches per node); symbolic links keep the per-node --physical/--no-dereference observation.
+// Each result is written back to its original request index, and every index must be covered.
+function observeLinuxMetadataBatch(requests, operationBudget, anchorRoot, metadataCache) {
+  if (!Array.isArray(requests)) {
+    fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "metadata batch is malformed");
+  }
+  const descriptorIndexes = [];
+  const symlinkIndexes = [];
+  for (let index = 0; index < requests.length; index++) {
+    const request = requests[index];
+    if (
+      request === null || typeof request !== "object" || Array.isArray(request) ||
+      typeof request.isSymlink !== "boolean"
+    ) {
+      fail(KNOCKOUT_WORKSPACE_ERROR_CODES.INVALID_ARGUMENT, "metadata batch entry is malformed");
+    }
+    (request.isSymlink ? symlinkIndexes : descriptorIndexes).push(index);
+  }
+  const results = new Array(requests.length);
+  const descriptorResults = observeDescriptorMetadataBatch(
+    descriptorIndexes.map((index) => requests[index]),
+    operationBudget,
+    anchorRoot,
+    metadataCache,
+  );
+  if (descriptorResults.length !== descriptorIndexes.length) {
+    fail(
+      KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
+      "Linux descriptor metadata batch returned an incomplete observation",
+    );
+  }
+  for (let position = 0; position < descriptorIndexes.length; position++) {
+    results[descriptorIndexes[position]] = descriptorResults[position];
+  }
+  for (const index of symlinkIndexes) {
+    const request = requests[index];
+    results[index] = observeMetadata(
+      request.abs,
+      true,
+      operationBudget,
+      request.expected,
+      anchorRoot,
+      metadataCache,
+    );
+  }
+  requireCompleteMetadataResults(results, "Linux metadata batch");
   return Object.freeze(results);
 }
 
 function observeMetadataBatch(requests, operationBudget, anchorRoot, metadataCache) {
   if (process.platform === "darwin") {
-    return observeMacMetadataBatch(requests, operationBudget, anchorRoot, metadataCache);
+    return observeDescriptorMetadataBatch(requests, operationBudget, anchorRoot, metadataCache);
+  }
+  if (process.platform === "linux") {
+    return observeLinuxMetadataBatch(requests, operationBudget, anchorRoot, metadataCache);
   }
   return Object.freeze(requests.map((request) => observeMetadata(
     request.abs,
@@ -4918,7 +5330,7 @@ function observeMetadata(
   descriptorCode = KNOCKOUT_WORKSPACE_ERROR_CODES.SNAPSHOT_UNSTABLE,
 ) {
   if (process.platform === "darwin") {
-    return observeMacMetadataBatch(
+    return observeDescriptorMetadataBatch(
       [{ abs, expected, isSymlink }],
       operationBudget,
       anchorRoot,
