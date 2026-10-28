@@ -92,8 +92,16 @@ assert.equal(
   Buffer.from("30303030303030302d303030302d343030302d383030302d303030303030303030303231", "hex").toString("utf8"),
 );
 
+// Git >= 2.54 starts a detached `git maintenance run --auto` after every commit unless automatic
+// maintenance is off. That background writer can add or remove entries under the fixture's .git
+// while the bootstrap walks it (assertClosedGitStorageTree refuses any entry that vanishes), so a
+// fixture commit disables it for that one command. Persisted fixture config stays untouched: the
+// bootstrap's own config checks must still see exactly what each test writes.
+const FIXTURE_COMMIT_CONFIG = Object.freeze(["-c", "maintenance.auto=false", "-c", "gc.auto=0"]);
+
 function git(root, args) {
-  const result = spawnSync("git", args, { cwd: root, encoding: "utf8", shell: false });
+  const argv = args[0] === "commit" ? [...FIXTURE_COMMIT_CONFIG, ...args] : args;
+  const result = spawnSync("git", argv, { cwd: root, encoding: "utf8", shell: false });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
   return String(result.stdout ?? "").trim();
 }

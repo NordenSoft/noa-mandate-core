@@ -66,6 +66,68 @@ type WorkspaceError = Error & {
     stderr?: string;
   } | null;
 };
+type OperationDiagnosticSnapshot = {
+  operation: string;
+  elapsedMs: number;
+  remainingMs: number;
+  operationTimeoutMs: number;
+  commandTimeoutMs: number;
+  openSubphases: string[];
+  pendingLaunch: { kind: string; elapsedMs: number; timeoutMs: number } | null;
+  nodes: Record<string, number>;
+  metadata: { requested: number; cacheHit: number; attempted: number; completed: number };
+  launches: Record<string, number>;
+  launchWindowMs: Record<string, number>;
+  batches: { count: number; maxNodes: number; totalNodes: number };
+  bytesWritten: number;
+  fsyncCount: number;
+  subphaseInclusiveMs: Record<string, number>;
+  subphaseExclusiveMs: Record<string, number>;
+};
+type WorkspaceFailureDiagnostics = {
+  causeDepth: number;
+  deadlineCause: string | null;
+  pendingLaunchKind: string | null;
+  launch: {
+    errorCode: string | null;
+    executable: string;
+    kind: string | null;
+    signal: string | null;
+    status: number | null;
+    timedOut: boolean;
+    timeoutMs: number;
+  } | null;
+  openSubphases: string[] | null;
+  budget: OperationDiagnosticSnapshot | null;
+};
+type SweepFailureDiagnostics = {
+  cleanup: {
+    armCancellation: string;
+    durationMs: number;
+    failure: unknown;
+    leaseCleanup: string;
+    status: string;
+  };
+  primary: {
+    armId: string | null;
+    code: string;
+    entryId: string | null;
+    phase: string | null;
+    phaseElapsedMs: number | null;
+    phaseState: string | null;
+    role: string | null;
+    sweepElapsedMs: number;
+    terminal: {
+      exitCode: number | null;
+      reasonCode: string | null;
+      signal: string | null;
+      timedOut: boolean | null;
+      workerRefusalReasonCode: string | null;
+      workerTimeoutMs: number | null;
+    };
+    workerTimeoutMs: number;
+  };
+};
 type DirectoryObservation = {
   ctimeNs: string;
   dev: string;
@@ -478,6 +540,7 @@ const workspace = await import(
     expectedSnapshot: SourceSnapshot,
     options?: { commandTimeoutMs?: number; gitExecutable?: string },
   ) => SourceSnapshot;
+  knockoutWorkspaceFailureDiagnostics: (error: unknown) => WorkspaceFailureDiagnostics | null;
 };
 const knockoutRunner = await import(
   pathToFileURL(path.join(repositoryRoot, "scripts/lib/knockout-runner.mjs")).href
@@ -500,6 +563,8 @@ const knockoutRunner = await import(
     workerTimeoutMs: number;
   };
   createIsolatedCustodyRoot: (cacheHome?: string) => string;
+  isolatedSweepFailureDiagnostics: (error: unknown) => SweepFailureDiagnostics | null;
+  SWEEP_DIAGNOSTIC_PROTOCOL: string;
   finalizeIsolatedSetupIntegrityPostcheck: (options: Record<string, unknown>) => {
     detail?: string;
     postRestoreBaselineVerified?: boolean;
@@ -522,7 +587,21 @@ const knockoutRunner = await import(
 const knockoutCli = await import(
   pathToFileURL(path.join(repositoryRoot, "scripts", "lint-control-knockout.mjs")).href
 ) as {
-  isolatedSweepFailureLines: (error: unknown) => readonly string[];
+  DIAGNOSTIC_LINE_MAX_BYTES: number;
+  boundedDiagnosticLine: (label: string, record: unknown) => string;
+  createDiagnosticReport: (
+    write: (line: string) => void,
+    options?: { finalReserveBytes?: number; maxBytes?: number },
+  ) => {
+    final: (line: string) => boolean;
+    record: (record: unknown) => void;
+    usedBytes: () => number;
+  };
+  DIAGNOSTIC_REPORT_MAX_BYTES: number;
+  isolatedSweepFailureLines: (
+    error: unknown,
+    report?: { final: (line: string) => boolean } | null,
+  ) => readonly string[];
 };
 
 const TEST_TERMINAL_STATUSES = ["PASS", "FAIL", "REFUSED", "INDETERMINATE"];
@@ -2698,14 +2777,15 @@ test("descriptor-pinned metadata prevents parent-subtree ABA laundering", {
   let swapped = false;
   let restored = false;
   try {
-    // The Darwin batch binds every pathname chain before opening its node descriptors. This
-    // fixture swaps the admitted root during that bind, so the earliest deterministic refusal is
-    // the root descriptor disagreeing with its already witnessed identity.
-    const expectedCode = process.platform === "linux" ? "ACL_UNSUPPORTED" : "SNAPSHOT_UNSTABLE";
+    // Both descriptor batches (Darwin and Linux) bind every pathname chain before opening their
+    // node descriptors. This fixture swaps the admitted root during that bind, so the earliest
+    // deterministic refusal is the root descriptor disagreeing with its already witnessed
+    // identity. The original leaf keeps a real ACL/xattr, so a metadata refusal instead of the
+    // bind refusal would fail the code check below.
+    const expectedCode = "SNAPSHOT_UNSTABLE";
     if (process.platform === "linux") {
       const setfacl = requiredExecutable(["/usr/bin/setfacl", "/bin/setfacl"], "setfacl");
-      requiredExecutable(["/usr/bin/getfacl", "/bin/getfacl"], "getfacl");
-      requiredExecutable(["/usr/bin/getfattr", "/bin/getfattr"], "getfattr");
+      requiredExecutable(["/usr/bin/python3"], "python3");
       execFileSync(setfacl, ["-m", "u:12345:r--", leaf]);
     } else {
       execFileSync("/usr/bin/xattr", ["-w", "user.noa_anchor_aba", "must-be-observed", leaf]);
@@ -2742,9 +2822,7 @@ test("descriptor-pinned metadata prevents parent-subtree ABA laundering", {
       () => workspace.censusWorkspace(root, { rootGitPolicy: "absent" }),
       (error: WorkspaceError) =>
         error.code === workspaceErrorCode(expectedCode) &&
-        (process.platform === "linux" || error.message.includes(
-          "changed while binding its metadata descriptor",
-        )),
+        error.message.includes("changed while binding its metadata descriptor"),
     );
     assert.equal(swapped, true, "parent-subtree substitution was not exercised");
   } finally {
@@ -2834,6 +2912,325 @@ test("metadata launcher diagnostics and absence fail closed", {
     Object.defineProperty(childProcess, "spawnSync", descriptor);
     syncBuiltinESMExports();
     removeFixturePath(root);
+  }
+});
+
+test("workspace diagnostics tell a budget exhausted before a launch from a child that timed out", {
+  skip: process.platform !== "linux",
+}, () => {
+  // Both faults surface as OPERATION_DEADLINE_EXCEEDED; only the diagnostics side channel may tell
+  // them apart, and neither may add a field to the refusal's own details. Regular nodes go through
+  // the Linux descriptor helper batch; the symlink keeps the per-node getfacl/getfattr path.
+  const root = fs.realpathSync(privateTemp("noa-kws-diagnostic-deadline-"));
+  fs.writeFileSync(path.join(root, "leaf.txt"), "stable\n", { mode: 0o600 });
+  fs.symlinkSync("leaf.txt", path.join(root, "link"));
+  const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+  const clockDescriptor = Object.getOwnPropertyDescriptor(process.hrtime, "bigint");
+  assert.ok(spawnDescriptor !== undefined);
+  assert.ok(clockDescriptor !== undefined);
+  const originalSpawnSync = childProcess.spawnSync;
+  const originalClock = process.hrtime.bigint;
+  const launcher = "/usr/bin/perl";
+  const expiredOffsetNs =
+    BigInt(workspace.KNOCKOUT_WORKSPACE_COMMAND_TIMEOUT_LIMIT_MS + 1) * 1_000_000n;
+  let mode: "expire-after-acl" | "child-timeout" = "expire-after-acl";
+  let expire = false;
+  const metadataLaunches: string[] = [];
+  const stub = ((...args: Parameters<typeof childProcess.spawnSync>) => {
+    const argv = (Array.isArray(args[1]) ? args[1] : []) as readonly string[];
+    const tool = path.basename(String(argv[3] ?? ""));
+    const injected = mode === "child-timeout" ? ["python3"] : ["getfacl", "getfattr"];
+    if (args[0] !== launcher || !injected.includes(tool)) {
+      return Reflect.apply(originalSpawnSync, childProcess, args);
+    }
+    metadataLaunches.push(tool);
+    const empty = Buffer.alloc(0);
+    if (mode === "child-timeout") {
+      const error = Object.assign(new Error("injected metadata helper timeout"), { code: "ETIMEDOUT" });
+      return {
+        error, output: [null, empty, empty], pid: 321, signal: "SIGKILL", status: null,
+        stderr: empty, stdout: empty,
+      };
+    }
+    // A clean base ACL for the symlink, after which the shared budget is spent.
+    expire = true;
+    const stdout = Buffer.from("user::rw-\ngroup::---\nother::---\n");
+    return { output: [null, stdout, empty], pid: 321, signal: null, status: 0, stderr: empty, stdout };
+  }) as typeof childProcess.spawnSync;
+  try {
+    Object.defineProperty(childProcess, "spawnSync", { ...spawnDescriptor, value: stub });
+    syncBuiltinESMExports();
+    Object.defineProperty(process.hrtime, "bigint", {
+      ...clockDescriptor,
+      value: () => originalClock() + (expire ? expiredOffsetNs : 0n),
+    });
+
+    let exhausted: WorkspaceError | null = null;
+    assert.throws(
+      () => workspace.censusWorkspace(root, { rootGitPolicy: "absent" }),
+      (error: WorkspaceError) => {
+        exhausted = error;
+        return error.code === workspaceErrorCode("OPERATION_DEADLINE_EXCEEDED");
+      },
+    );
+    assert.equal(expire, true, "the budget-exhaustion fault never fired");
+    assert.deepEqual(metadataLaunches, ["getfacl"], "the xattr child launched after the budget was spent");
+    assert.ok(exhausted !== null);
+    assert.deepEqual(Object.keys((exhausted as WorkspaceError).details ?? {}), ["timeoutMs"]);
+    const before = workspace.knockoutWorkspaceFailureDiagnostics(exhausted);
+    assert.ok(before !== null);
+    assert.equal(before.deadlineCause, "BUDGET_EXHAUSTED_BEFORE_LAUNCH");
+    assert.equal(before.pendingLaunchKind, "xattr");
+    assert.equal(before.launch, null);
+    assert.ok(before.budget !== null);
+    assert.equal(before.budget.remainingMs, 0);
+    assert.equal(before.budget.launches.acl, 1);
+    assert.equal(before.budget.launches.xattr, 0);
+    assert.equal(before.budget.launches.linuxMetadataHelper, 1);
+    // Only the symlink was in flight: every node the descriptor batch attempted had completed.
+    assert.equal(before.budget.metadata.attempted - before.budget.metadata.completed, 1);
+    assert.deepEqual(before.budget.openSubphases, ["metadataBatch"]);
+    assert.deepEqual(before.openSubphases, ["metadataBatch"]);
+
+    mode = "child-timeout";
+    expire = false;
+    metadataLaunches.length = 0;
+    let timedOut: WorkspaceError | null = null;
+    assert.throws(
+      () => workspace.censusWorkspace(root, { rootGitPolicy: "absent" }),
+      (error: WorkspaceError) => {
+        timedOut = error;
+        return error.code === workspaceErrorCode("OPERATION_DEADLINE_EXCEEDED");
+      },
+    );
+    assert.deepEqual(metadataLaunches, ["python3"], "the helper-timeout fault never fired");
+    assert.ok(timedOut !== null);
+    const childDetails = (timedOut as WorkspaceError).details as Record<string, unknown> | null;
+    assert.equal(childDetails?.timedOut, true);
+    const child = workspace.knockoutWorkspaceFailureDiagnostics(timedOut);
+    assert.ok(child !== null);
+    assert.equal(child.deadlineCause, "CHILD_TIMED_OUT");
+    assert.equal(child.pendingLaunchKind, null);
+    assert.deepEqual(child.launch, {
+      kind: "linuxMetadataHelper",
+      executable: "python3",
+      timeoutMs: childDetails?.timeoutMs,
+      timedOut: true,
+      status: null,
+      signal: "SIGKILL",
+      errorCode: "ETIMEDOUT",
+    });
+    assert.ok(child.budget !== null);
+    assert.ok(child.budget.remainingMs > 0, "a child timeout was reported as an exhausted budget");
+    assert.equal(child.budget.pendingLaunch?.kind, "linuxMetadataHelper");
+    assert.equal(child.budget.launches.linuxMetadataHelper, 1);
+    assert.equal(child.budget.launches.acl, 0);
+    assert.ok(child.budget.batches.maxNodes >= 1);
+  } finally {
+    Object.defineProperty(process.hrtime, "bigint", clockDescriptor);
+    Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+    syncBuiltinESMExports();
+    removeFixturePath(root);
+  }
+});
+
+test("sweep diagnostic lines are allowlisted, keep producer order and stay byte-bounded", () => {
+  const max = knockoutCli.DIAGNOSTIC_LINE_MAX_BYTES;
+  assert.equal(max, 4096);
+  const label = "  knockout-diagnostic";
+  const hostile = {
+    protocol: "noa-knockout-sweep-diagnostic/1",
+    event: "end",
+    phase: "WORKER",
+    message: "free text must-not-escape",
+    newline: "A\nmust-not-escape",
+    unsafe: Number.MAX_SAFE_INTEGER + 2,
+    fraction: 1.5,
+    error: new Error("must-not-escape"),
+    map: new Map([["key", "must-not-escape"]]),
+    "bad key": "must-not-escape",
+    nested: { a: { b: { c: { d: { e: "must-not-escape" } } } } },
+    big: Object.fromEntries(Array.from({ length: 60 }, (_, index) => [`k${index}`, "x".repeat(100)])),
+    durationMs: 12,
+  };
+  const line = knockoutCli.boundedDiagnosticLine(label, hostile);
+  assert.ok(Buffer.byteLength(line, "utf8") <= max, `line is ${Buffer.byteLength(line, "utf8")} bytes`);
+  assert.ok(line.startsWith(`${label} {`));
+  assert.doesNotMatch(line, /must-not-escape/);
+  const payload = JSON.parse(line.slice(label.length + 1)) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(payload), [
+    "protocol", "event", "phase", "message", "newline", "unsafe", "fraction", "error", "map",
+    "nested", "durationMs", "omitted",
+  ]);
+  assert.deepEqual(payload.omitted, ["big"], "the oversize section was not the one dropped");
+  assert.equal(payload.message, null);
+  assert.equal(payload.unsafe, null);
+  assert.equal(payload.fraction, null);
+  assert.equal(payload.error, null);
+  assert.equal(payload.map, null);
+  assert.deepEqual(payload.nested, { a: { b: { c: { d: null } } } });
+  assert.equal(payload.durationMs, 12);
+
+  const scalars = Object.fromEntries(
+    Array.from({ length: 40 }, (_, index) => [`s${index}`, "y".repeat(120)]),
+  );
+  const oversize = knockoutCli.boundedDiagnosticLine(label, scalars);
+  assert.ok(Buffer.byteLength(oversize, "utf8") <= max);
+  assert.equal((JSON.parse(oversize.slice(label.length + 1)) as { diagnosticStatus: string })
+    .diagnosticStatus, "OVERSIZE");
+  assert.equal(
+    knockoutCli.boundedDiagnosticLine(label, "not a record"),
+    `${label} {"diagnosticStatus":"UNAVAILABLE"}`,
+  );
+
+  // One budget for every diagnostic byte: streamed lines, the marker and the final lines.
+  const maxBytes = 1200;
+  const written: string[] = [];
+  const report = knockoutCli.createDiagnosticReport((text) => written.push(text), {
+    finalReserveBytes: 400, maxBytes,
+  });
+  for (let index = 0; index < 10; index++) {
+    report.record({ protocol: "p", event: "start", phase: "ADMISSION", sweepElapsedMs: index });
+  }
+  const truncations = written.filter((text) => text.startsWith("  knockout-diagnostic-truncated "));
+  assert.equal(truncations.length, 1, "the report cap did not fire exactly once");
+  assert.equal(written.at(-1), truncations[0]);
+  assert.ok(written.length > 1 && written.length < 11);
+  const finals = [
+    `  failure diagnostic: {"phase":"WORKER","pad":"${"f".repeat(120)}"}`,
+    `  cleanup diagnostic: {"status":"COMPLETE","pad":"${"c".repeat(120)}"}`,
+  ];
+  assert.deepEqual(finals.map((line) => report.final(line)), [true, true],
+    "the reserved space did not admit both final lines");
+  assert.equal(report.final(`  failure diagnostic: {"pad":"${"x".repeat(400)}"}`), false,
+    "a final line was admitted past the report cap");
+  const emittedBytes = [...written, ...finals]
+    .reduce((total, text) => total + Buffer.byteLength(text, "utf8") + 1, 0);
+  assert.equal(report.usedBytes(), emittedBytes);
+  assert.ok(emittedBytes <= maxBytes, `emitted ${emittedBytes} of ${maxBytes} bytes`);
+  const timing: string[] = [];
+  knockoutCli.createDiagnosticReport((text) => timing.push(text)).record({
+    event: "summary", phase: "CONTROL", mutatedMs: 5,
+  });
+  assert.match(timing[0] ?? "", /^ {2}progress-timing \{"event":"summary","phase":"CONTROL","mutatedMs":5\}$/);
+});
+
+test("a malformed diagnostic sink disables telemetry instead of adding a sweep refusal", async () => {
+  const entry = {
+    id: "diagnostic-sink-control", control: "diagnostic sink fixture", file: "control.mjs",
+    find: "export const controlEnabled = true;", replace: "export const controlEnabled = false;",
+    kind: "gate", gateId: "fixture-gate",
+    expectedGateFindings: [{ rule: "CONTROL_DISABLED", subject: "control" }],
+    suite: [".", "node", ["fixture-gate.mjs"]],
+  };
+  for (const onDiagnostic of [false, 0, "sink", {}]) {
+    // The retention budget refusal is raised after the sink is read and before any custody exists.
+    await assert.rejects(
+      () => knockoutRunner.runIsolatedKnockoutSweep({
+        maxRetainedArms: 0, maxRetainedBytes: 1, onDiagnostic,
+        rawDependenciesByEntry: new Map([[entry.id, {}]]),
+        registry: [entry], root: repositoryRoot, selected: [entry],
+      }),
+      (error: WorkspaceError) => {
+        assert.equal(error.code, "RETENTION_BUDGET_INSUFFICIENT", `sink ${String(onDiagnostic)}`);
+        return true;
+      },
+    );
+  }
+});
+
+function stubMetadataLauncherTimeout(tool: string): { calls: () => number; restore: () => void } {
+  const descriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+  assert.ok(descriptor !== undefined);
+  const originalSpawnSync = childProcess.spawnSync;
+  let calls = 0;
+  const stub = ((...args: Parameters<typeof childProcess.spawnSync>) => {
+    const argv = (Array.isArray(args[1]) ? args[1] : []) as readonly string[];
+    if (args[0] !== "/usr/bin/perl" || path.basename(String(argv[3] ?? "")) !== tool) {
+      return Reflect.apply(originalSpawnSync, childProcess, args);
+    }
+    calls += 1;
+    const empty = Buffer.alloc(0);
+    const error = Object.assign(new Error(`injected ${tool} timeout`), { code: "ETIMEDOUT" });
+    return {
+      error, output: [null, empty, empty], pid: 321, signal: "SIGKILL", status: null,
+      stderr: empty, stdout: empty,
+    };
+  }) as typeof childProcess.spawnSync;
+  Object.defineProperty(childProcess, "spawnSync", { ...descriptor, value: stub });
+  syncBuiltinESMExports();
+  return {
+    calls: () => calls,
+    restore: () => {
+      Object.defineProperty(childProcess, "spawnSync", descriptor);
+      syncBuiltinESMExports();
+    },
+  };
+}
+
+test("a bound entry-stat child timeout carries its own launch diagnostics", {
+  skip: process.platform !== "linux",
+}, () => {
+  const fixture = minimalCaptureFixture("diagnostic-entry-stat-timeout");
+  const stub = stubMetadataLauncherTimeout("stat");
+  let refusal: unknown = null;
+  try {
+    assert.throws(
+      () => workspace.observeSourceGit(fixture.source),
+      (error: unknown) => {
+        refusal = error;
+        return true;
+      },
+    );
+  } finally {
+    stub.restore();
+    removeFixturePath(fixture.source);
+    removeFixturePath(fixture.custody);
+  }
+  assert.ok(stub.calls() >= 1, "the entry-stat timeout fault never fired");
+  const diagnostics = workspace.knockoutWorkspaceFailureDiagnostics(refusal);
+  assert.ok(diagnostics !== null);
+  assert.equal(diagnostics.deadlineCause, "CHILD_TIMED_OUT");
+  assert.equal(diagnostics.launch?.kind, "entryStat");
+  assert.equal(diagnostics.launch?.executable, "stat");
+  assert.equal(diagnostics.launch?.timedOut, true);
+  assert.equal(diagnostics.launch?.errorCode, "ETIMEDOUT");
+  assert.ok((diagnostics.launch?.timeoutMs ?? 0) > 0);
+  assert.equal(diagnostics.budget?.pendingLaunch?.kind, "entryStat");
+});
+
+test("a capture child timeout keeps its original launch diagnostics through owner wrappers", {
+  skip: process.platform !== "linux",
+}, () => {
+  const fixture = minimalCaptureFixture("diagnostic-capture-helper-timeout");
+  const stub = stubMetadataLauncherTimeout("python3");
+  let refusal: WorkspaceError | null = null;
+  try {
+    assert.throws(
+      () => workspace.captureAndSealCandidate({
+        custodyRoot: fixture.custody,
+        maxAttempts: 1,
+        sourceRoot: fixture.source,
+      }),
+      (error: WorkspaceError) => {
+        refusal = error;
+        return error.code === workspaceErrorCode("OPERATION_DEADLINE_EXCEEDED");
+      },
+    );
+    assert.ok(stub.calls() >= 1, "the helper timeout fault never fired");
+    const diagnostics = workspace.knockoutWorkspaceFailureDiagnostics(refusal);
+    assert.ok(diagnostics !== null);
+    assert.equal(diagnostics.deadlineCause, "CHILD_TIMED_OUT");
+    assert.equal(diagnostics.launch?.kind, "linuxMetadataHelper");
+    assert.equal(diagnostics.launch?.executable, "python3");
+    assert.equal(diagnostics.budget?.operation, "CAPTURE");
+    assert.equal(diagnostics.budget?.pendingLaunch?.kind, "linuxMetadataHelper");
+    assert.ok((diagnostics.budget?.remainingMs ?? 0) > 0, "a child timeout read as an exhausted budget");
+  } finally {
+    stub.restore();
+    cleanupReportedScratchRoots(errorPrivateRoots(refusal));
+    removeFixturePath(fixture.source);
+    removeFixturePath(fixture.custody);
   }
 });
 
@@ -3315,6 +3712,687 @@ test("macOS descriptor xattr framing refuses newline-bearing attribute names", (
     );
   } finally {
     removeFixturePath(root);
+  }
+});
+
+type DescriptorMetadataStat = {
+  ctimeNs: string;
+  identity: string;
+  mode: number;
+  mtimeNs: string;
+  nlink: number;
+  size: number;
+  type: string;
+  uid: number;
+};
+
+// The exact stat record both descriptor helpers report for one inherited node descriptor.
+function descriptorMetadataStat(fd: number): DescriptorMetadataStat {
+  const observed = fs.fstatSync(fd, { bigint: true });
+  return {
+    ctimeNs: String(observed.ctimeNs),
+    identity: `${observed.dev}:${observed.ino}`,
+    mode: Number(observed.mode & 0o7777n),
+    mtimeNs: String(observed.mtimeNs),
+    nlink: Number(observed.nlink),
+    size: Number(observed.size),
+    type: observed.isSymbolicLink() ? "symlink" : observed.isDirectory()
+      ? "directory" : observed.isFile() ? "file" : "other",
+    uid: Number(observed.uid),
+  };
+}
+
+function isDescriptorMetadataHelperLaunch(
+  args: Parameters<typeof childProcess.spawnSync>,
+): boolean {
+  const childArgs = args[1];
+  return args[0] === "/usr/bin/perl" && Array.isArray(childArgs) &&
+    childArgs.includes("/usr/bin/python3") && childArgs.includes("both");
+}
+
+function descriptorMetadataHelperFds(
+  args: Parameters<typeof childProcess.spawnSync>,
+): { anchorFd: number; nodeFds: number[] } {
+  const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
+  assert.ok(Array.isArray(stdio));
+  const anchorFd = stdio[3];
+  assert.equal(typeof anchorFd, "number");
+  const nodeFds = stdio.slice(4).map((fd) => {
+    assert.equal(typeof fd, "number");
+    return fd as number;
+  });
+  return { anchorFd: anchorFd as number, nodeFds };
+}
+
+function lstatIdentity(candidate: string): string {
+  const observed = fs.lstatSync(candidate, { bigint: true });
+  return `${observed.dev}:${observed.ino}`;
+}
+
+test("Linux descriptor metadata batches cover every node in fixed chunks and keep symlinks per node", (t) => {
+  if (process.platform !== "linux") {
+    t.skip("requires the Linux descriptor metadata backend");
+    return;
+  }
+  requiredExecutable(["/usr/bin/python3"], "python3");
+  requiredExecutable(["/usr/bin/getfacl", "/bin/getfacl"], "getfacl");
+  requiredExecutable(["/usr/bin/getfattr", "/bin/getfattr"], "getfattr");
+  const root = fs.realpathSync(privateTemp("noa-kws-linux-metadata-batch-"));
+  const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+  assert.ok(spawnDescriptor !== undefined);
+  const originalSpawnSync = childProcess.spawnSync;
+  // One ordered log of every metadata child: a helper batch is its node identities in descriptor
+  // order, a per-node tool call is "<tool> <operand>".
+  const calls: Array<{ batch: string[] } | { tool: string }> = [];
+  const rootIdentity = lstatIdentity(root);
+  try {
+    // Two sibling directories, each holding 63 regular files and one symlink. The census sorts
+    // every directory's entries bytewise, so its preorder is ".", "A", A's 62 "file-*", the
+    // unusual name, "A/link", then "B", B's 63 files, "B/link": the streamed calls are [64], [1],
+    // A/link, [64], B/link, and a helper batch follows a symlink on every filesystem.
+    for (const name of ["A", "B"]) {
+      const directory = path.join(root, name);
+      fs.mkdirSync(directory, { mode: 0o700 });
+      for (let index = 0; index < (name === "A" ? 62 : 63); index++) {
+        fs.writeFileSync(path.join(directory, `file-${index.toString().padStart(3, "0")}`), "x", {
+          mode: 0o600,
+        });
+      }
+      if (name === "A") {
+        fs.writeFileSync(path.join(directory, "line\nname\tfile"), "unusual\n", { mode: 0o600 });
+      }
+      fs.symlinkSync("file-000", path.join(directory, "link"));
+    }
+    Object.defineProperty(childProcess, "spawnSync", {
+      ...spawnDescriptor,
+      value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
+        const childArgs = args[1];
+        if (isDescriptorMetadataHelperLaunch(args)) {
+          const { anchorFd, nodeFds } = descriptorMetadataHelperFds(args);
+          assert.ok(nodeFds.length >= 1 && nodeFds.length <= 64);
+          assert.equal(Number(childArgs?.at(-3)), nodeFds.length);
+          assert.equal(descriptorMetadataStat(anchorFd).identity, rootIdentity);
+          calls.push({ batch: nodeFds.map((fd) => descriptorMetadataStat(fd).identity) });
+        } else if (Array.isArray(childArgs)) {
+          const tool = childArgs.find((argument) =>
+            typeof argument === "string" &&
+            ["getfacl", "getfattr"].includes(path.basename(argument)));
+          if (typeof tool === "string") {
+            calls.push({ tool: `${path.basename(tool)} ${String(childArgs.at(-1))}` });
+          }
+        }
+        return Reflect.apply(originalSpawnSync, childProcess, args);
+      }) as typeof childProcess.spawnSync,
+    });
+    syncBuiltinESMExports();
+
+    const census = workspace.censusWorkspace(root, {
+      commandTimeoutMs: 10_000,
+      rootGitPolicy: "absent",
+    });
+    assert.equal(census.nodeCount, 131);
+    assert.equal(census.nodes.filter((node) => node.type !== "symlink").length, 129);
+
+    // The census request order is a preorder walk whose directory entries are sorted bytewise
+    // (Buffer.compare of the raw names). Rebuild it independently and derive the exact streamed
+    // call sequence: contiguous regular nodes flushed in batches of at most 64 before each
+    // symlink and at the end, each symlink observed in place by getfacl then getfattr.
+    const requestOrder: Array<{ identity: string; relative: string; symlink: boolean }> = [];
+    const walk = (relative: string) => {
+      const absolute = relative === "." ? root : path.join(root, ...relative.split("/"));
+      requestOrder.push({ identity: lstatIdentity(absolute), relative, symlink: false });
+      const directory = fs.opendirSync(absolute);
+      const names: string[] = [];
+      try {
+        for (let entry = directory.readSync(); entry !== null; entry = directory.readSync()) {
+          names.push(entry.name);
+        }
+      } finally { directory.closeSync(); }
+      names.sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
+      for (const name of names) {
+        const child = relative === "." ? name : `${relative}/${name}`;
+        const stat = fs.lstatSync(path.join(absolute, name));
+        if (stat.isDirectory()) walk(child);
+        else {
+          requestOrder.push({
+            identity: lstatIdentity(path.join(absolute, name)),
+            relative: child,
+            symlink: stat.isSymbolicLink(),
+          });
+        }
+      }
+    };
+    walk(".");
+    assert.equal(requestOrder.length, census.nodeCount);
+    const expectedCalls: Array<{ batch: string[] } | { tool: string }> = [];
+    let run: string[] = [];
+    const flush = () => {
+      if (run.length > 0) expectedCalls.push({ batch: run });
+      run = [];
+    };
+    for (const request of requestOrder) {
+      if (!request.symlink) {
+        run.push(request.identity);
+        if (run.length === 64) flush();
+        continue;
+      }
+      flush();
+      const operand = `.${path.sep}${request.relative.split("/").join(path.sep)}`;
+      expectedCalls.push({ tool: `getfacl ${operand}` }, { tool: `getfattr ${operand}` });
+    }
+    flush();
+    assert.deepEqual(
+      expectedCalls.map((call) => "batch" in call ? call.batch.length : call.tool),
+      [
+        64, 1, `getfacl .${path.sep}A${path.sep}link`, `getfattr .${path.sep}A${path.sep}link`,
+        64, `getfacl .${path.sep}B${path.sep}link`, `getfattr .${path.sep}B${path.sep}link`,
+      ],
+      "the rebuilt sorted preorder does not match the fixture's fixed interleaving",
+    );
+    assert.deepEqual(calls, expectedCalls, "metadata observations did not stream in request order");
+    const firstToolCall = calls.findIndex((call) => "tool" in call);
+    assert.ok(firstToolCall > 0, "no helper batch preceded the first symlink");
+    assert.ok(
+      calls.slice(firstToolCall).some((call) => "batch" in call),
+      "no helper batch followed a symlink, so the interleaving was not exercised",
+    );
+    const batchedIdentities = calls.flatMap((call) => "batch" in call ? call.batch : []);
+    assert.equal(new Set(batchedIdentities).size, 129, "a regular node was skipped or batched twice");
+    for (const node of census.nodes) {
+      assert.deepEqual(node.provenance, {
+        classification: "NON_SEMANTIC_OS_MANAGED_PATH_LOCAL",
+        length: 0,
+        present: false,
+        sha256: null,
+      }, `unexpected metadata for ${JSON.stringify(node.path)}`);
+    }
+    assert.equal(census.nodes.find((node) => node.path === "A/link")?.type, "symlink");
+    assert.equal(census.nodes.find((node) => node.path === "B/link")?.type, "symlink");
+  } finally {
+    Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+    syncBuiltinESMExports();
+    removeFixturePath(root);
+  }
+});
+
+test("Linux descriptor metadata helper errors and malformed output fail closed", async (t) => {
+  if (process.platform !== "linux") {
+    t.skip("requires the Linux descriptor metadata backend");
+    return;
+  }
+  type LinuxHelperResponse =
+    "acl-present" | "api-error" | "dropped-acl" | "dropped-xattr" | "duplicate-acl" |
+    "extra-acl" | "mac-marker" | "missing-helper" | "noncanonical" | "nonzero-exit" |
+    "output-buffer" | "partial-envelope" | "phantom-provenance" | "provenance-exception" |
+    "reordered-xattr" | "stat-mismatch" | "stderr-on-success" | "timeout" | "truncated" |
+    "unauthenticated-error" | "wrong-fd" | "xattr-name";
+  const cases: Array<{
+    expectedCode: string;
+    label: string;
+    phase?: "acl" | "xattr";
+    response: LinuxHelperResponse;
+    stage?: string;
+  }> = [
+    { expectedCode: "ACL_UNSUPPORTED", label: "authenticated ACL API error", phase: "acl",
+      response: "api-error", stage: "acl_get_fd" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "authenticated missing libacl", phase: "acl",
+      response: "api-error", stage: "libacl_unavailable" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "authenticated default-ACL API error", phase: "acl",
+      response: "api-error", stage: "acl_get_file_default" },
+    { expectedCode: "XATTR_UNSUPPORTED", label: "authenticated flistxattr failure", phase: "xattr",
+      response: "api-error", stage: "flistxattr_size" },
+    ...(["acl", "xattr"] as const).flatMap((phase) => [
+      {
+        expectedCode: phase === "acl" ? "ACL_UNSUPPORTED" : "XATTR_UNSUPPORTED",
+        label: `${phase} within-helper descriptor race retains original refusal taxonomy`,
+        phase,
+        response: "api-error" as const,
+        stage: "descriptor_changed",
+      },
+      {
+        expectedCode: "SNAPSHOT_UNSTABLE",
+        label: `${phase} parent-bound descriptor mismatch retains snapshot taxonomy`,
+        phase,
+        response: "api-error" as const,
+        stage: "expected_descriptor_changed",
+      },
+    ]),
+    { expectedCode: "ACL_UNSUPPORTED", label: "a macOS marker cannot select Linux xattr taxonomy",
+      phase: "xattr", response: "mac-marker" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "unauthenticated xattr diagnostic", phase: "xattr",
+      response: "unauthenticated-error" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "nonzero exit without a marker", response: "nonzero-exit" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "missing helper executable", response: "missing-helper" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "stderr beside complete output", response: "stderr-on-success" },
+    { expectedCode: "OPERATION_DEADLINE_EXCEEDED", label: "child timeout beats an authenticated marker",
+      phase: "xattr", response: "timeout" },
+    { expectedCode: "RESOURCE_LIMIT_EXCEEDED", label: "oversize output beats an authenticated marker",
+      phase: "xattr", response: "output-buffer" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "partial combined envelope", response: "partial-envelope" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "truncated output", response: "truncated" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "noncanonical output framing", response: "noncanonical" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "dropped ACL record", response: "dropped-acl" },
+    { expectedCode: "XATTR_UNSUPPORTED", label: "dropped xattr record", response: "dropped-xattr" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "extra ACL record", response: "extra-acl" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "duplicate ACL record", response: "duplicate-acl" },
+    { expectedCode: "XATTR_UNSUPPORTED", label: "reordered xattr records", response: "reordered-xattr" },
+    { expectedCode: "XATTR_UNSUPPORTED", label: "wrong descriptor ordinal", response: "wrong-fd" },
+    { expectedCode: "SNAPSHOT_UNSTABLE", label: "helper stat differs in nanoseconds", response: "stat-mismatch" },
+    { expectedCode: "ACL_UNSUPPORTED", label: "reported ACL presence", response: "acl-present" },
+    { expectedCode: "XATTR_UNSUPPORTED", label: "any reported xattr name", response: "xattr-name" },
+    { expectedCode: "XATTR_UNSUPPORTED", label: "Linux admits no provenance exception",
+      response: "provenance-exception" },
+    { expectedCode: "XATTR_UNSUPPORTED", label: "provenance value without its name",
+      response: "phantom-provenance" },
+  ];
+  for (const fixtureCase of cases) {
+    await t.test(fixtureCase.label, () => {
+      const root = fs.realpathSync(privateTemp("noa-kws-linux-metadata-refusal-"));
+      fs.writeFileSync(path.join(root, "leaf-a"), "a\n", { mode: 0o600 });
+      fs.writeFileSync(path.join(root, "leaf-b"), "b\n", { mode: 0o600 });
+      const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+      const closeDescriptor = Object.getOwnPropertyDescriptor(fs, "closeSync");
+      assert.ok(spawnDescriptor !== undefined);
+      assert.ok(closeDescriptor !== undefined);
+      const originalSpawnSync = childProcess.spawnSync;
+      const originalClose = fs.closeSync;
+      let injected = 0;
+      const injectedFds: number[] = [];
+      const closedAfterInjection = new Set<number>();
+      try {
+        Object.defineProperty(childProcess, "spawnSync", {
+          ...spawnDescriptor,
+          value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
+            if (injected !== 0 || !isDescriptorMetadataHelperLaunch(args)) {
+              return Reflect.apply(originalSpawnSync, childProcess, args);
+            }
+            injected += 1;
+            const { anchorFd, nodeFds } = descriptorMetadataHelperFds(args);
+            injectedFds.push(anchorFd, ...nodeFds);
+            assert.equal(nodeFds.length, 3);
+            const stats = nodeFds.map(descriptorMetadataStat);
+            const at = <T>(values: T[], index: number): T => {
+              const value = values[index];
+              assert.ok(value !== undefined);
+              return value;
+            };
+            let acl: Array<Record<string, unknown>> = stats.map((stat, index) => ({
+              fd: index + 4, present: false, stat,
+            }));
+            let xattr: Array<Record<string, unknown>> = stats.map((stat, index) => ({
+              fd: index + 4, namesBase64: [] as string[], provenanceBase64: null as string | null, stat,
+            }));
+            let envelope: Record<string, unknown> | null = null;
+            const b64 = (value: string) => Buffer.from(value).toString("base64");
+            switch (fixtureCase.response) {
+              case "dropped-acl": acl = acl.slice(0, -1); break;
+              case "dropped-xattr": xattr = xattr.slice(0, -1); break;
+              case "extra-acl": acl = [...acl, { fd: 7, present: false, stat: at(stats, 2) }]; break;
+              case "duplicate-acl": acl = [at(acl, 0), at(acl, 0), at(acl, 2)]; break;
+              case "reordered-xattr": xattr = [at(xattr, 1), at(xattr, 0), at(xattr, 2)]; break;
+              case "wrong-fd": at(xattr, 0).fd = 99; break;
+              case "stat-mismatch": {
+                const stat = at(stats, 1);
+                at(acl, 1).stat = { ...stat, mtimeNs: String(BigInt(stat.mtimeNs) + 1n) };
+                break;
+              }
+              case "acl-present": at(acl, 2).present = true; break;
+              case "xattr-name": at(xattr, 1).namesBase64 = [b64("user.noa")]; break;
+              case "provenance-exception":
+                at(xattr, 1).namesBase64 = [b64("com.apple.provenance")];
+                at(xattr, 1).provenanceBase64 = Buffer.from([0, 1]).toString("base64");
+                break;
+              case "phantom-provenance":
+                at(xattr, 1).provenanceBase64 = Buffer.from([0, 1]).toString("base64");
+                break;
+              case "partial-envelope": envelope = { acl }; break;
+              default: break;
+            }
+            const value = envelope ?? { acl, xattr };
+            const failureToken = String(args[1]?.at(-1));
+            const markerPrefix = fixtureCase.response === "mac-marker"
+              ? "NOA_MAC_METADATA_REFUSAL_V1"
+              : "NOA_LINUX_METADATA_REFUSAL_V1";
+            const markerToken = fixtureCase.response === "unauthenticated-error"
+              ? "0".repeat(64)
+              : failureToken;
+            const marker = `${markerPrefix} token=${markerToken} phase=${fixtureCase.phase ?? "acl"} stage=${fixtureCase.stage ?? "injected"} errno=5\n`;
+            const markerCase = [
+              "api-error", "mac-marker", "output-buffer", "timeout", "unauthenticated-error",
+            ].includes(fixtureCase.response);
+            let stdout = Buffer.from(JSON.stringify(value));
+            let stderr = Buffer.alloc(0);
+            let status: number | null = 0;
+            if (markerCase) {
+              stdout = Buffer.alloc(0);
+              stderr = Buffer.from(marker);
+              status = 70;
+            } else if (fixtureCase.response === "nonzero-exit") {
+              stdout = Buffer.alloc(0);
+              stderr = Buffer.from("Traceback (most recent call last):\n");
+              status = 1;
+            } else if (fixtureCase.response === "missing-helper") {
+              stdout = Buffer.alloc(0);
+              stderr = Buffer.from("metadata tool exec failed at -e line 1.\n");
+              status = 2;
+            } else if (fixtureCase.response === "stderr-on-success") {
+              stderr = Buffer.from("warning\n");
+            } else if (fixtureCase.response === "truncated") {
+              stdout = stdout.subarray(0, Math.floor(stdout.length / 2));
+            } else if (fixtureCase.response === "noncanonical") {
+              stdout = Buffer.concat([Buffer.from(" "), stdout]);
+            }
+            const error = ["output-buffer", "timeout"].includes(fixtureCase.response)
+              ? Object.assign(new Error("injected child-process failure"), {
+                  code: fixtureCase.response === "timeout" ? "ETIMEDOUT" : "ENOBUFS",
+                })
+              : undefined;
+            return {
+              ...(error === undefined ? {} : { error }),
+              output: [null, stdout, stderr],
+              pid: 123,
+              signal: null,
+              status,
+              stderr,
+              stdout,
+            };
+          }) as typeof childProcess.spawnSync,
+        });
+        Object.defineProperty(fs, "closeSync", {
+          ...closeDescriptor,
+          value: (...args: Parameters<typeof fs.closeSync>) => {
+            if (injected !== 0) closedAfterInjection.add(args[0]);
+            return Reflect.apply(originalClose, fs, args);
+          },
+        });
+        syncBuiltinESMExports();
+        assert.throws(
+          () => workspace.censusWorkspace(root, {
+            commandTimeoutMs: 10_000,
+            rootGitPolicy: "absent",
+          }),
+          (error: WorkspaceError) => error.code === workspaceErrorCode(fixtureCase.expectedCode),
+        );
+        assert.equal(injected, 1, "the Linux helper fault was not injected");
+        assert.equal(injectedFds.length, 4);
+        for (const fd of injectedFds) {
+          assert.ok(closedAfterInjection.has(fd), `batch descriptor ${fd} was not closed`);
+        }
+      } finally {
+        Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+        Object.defineProperty(fs, "closeSync", closeDescriptor);
+        syncBuiltinESMExports();
+        removeFixturePath(root);
+      }
+    });
+  }
+});
+
+test("the exact Linux metadata helper refuses a real native ACL API failure", (t) => {
+  if (process.platform !== "linux") {
+    t.skip("requires the Linux descriptor metadata backend");
+    return;
+  }
+  const python = requiredExecutable(["/usr/bin/python3"], "python3");
+  // The helper source is a String.raw literal, so its runtime value is the literal source text.
+  const moduleSource = fs.readFileSync(
+    path.join(repositoryRoot, "scripts/lib/knockout-workspace.mjs"),
+    "utf8",
+  );
+  const marker = "const LINUX_METADATA_HELPER_SCRIPT = String.raw`";
+  const scriptStart = moduleSource.indexOf(marker);
+  assert.ok(scriptStart >= 0, "the Linux helper source was not found");
+  const scriptEnd = moduleSource.indexOf("\n`;", scriptStart + marker.length);
+  assert.ok(scriptEnd > scriptStart);
+  const helperScript = moduleSource.slice(scriptStart + marker.length, scriptEnd + 1);
+  assert.equal(helperScript.includes("${"), false);
+  assert.equal(helperScript.includes("\\`"), false);
+  assert.ok(helperScript.includes('REFUSAL_PREFIX = "NOA_LINUX_METADATA_REFUSAL_V1"'));
+
+  const root = fs.realpathSync(privateTemp("noa-kws-linux-native-failure-"));
+  const leaf = path.join(root, "leaf");
+  fs.writeFileSync(leaf, "stable\n", { mode: 0o600 });
+  // open(2): an O_PATH descriptor "can be used for fstat(2)" while fgetxattr(2) "fail[s] with the
+  // error EBADF"; Linux fs/xattr.c path_getxattrat uses CLASS(fd) = fdget(), which is
+  // __fget_light(fd, FMODE_PATH) in fs/file.c and so rejects O_PATH files. libacl acl_get_fd
+  // returns NULL for that errno. The helper therefore sees a regular file whose stat matches and
+  // whose ACL read fails natively, with no privilege, mock, or filesystem quirk involved.
+  const oPath = (fs.constants as Record<string, number | undefined>).O_PATH ?? 0o10000000;
+  const anchorFd = fs.openSync(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  const pathFd = fs.openSync(leaf, oPath | fs.constants.O_NOFOLLOW);
+  const readableFd = fs.openSync(leaf, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    assert.throws(
+      () => fs.readSync(pathFd, Buffer.alloc(1), 0, 1, 0),
+      (error: NodeJS.ErrnoException) => error.code === "EBADF",
+      "the fixture descriptor is not an O_PATH descriptor",
+    );
+    const runHelper = (nodeFd: number) => {
+      const stat = descriptorMetadataStat(nodeFd);
+      assert.equal(stat.type, "file");
+      const token = crypto.randomBytes(32).toString("hex");
+      // Same argv, environment, inherited-descriptor layout and expectation framing as the
+      // production launch (anchor at fd 3, node descriptors from fd 4).
+      const result = childProcess.spawnSync(python, [
+        "-I", "-S", "-c", helperScript, "both",
+        String(64 * 1024 * 1024), String(32 * 1024 * 1024), "1", String(64 * 1024), token,
+      ], {
+        encoding: null,
+        env: { LANG: "C", LC_ALL: "C", PATH: "/usr/bin:/bin" },
+        input: Buffer.from(`${JSON.stringify([stat])}\n`),
+        killSignal: "SIGKILL",
+        stdio: ["pipe", "pipe", "pipe", anchorFd, nodeFd],
+        timeout: 30_000,
+      });
+      return { result, stat, token };
+    };
+
+    const control = runHelper(readableFd);
+    assert.equal(control.result.error, undefined);
+    assert.equal(control.result.status, 0, String(control.result.stderr));
+    assert.equal(control.result.stderr.length, 0);
+    assert.deepEqual(JSON.parse(control.result.stdout.toString("utf8")), {
+      acl: [{ fd: 4, present: false, stat: control.stat }],
+      xattr: [{ fd: 4, namesBase64: [], provenanceBase64: null, stat: control.stat }],
+    }, "the readable control descriptor was not admitted by the exact helper");
+
+    const failure = runHelper(pathFd);
+    assert.equal(failure.result.error, undefined);
+    assert.equal(failure.result.status, 70);
+    assert.equal(failure.result.stdout.length, 0, "a failed ACL read produced metadata output");
+    assert.equal(
+      failure.result.stderr.toString("utf8"),
+      `NOA_LINUX_METADATA_REFUSAL_V1 token=${failure.token} phase=acl stage=acl_get_fd errno=${os.constants.errno.EBADF}\n`,
+      "the native acl_get_fd failure did not refuse at its own stage",
+    );
+  } finally {
+    fs.closeSync(readableFd);
+    fs.closeSync(pathFd);
+    fs.closeSync(anchorFd);
+    removeFixturePath(root);
+  }
+});
+
+test("Linux descriptor metadata refuses named and default ACLs and any xattr among clean nodes", async (t) => {
+  if (process.platform !== "linux") {
+    t.skip("requires the Linux descriptor metadata backend");
+    return;
+  }
+  const python = requiredExecutable(["/usr/bin/python3"], "python3");
+  const setfacl = requiredExecutable(["/usr/bin/setfacl", "/bin/setfacl"], "setfacl");
+  const newlineName = "user.noa\nambiguous";
+  const cases: Array<{
+    expectedCode: string;
+    label: string;
+    // Returns the pathname of the one node that carries the refused metadata.
+    prepare: (root: string) => string;
+    refusal: (error: WorkspaceError) => boolean;
+  }> = [
+    {
+      expectedCode: "ACL_UNSUPPORTED",
+      label: "named access ACL on one file among clean nodes",
+      prepare: (root) => {
+        const target = path.join(root, "file-068");
+        execFileSync(setfacl, ["-m", "u:12345:r--", target]);
+        return target;
+      },
+      refusal: (error) => String(error.details?.stderr ?? "").includes(" phase=acl stage=acl_extended_entry "),
+    },
+    {
+      expectedCode: "ACL_UNSUPPORTED",
+      label: "default ACL on one empty directory among clean nodes",
+      prepare: (root) => {
+        const directory = path.join(root, "zz-default");
+        fs.mkdirSync(directory, { mode: 0o700 });
+        execFileSync(setfacl, ["-d", "-m", "u:12345:rwx", directory]);
+        return directory;
+      },
+      refusal: (error) => String(error.details?.stderr ?? "").includes(" phase=acl stage=default_acl_present "),
+    },
+    {
+      expectedCode: "XATTR_UNSUPPORTED",
+      label: "newline-bearing user xattr on one file among clean nodes",
+      prepare: (root) => {
+        const target = path.join(root, "file-068");
+        execFileSync(python, [
+          "-I", "-S", "-c",
+          "import os, sys\nos.setxattr(sys.argv[1], os.fsencode(sys.argv[2]), b'value')",
+          target, newlineName,
+        ]);
+        return target;
+      },
+      refusal: (error) => Array.isArray(error.details?.names) &&
+        error.details.names.length === 1 && error.details.names[0] === newlineName,
+    },
+  ];
+  for (const fixtureCase of cases) {
+    await t.test(fixtureCase.label, () => {
+      const root = fs.realpathSync(privateTemp("noa-kws-linux-metadata-negative-"));
+      const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+      assert.ok(spawnDescriptor !== undefined);
+      const originalSpawnSync = childProcess.spawnSync;
+      const batches: string[][] = [];
+      try {
+        for (let index = 0; index < 70; index++) {
+          fs.writeFileSync(path.join(root, `file-${index.toString().padStart(3, "0")}`), "x", {
+            mode: 0o600,
+          });
+        }
+        const targetIdentity = lstatIdentity(fixtureCase.prepare(root));
+        Object.defineProperty(childProcess, "spawnSync", {
+          ...spawnDescriptor,
+          value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
+            if (isDescriptorMetadataHelperLaunch(args)) {
+              batches.push(descriptorMetadataHelperFds(args).nodeFds
+                .map((fd) => descriptorMetadataStat(fd).identity));
+            }
+            return Reflect.apply(originalSpawnSync, childProcess, args);
+          }) as typeof childProcess.spawnSync,
+        });
+        syncBuiltinESMExports();
+        assert.throws(
+          () => workspace.censusWorkspace(root, {
+            commandTimeoutMs: 10_000,
+            rootGitPolicy: "absent",
+          }),
+          (error: WorkspaceError) =>
+            error.code === workspaceErrorCode(fixtureCase.expectedCode) && fixtureCase.refusal(error),
+        );
+        // The refusing launch is the real helper batch that holds the marked node beside clean
+        // nodes; every batch before it was admitted, and no batch exceeds the fixed bound.
+        const refusingBatch = batches.at(-1);
+        assert.ok(refusingBatch !== undefined, "no Linux helper batch ran");
+        assert.ok(refusingBatch.includes(targetIdentity), "the refusing batch did not hold the marked node");
+        assert.ok(refusingBatch.length > 1, "the marked node was not observed among clean nodes");
+        assert.ok(batches.every((batch) => batch.length <= 64));
+        assert.ok(batches.slice(0, -1).every((batch) => !batch.includes(targetIdentity)));
+      } finally {
+        Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+        syncBuiltinESMExports();
+        removeFixturePath(root);
+      }
+    });
+  }
+});
+
+test("Linux descriptor metadata rechecks leaf and ancestor pathnames after the helper", async (t) => {
+  if (process.platform !== "linux") {
+    t.skip("requires the Linux descriptor metadata backend");
+    return;
+  }
+  requiredExecutable(["/usr/bin/python3"], "python3");
+  for (const target of ["ancestor", "leaf"] as const) {
+    await t.test(`${target} replaced by a symbolic link after the second helper batch`, () => {
+      const root = fs.realpathSync(privateTemp("noa-kws-linux-metadata-recheck-"));
+      const parent = path.join(root, "a");
+      const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+      assert.ok(spawnDescriptor !== undefined);
+      const originalSpawnSync = childProcess.spawnSync;
+      let helperCalls = 0;
+      let swapped = false;
+      try {
+        fs.mkdirSync(parent, { mode: 0o700 });
+        // The census binds "." and "a" first (preorder), then a's 70 files in bytewise-sorted
+        // order: f-000..f-061 complete the first chunk and f-062..f-069 form the second chunk.
+        const fileByIdentity = new Map<string, string>();
+        for (let index = 0; index < 70; index++) {
+          const file = path.join(parent, `f-${index.toString().padStart(3, "0")}`);
+          fs.writeFileSync(file, "x", { mode: 0o600 });
+          fileByIdentity.set(lstatIdentity(file), file);
+        }
+        Object.defineProperty(childProcess, "spawnSync", {
+          ...spawnDescriptor,
+          value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
+            const leafFd = isDescriptorMetadataHelperLaunch(args)
+              ? descriptorMetadataHelperFds(args).nodeFds.at(-1)
+              : undefined;
+            const leaf = leafFd === undefined
+              ? undefined
+              : fileByIdentity.get(descriptorMetadataStat(leafFd).identity);
+            const result = Reflect.apply(originalSpawnSync, childProcess, args) as ReturnType<
+              typeof childProcess.spawnSync
+            >;
+            if (isDescriptorMetadataHelperLaunch(args)) {
+              helperCalls += 1;
+              if (helperCalls === 2) {
+                // The real helper has already observed the bound descriptors; the substitution
+                // lands between its answer and the parent's pathname recheck.
+                assert.equal(result.status, 0, "the real helper did not admit the clean batch");
+                if (target === "ancestor") {
+                  fs.renameSync(parent, path.join(root, "a-real"));
+                  fs.symlinkSync("a-real", parent);
+                } else {
+                  assert.ok(leaf !== undefined, "the second batch did not end with a fixture file");
+                  fs.renameSync(leaf, `${leaf}.real`);
+                  fs.symlinkSync(path.basename(`${leaf}.real`), leaf);
+                }
+                swapped = true;
+              }
+            }
+            return result;
+          }) as typeof childProcess.spawnSync,
+        });
+        syncBuiltinESMExports();
+        assert.throws(
+          () => workspace.censusWorkspace(root, {
+            commandTimeoutMs: 10_000,
+            rootGitPolicy: "absent",
+          }),
+          (error: WorkspaceError) =>
+            error.code === workspaceErrorCode("SNAPSHOT_UNSTABLE") &&
+            (target === "ancestor"
+              ? error.message.includes("acquired a symbolic-link component")
+              : /changed through its metadata descriptor|pathname ancestors changed during metadata inspection|acquired a symbolic-link component/u
+                .test(error.message)),
+        );
+        assert.equal(swapped, true, "the post-helper substitution was not exercised");
+        assert.equal(helperCalls, 2);
+      } finally {
+        Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+        syncBuiltinESMExports();
+        removeFixturePath(root);
+      }
+    });
   }
 });
 
@@ -9219,7 +10297,7 @@ test("Git and metadata child processes have finite fail-closed time budgets", ()
       "utf8",
     );
     const toolStart = moduleSource.indexOf("function toolResult(");
-    const toolEnd = moduleSource.indexOf("\nfunction observeMacMetadata", toolStart);
+    const toolEnd = moduleSource.indexOf("\nfunction ", toolStart + 1);
     assert.ok(toolStart >= 0 && toolEnd > toolStart, "metadata tool wrapper was not found");
     assert.match(
       moduleSource.slice(toolStart, toolEnd),
@@ -9515,6 +10593,7 @@ test("Linux metadata is observed again after an anchor close failure", (t) => {
     const sealedCapture = captured;
     const tracked = path.join(sealedCapture.workspaceRoot, "tracked.txt");
     const before = fs.lstatSync(tracked, { bigint: true });
+    const trackedIdentity = `${before.dev}:${before.ino}`;
     // A real stat change requires a fresh observation. This seed must remain refused on retry.
     fs.chmodSync(tracked, Number(before.mode & 0o777n));
     assert.notEqual(fs.lstatSync(tracked, { bigint: true }).ctimeNs, before.ctimeNs);
@@ -9522,14 +10601,19 @@ test("Linux metadata is observed again after an anchor close failure", (t) => {
       ...spawnDescriptor,
       value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
         const childArgs = args[1];
+        // The seed census observes the tracked file through the Linux descriptor batch helper,
+        // which inherits the bound workspace anchor at fd 3 and one descriptor per node from 4.
+        const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
         if (
-          Array.isArray(childArgs) &&
-          childArgs.some((argument) =>
-            typeof argument === "string" && path.basename(argument) === "getfacl") &&
-          childArgs.includes(`.${path.sep}tracked.txt`)
+          args[0] === "/usr/bin/perl" && Array.isArray(childArgs) &&
+          childArgs.includes("/usr/bin/python3") && childArgs.includes("both") &&
+          Array.isArray(stdio) && stdio.slice(4).some((nodeFd) => {
+            assert.equal(typeof nodeFd, "number");
+            const node = fs.fstatSync(nodeFd as number, { bigint: true });
+            return `${node.dev}:${node.ino}` === trackedIdentity;
+          })
         ) {
-          const stdio = (args[2] as { stdio?: unknown[] } | undefined)?.stdio;
-          const fd = Array.isArray(stdio) ? stdio[3] : null;
+          const fd = stdio[3];
           assert.equal(typeof fd, "number");
           const anchor = fs.fstatSync(fd as number, { bigint: true });
           assert.equal(`${anchor.dev}:${anchor.ino}`, sealedCapture.workspaceIdentity);
@@ -9568,6 +10652,105 @@ test("Linux metadata is observed again after an anchor close failure", (t) => {
   } finally {
     Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
     Object.defineProperty(fs, "closeSync", closeDescriptor);
+    syncBuiltinESMExports();
+    cleanupReportedScratchRoots(captured?.retainedPrivateRoots ?? []);
+    removeFixturePath(fixture.source);
+    removeFixturePath(fixture.custody);
+  }
+});
+
+test("Linux metadata deadline after a helper batch closes every descriptor and publishes no cache entry", (t) => {
+  if (process.platform !== "linux") {
+    t.skip("requires the Linux metadata backend");
+    return;
+  }
+  const fixture = minimalCaptureFixture("metadata-batch-deadline");
+  const spawnDescriptor = Object.getOwnPropertyDescriptor(childProcess, "spawnSync");
+  const closeDescriptor = Object.getOwnPropertyDescriptor(fs, "closeSync");
+  const hrtimeDescriptor = Object.getOwnPropertyDescriptor(process.hrtime, "bigint");
+  assert.ok(spawnDescriptor !== undefined);
+  assert.ok(closeDescriptor !== undefined);
+  assert.ok(hrtimeDescriptor !== undefined);
+  const originalSpawn = childProcess.spawnSync;
+  const originalClose = fs.closeSync;
+  const originalHrtime = process.hrtime.bigint;
+  let captured: Capture | null = null;
+  let expire = false;
+  let injected = 0;
+  let trackedBatches = 0;
+  const helperFds: number[] = [];
+  const closedAfterInjection = new Set<number>();
+  try {
+    captured = workspace.captureAndSealCandidate({
+      custodyRoot: fixture.custody,
+      maxAttempts: 1,
+      sourceRoot: fixture.source,
+    });
+    const sealedCapture = captured;
+    const tracked = path.join(sealedCapture.workspaceRoot, "tracked.txt");
+    const before = fs.lstatSync(tracked, { bigint: true });
+    const trackedIdentity = `${before.dev}:${before.ino}`;
+    // A real stat change makes the tracked file a cache miss, so the seed census must run the
+    // helper for it; this seed must remain refused on retry.
+    fs.chmodSync(tracked, Number(before.mode & 0o777n));
+    assert.notEqual(fs.lstatSync(tracked, { bigint: true }).ctimeNs, before.ctimeNs);
+    Object.defineProperty(childProcess, "spawnSync", {
+      ...spawnDescriptor,
+      value: ((...args: Parameters<typeof childProcess.spawnSync>) => {
+        if (!isDescriptorMetadataHelperLaunch(args)) {
+          return Reflect.apply(originalSpawn, childProcess, args);
+        }
+        const { anchorFd, nodeFds } = descriptorMetadataHelperFds(args);
+        const holdsTracked = nodeFds.some((fd) =>
+          descriptorMetadataStat(fd).identity === trackedIdentity);
+        const result = Reflect.apply(originalSpawn, childProcess, args);
+        if (holdsTracked) {
+          trackedBatches += 1;
+          if (injected === 0) {
+            // The real helper admitted the batch; the single operation deadline expires before
+            // the parent accepts its answer.
+            injected += 1;
+            helperFds.push(anchorFd, ...nodeFds);
+            expire = true;
+          }
+        }
+        return result;
+      }) as typeof childProcess.spawnSync,
+    });
+    Object.defineProperty(fs, "closeSync", {
+      ...closeDescriptor,
+      value: (...args: Parameters<typeof fs.closeSync>) => {
+        if (injected !== 0) closedAfterInjection.add(args[0]);
+        return Reflect.apply(originalClose, fs, args);
+      },
+    });
+    Object.defineProperty(process.hrtime, "bigint", {
+      ...hrtimeDescriptor,
+      value: () => originalHrtime() + (expire ? 3_600_000_000_000n : 0n),
+    });
+    syncBuiltinESMExports();
+    const openCustody = () => workspace.openKnockoutCustody(sealedCapture, {
+      maxRetainedArms: 1,
+      maxRetainedBytes: 16 * 1024 * 1024,
+    });
+    assert.throws(openCustody, (error: WorkspaceError) =>
+      error.code === workspaceErrorCode("OPERATION_DEADLINE_EXCEEDED") &&
+      error.message.startsWith("batched Linux metadata inspection exceeded"));
+    assert.equal(injected, 1, "the mid-batch deadline was not injected");
+    assert.equal(trackedBatches, 1);
+    assert.ok(helperFds.length >= 2);
+    for (const fd of helperFds) {
+      assert.ok(closedAfterInjection.has(fd), `batch descriptor ${fd} stayed open after the deadline`);
+    }
+    expire = false;
+    assert.throws(openCustody, (error: WorkspaceError) =>
+      error.code === workspaceErrorCode("MANIFEST_MISMATCH"));
+    assert.equal(trackedBatches, 2, "a batch refused at its deadline left reusable metadata evidence");
+    assert.equal(fs.readFileSync(fixture.trackedPath, "utf8"), "stable source bytes\n");
+  } finally {
+    Object.defineProperty(childProcess, "spawnSync", spawnDescriptor);
+    Object.defineProperty(fs, "closeSync", closeDescriptor);
+    Object.defineProperty(process.hrtime, "bigint", hrtimeDescriptor);
     syncBuiltinESMExports();
     cleanupReportedScratchRoots(captured?.retainedPrivateRoots ?? []);
     removeFixturePath(fixture.source);
@@ -9641,20 +10824,30 @@ test("capture reuses metadata evidence while each fresh arm is observed in fixed
         `${sourceTracked.dev}:${sourceTracked.ino}`,
         `${destinationTracked.dev}:${destinationTracked.ino}`,
       ]);
+      // Darwin observes every node through the descriptor helper; Linux observes regular files and
+      // directories through its descriptor helper and keeps per-node getfacl/getfattr only for
+      // symbolic links, so a Linux tracked-file observation is counted on either path.
+      const batchTrackedAnchors = metadataBatches
+        .filter((batch) => batch.nodes.some((identity) => trackedIdentities.has(identity)))
+        .map((batch) => batch.anchor);
       const trackedMetadataAnchors = process.platform === "darwin"
-        ? metadataBatches
-            .filter((batch) => batch.nodes.some((identity) => trackedIdentities.has(identity)))
-            .map((batch) => batch.anchor)
-        : legacyTrackedAclAnchors;
+        ? batchTrackedAnchors
+        : [...batchTrackedAnchors, ...legacyTrackedAclAnchors];
+      if (process.platform === "linux") {
+        assert.deepEqual(legacyTrackedAclAnchors, [], "Linux regular files must use the batch helper");
+      }
       assert.deepEqual(
         trackedMetadataAnchors.sort(),
         [`${sourceStat.dev}:${sourceStat.ino}`, sealedCapture.workspaceIdentity].sort(),
         "source/destination ACL metadata must each be externally observed exactly once",
       );
       const destinationTrackedIdentity = `${destinationTracked.dev}:${destinationTracked.ino}`;
-      const trackedObservationCount = () => process.platform === "darwin"
-        ? metadataBatches.filter((batch) => batch.nodes.includes(destinationTrackedIdentity)).length
-        : legacyTrackedAclAnchors.filter((anchor) => anchor === sealedCapture.workspaceIdentity).length;
+      const trackedObservationCount = () =>
+        metadataBatches.filter((batch) => batch.nodes.includes(destinationTrackedIdentity)).length +
+        (process.platform === "darwin"
+          ? 0
+          : legacyTrackedAclAnchors.filter((anchor) => anchor === sealedCapture.workspaceIdentity)
+            .length);
       const destinationTrackedCallsAfterCapture = trackedObservationCount();
       assert.equal(destinationTrackedCallsAfterCapture, 1);
       assert.doesNotThrow(() => workspace.verifySealedSeed(sealedCapture));
@@ -9663,7 +10856,7 @@ test("capture reuses metadata evidence while each fresh arm is observed in fixed
         destinationTrackedCallsAfterCapture,
         "unchanged seed verification re-observed cached tracked-file metadata",
       );
-      if (process.platform === "darwin") {
+      if (process.platform === "darwin" || process.platform === "linux") {
         const custody = workspace.openKnockoutCustody(sealedCapture, {
           maxRetainedArms: 1,
           maxRetainedBytes: 64 * 1024 * 1024,
@@ -9681,9 +10874,18 @@ test("capture reuses metadata evidence while each fresh arm is observed in fixed
         arm = workspace.materializeArm(plan, "metadata-batch");
         const armStat = fs.lstatSync(arm.workspaceRoot, { bigint: true });
         const armIdentity = `${armStat.dev}:${armStat.ino}`;
+        // Linux keeps symbolic links out of the descriptor batch; Darwin batches every node.
+        const countSymlinks = (directory: string): number =>
+          fs.readdirSync(directory, { withFileTypes: true }).reduce((count, entry) =>
+            count + (entry.isSymbolicLink()
+              ? 1
+              : entry.isDirectory() ? countSymlinks(path.join(directory, entry.name)) : 0), 0);
+        const expectedArmBatchNodes = sealedCapture.workspaceObservation.nodeCount -
+          (process.platform === "linux" ? countSymlinks(arm.workspaceRoot) : 0);
+        assert.ok(expectedArmBatchNodes > 0 && expectedArmBatchNodes <= 64);
         const completeArmCensusBatches = metadataBatches.filter((batch) =>
           batch.anchor === armIdentity &&
-          batch.nodes.length === sealedCapture.workspaceObservation.nodeCount);
+          batch.nodes.length === expectedArmBatchNodes);
         assert.equal(
           completeArmCensusBatches.length,
           1,
@@ -12098,11 +13300,13 @@ test("Phase 2 isolated runner executes one real baseline and mutant in separate 
     const captureTimeoutMs = workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS;
     const suiteTimeoutMs = 600_000;
     const workerTimeoutMs = workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS;
+    const diagnostics: Array<Record<string, unknown>> = [];
     const sweep = await knockoutRunner.runIsolatedKnockoutSweep({
       captureTimeoutMs,
       custodyRoot: fixture.custody,
       maxRetainedArms: 3,
       maxRetainedBytes: 512 * 1024 * 1024,
+      onDiagnostic: (record: Record<string, unknown>) => diagnostics.push(record),
       rawDependenciesByEntry: new Map([[entry.id, {}]]),
       registry: [entry],
       root: fixture.source,
@@ -12112,6 +13316,56 @@ test("Phase 2 isolated runner executes one real baseline and mutant in separate 
     });
 
     assert.equal(sweep.status, "COMPLETE");
+    // Phase telemetry: every phase of every arm has one start and one end, in execution order.
+    assert.ok(diagnostics.every((record) =>
+      record.protocol === knockoutRunner.SWEEP_DIAGNOSTIC_PROTOCOL));
+    assert.deepEqual(
+      diagnostics
+        .filter((record) => record.event === "start" || record.event === "end")
+        .map((record) => `${String(record.event)}:${String(record.phase)}:${String(record.role)}`),
+      [
+        "start:CAPTURE:null", "end:CAPTURE:null", "start:CUSTODY:null", "end:CUSTODY:null",
+        ...["SELFTEST", "BASELINE", "MUTANT"].flatMap((role) =>
+          ["ADMISSION", "MATERIALIZATION", "WORKER"].flatMap((phase) =>
+            [`start:${phase}:${role}`, `end:${phase}:${role}`])),
+        "start:CLOSE:null", "end:CLOSE:null",
+      ],
+    );
+    assert.equal(diagnostics.some((record) => record.event === "failure"), false);
+    const ends = (phase: string) => diagnostics.filter((record) =>
+      record.event === "end" && record.phase === phase);
+    for (const materialization of ends("MATERIALIZATION")) {
+      const budget = materialization.workspace as OperationDiagnosticSnapshot;
+      assert.equal(budget.operation, "ARM_MATERIALIZATION");
+      assert.ok(budget.nodes.file! > 0 && budget.bytesWritten > 0 && budget.fsyncCount > 0);
+      assert.ok(budget.launches.acl! + budget.launches.linuxMetadataHelper! +
+        budget.launches.macMetadataHelper! > 0);
+      assert.ok(budget.metadata.requested >= budget.metadata.completed);
+      assert.ok(Number.isSafeInteger(budget.subphaseInclusiveMs.worktreeCopy));
+      assert.ok(Number.isSafeInteger(materialization.durationMs));
+    }
+    for (const worker of ends("WORKER")) {
+      assert.equal(worker.terminalReasonCode, "WORKER_COMPLETE");
+      assert.equal(worker.workerTimeoutMs, workerTimeoutMs);
+      assert.ok(Number.isSafeInteger(worker.workerExecutionMs));
+      assert.equal((worker.preparation as OperationDiagnosticSnapshot).operation, "WORKER_PREPARATION");
+      assert.equal((worker.publication as OperationDiagnosticSnapshot).operation, "WORKER_PUBLICATION");
+    }
+    const summaries = diagnostics.filter((record) => record.event === "summary");
+    assert.equal(summaries.length, 1);
+    const summary = summaries[0]!;
+    assert.equal(summary.entryId, entry.id);
+    assert.ok(Number.isSafeInteger(summary.mutatedMs));
+    const summaryArm = summary.mutantArm as { materializationMs: unknown; workerMs: unknown };
+    assert.ok(Number.isSafeInteger(summaryArm.materializationMs));
+    assert.ok(Number.isSafeInteger(summaryArm.workerMs));
+    assert.equal(summary.postcheckArm, null);
+    for (const record of diagnostics) {
+      const printed = knockoutCli.boundedDiagnosticLine("  knockout-diagnostic", record);
+      assert.ok(Buffer.byteLength(printed, "utf8") <= knockoutCli.DIAGNOSTIC_LINE_MAX_BYTES);
+      assert.equal("omitted" in (JSON.parse(printed.slice("  knockout-diagnostic ".length)) as object),
+        false, `a ${String(record.event)}:${String(record.phase)} record exceeded one bounded line`);
+    }
     const candidateManifestFiles = regularFilesBelow(fixture.custody)
       .filter((file) => path.basename(file) === "candidate-manifest.json");
     assert.equal(candidateManifestFiles.length, 1);
@@ -12303,8 +13557,12 @@ test("Phase 2 supervisor refuses a retained mutant changed by a delayed same-gro
         workerTimeoutMs: workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS,
       }),
       (error: WorkspaceError) => {
-        const details = (error as unknown as { details?: { status?: unknown } }).details;
-        return error.code === "ARM_REFUSED" && details?.status === "INDETERMINATE";
+        const details = (error as unknown as { details?: Record<string, unknown> }).details;
+        return error.code === "ARM_REFUSED" && details?.status === "INDETERMINATE" &&
+          details.role === "MUTANT" &&
+          details.reasonCode === "RETAINED_TARGET_REVALIDATION_FAILED" &&
+          details.workerRefusalReasonCode === null &&
+          details.workerTimeoutMs === workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS;
       },
     );
 
@@ -13087,24 +14345,98 @@ test("Phase 2 isolated runner refuses a captured registry mismatch before suite 
     const statusBefore = git(fixture.source, ["status", "--porcelain=v1", "-z"]);
     const indexBefore = sha256File(path.join(fixture.source, ".git", "index"));
     const controlBefore = sha256File(path.join(fixture.source, "control.mjs"));
-    await assert.rejects(
-      () => knockoutRunner.runIsolatedKnockoutSweep({
-        captureTimeoutMs: workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS,
-        custodyRoot: fixture.custody,
-        maxRetainedArms: 3,
-        maxRetainedBytes: 512 * 1024 * 1024,
-        rawDependenciesByEntry: new Map([[supervisorEntry.id, {}]]),
-        registry: [supervisorEntry],
-        root: fixture.source,
-        selected: [supervisorEntry],
-        suiteTimeoutMs: 60_000,
-        workerTimeoutMs: workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS,
-      }),
-      (error: WorkspaceError) => {
-        assert.equal(error.code, "ARM_REFUSED", errorChain(error));
-        return true;
-      },
-    );
+    const diagnostics: Array<Record<string, unknown>> = [];
+    let refusal: unknown = null;
+    // An async sink that rejects every record must neither stop nor terminate the sweep.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    let rejectedSinkCalls = 0;
+    const rejectingSink = (record: Record<string, unknown>) => {
+      diagnostics.push(record);
+      rejectedSinkCalls += 1;
+      return Promise.reject(new Error("diagnostic sink rejected"));
+    };
+    try {
+      await assert.rejects(
+        () => knockoutRunner.runIsolatedKnockoutSweep({
+          captureTimeoutMs: workspace.KNOCKOUT_WORKSPACE_CAPTURE_TIMEOUT_LIMIT_MS,
+          custodyRoot: fixture.custody,
+          maxRetainedArms: 3,
+          maxRetainedBytes: 512 * 1024 * 1024,
+          onDiagnostic: rejectingSink,
+          rawDependenciesByEntry: new Map([[supervisorEntry.id, {}]]),
+          registry: [supervisorEntry],
+          root: fixture.source,
+          selected: [supervisorEntry],
+          suiteTimeoutMs: 60_000,
+          workerTimeoutMs: workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS,
+        }),
+        (error: WorkspaceError) => {
+          assert.equal(error.code, "ARM_REFUSED", errorChain(error));
+          refusal = error;
+          return true;
+        },
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    assert.ok(rejectedSinkCalls > 0, "the rejecting sink was never called");
+    assert.deepEqual(unhandled, [], "a rejected diagnostic sink escaped as an unhandled rejection");
+
+    // ARM_REFUSED names the terminal reason, the worker's own refusal, the lifecycle and the budget.
+    const refusalDetails = (refusal as { details?: Record<string, unknown> } | null)?.details;
+    assert.equal(refusalDetails?.role, "BASELINE");
+    assert.equal(refusalDetails?.armId, "baseline-0001");
+    assert.equal(refusalDetails?.reasonCode, "WORKER_REFUSED");
+    assert.equal(refusalDetails?.workerRefusalReasonCode, "REGISTRY_REFUSED");
+    assert.deepEqual(refusalDetails?.lifecycle, { exitCode: 0, signal: null, timedOut: false });
+    assert.equal(refusalDetails?.workerTimeoutMs, workspace.KNOCKOUT_WORKSPACE_ARM_WORKER_TIMEOUT_LIMIT_MS);
+    // The primary failure is snapshotted before cleanup, and cleanup is reported on its own.
+    const sweepDiagnostics = knockoutRunner.isolatedSweepFailureDiagnostics(refusal);
+    assert.ok(sweepDiagnostics !== null);
+    assert.equal(sweepDiagnostics.primary.code, "ARM_REFUSED");
+    assert.equal(sweepDiagnostics.primary.phase, "WORKER");
+    assert.equal(sweepDiagnostics.primary.phaseState, "ENDED");
+    assert.equal(sweepDiagnostics.primary.role, "BASELINE");
+    assert.equal(sweepDiagnostics.primary.armId, "baseline-0001");
+    assert.equal(sweepDiagnostics.primary.entryId, supervisorEntry.id);
+    assert.equal(sweepDiagnostics.primary.terminal.reasonCode, "WORKER_REFUSED");
+    assert.equal(sweepDiagnostics.primary.terminal.workerRefusalReasonCode, "REGISTRY_REFUSED");
+    assert.equal(sweepDiagnostics.cleanup.status, "COMPLETE");
+    assert.equal(sweepDiagnostics.cleanup.leaseCleanup, "COOPERATIVE_CLOSE");
+    const eventOrder = diagnostics.map((record) => `${String(record.event)}:${String(record.phase)}`);
+    const failureAt = eventOrder.indexOf("failure:WORKER");
+    assert.ok(failureAt >= 0, eventOrder.join(","));
+    assert.ok(failureAt < eventOrder.indexOf("start:CLEANUP"), eventOrder.join(","));
+    assert.ok(eventOrder.indexOf("start:CLEANUP") < eventOrder.indexOf("end:CLEANUP"));
+    assert.equal(eventOrder.includes("start:CLOSE"), false);
+    const failureLines = knockoutCli.isolatedSweepFailureLines(refusal);
+    const failureLine = failureLines.find((line) => line.startsWith("  failure diagnostic: "));
+    const cleanupLine = failureLines.find((line) => line.startsWith("  cleanup diagnostic: "));
+    assert.ok(failureLine !== undefined && cleanupLine !== undefined, failureLines.join("\n"));
+    for (const line of [failureLine, cleanupLine]) {
+      assert.ok(Buffer.byteLength(line, "utf8") <= knockoutCli.DIAGNOSTIC_LINE_MAX_BYTES);
+      assert.equal(line.includes(fixture.custody), false, "a private path escaped into telemetry");
+    }
+    const printedFailure = JSON.parse(failureLine.slice("  failure diagnostic: ".length)) as
+      Record<string, unknown>;
+    // The whole report (streamed records + final failure/cleanup lines) fits one budget.
+    const reportLines: string[] = [];
+    const report = knockoutCli.createDiagnosticReport((text) => reportLines.push(text));
+    for (const record of diagnostics) report.record(record);
+    const chargedLines = knockoutCli.isolatedSweepFailureLines(refusal, report);
+    assert.ok(chargedLines.some((line) => line.startsWith("  failure diagnostic: ")));
+    assert.ok(chargedLines.some((line) => line.startsWith("  cleanup diagnostic: ")));
+    const chargedFinals = chargedLines.filter((line) => / (failure|cleanup) diagnostic: /.test(line));
+    const reportBytes = [...reportLines, ...chargedFinals]
+      .reduce((total, text) => total + Buffer.byteLength(text, "utf8") + 1, 0);
+    assert.equal(report.usedBytes(), reportBytes);
+    assert.ok(reportBytes <= knockoutCli.DIAGNOSTIC_REPORT_MAX_BYTES);
+    assert.equal(printedFailure.phase, "WORKER");
+    assert.equal(printedFailure.code, "ARM_REFUSED");
+    assert.equal("omitted" in printedFailure, false);
 
     assert.equal(fs.existsSync(path.join(fixture.source, "suite-ran.txt")), false);
     assert.equal(
