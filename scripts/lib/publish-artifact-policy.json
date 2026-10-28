@@ -5,7 +5,7 @@
     "packages/approval-artifacts/dist/src/"
   ],
   "manifestPolicy": {
-    "enginesNode": ">=20",
+    "enginesNode": ">=22",
     "homepage": "https://noatrust.com",
     "license": "Apache-2.0",
     "provenanceRequired": true,

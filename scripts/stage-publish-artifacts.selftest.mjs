@@ -78,7 +78,7 @@ let checks = 0;
 const FIXTURE_NOTICE_TITLE = "NOA Fixture — public package metadata fixture";
 const FIXTURE_REPOSITORY_URL = "https://github.com/NordenSoft/noa-mandate-core.git";
 const FIXTURE_MANIFEST_POLICY = Object.freeze({
-  enginesNode: ">=20",
+  enginesNode: ">=22",
   homepage: "https://noatrust.com",
   license: "Apache-2.0",
   provenanceRequired: true,
@@ -213,7 +213,7 @@ function fixtureManifest(overrides = {}) {
   return {
     name: "noa-fixture",
     version: "1.0.0",
-    engines: { node: ">=20" },
+    engines: { node: ">=22" },
     exports: { ".": "./dist/src/index.js" },
     files: ["dist/src", "README.md", "LICENSE", "NOTICE"],
     homepage: "https://noatrust.com",

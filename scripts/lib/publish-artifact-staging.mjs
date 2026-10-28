@@ -590,7 +590,7 @@ export function loadPublishArtifactPolicy(policyPath = POLICY) {
     ["enginesNode", "homepage", "license", "provenanceRequired", "repositoryUrl"],
     "publish-artifact manifest policy",
   );
-  if (policy.manifestPolicy.enginesNode !== ">=20" ||
+  if (policy.manifestPolicy.enginesNode !== ">=22" ||
       policy.manifestPolicy.homepage !== "https://noatrust.com" ||
       policy.manifestPolicy.license !== "Apache-2.0" ||
       policy.manifestPolicy.provenanceRequired !== true ||
