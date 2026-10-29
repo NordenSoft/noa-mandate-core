@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generateKeyPairSync, sign as cryptoSign } from "node:crypto";
+import { generateKeyPairSync, sign as cryptoSign, createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { generateKeyPair, signEd25519 } from "../../src/keys.js";
 import { buildReceipt, type BuildInput, type Signer } from "../../src/builder.js";
 import { receiptToCose, receiptFromCose } from "../../src/cose/receipt-cose.js";
@@ -771,6 +774,30 @@ test("H5: an invalid-UTF-8 / non-canonical payload with a VALID outer signature 
   const r = receiptFromCose(cose, b({ [kp.kid]: kp.publicKey }));
   assert.equal(r.ok, false, "a receipt that does not re-canonicalize to the signed bytes must be rejected");
   assert.match(r.reason ?? "", /canonical|re-canonicalize/i);
+});
+
+// ── strict-bytes corpus, COSE half: the whole-payload canonical check in isolation ─────────────────
+// conformance/vectors/strict-bytes/{canonical,extra-space}.cose carry the complete genesis receipt
+// of the shared corpus. The space in extra-space.cose was inserted BEFORE signing, so its outer COSE
+// signature AND the receipt's own native signature are genuine and only the payload canonical check
+// can refuse it (the H5 invalid-UTF-8 case above also alters a signed field, so it cannot isolate the
+// check). Authored expectations come from the corpus manifest.
+test("strict-bytes COSE: both envelopes authenticate; only the canonical payload is accepted as a receipt", () => {
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "conformance", "vectors", "strict-bytes");
+  const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")) as {
+    keyring: string;
+    cose: Array<{ file: string; sha256: string; coseSign1Verify: boolean; receiptFromCose: boolean }>;
+  };
+  assert.deepEqual(manifest.cose.map((c) => c.file).sort(), ["canonical.cose", "extra-space.cose"]);
+  const keyring = readFileSync(join(dir, manifest.keyring));
+  for (const c of manifest.cose) {
+    const cose = readFileSync(join(dir, c.file));
+    assert.equal(createHash("sha256").update(cose).digest("hex"), c.sha256, `${c.file}: bytes differ from the manifest digest`);
+    assert.equal(coseSign1Verify(cose, keyring).ok, c.coseSign1Verify, `${c.file}: outer COSE signature`);
+    const r = receiptFromCose(cose, keyring);
+    assert.equal(r.ok, c.receiptFromCose, `${c.file}: ${r.reason ?? "accepted"}`);
+    if (!c.receiptFromCose) assert.match(r.reason ?? "", /not canonical JCS/);
+  }
 });
 
 test("H5: a genuine receipt round-trips (the canonical check does not over-reject)", () => {

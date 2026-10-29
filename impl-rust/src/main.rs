@@ -13,15 +13,17 @@ mod jcs;
 mod json;
 mod keys;
 mod schema;
+mod strict_bytes;
 mod verify;
 
 use historical::verify_historical_chain;
 use json::Json;
 use std::process::exit;
+use strict_bytes::{admit_chain_bytes, valid_profile, PROFILE_STRICT_BYTES};
 use verify::{verify_chain, Status};
 
 const USAGE: &str =
-    "usage: noa-verify <receipts.json> [keyring.json] [--purpose current|historical] [--identity <m.json>] [--checkpoint <cp.json>] [--checkpoint-keyring <k.json>]";
+    "usage: noa-verify <receipts.json> [keyring.json] [--profile native|strict-bytes] [--purpose current|historical] [--identity <m.json>] [--checkpoint <cp.json>] [--checkpoint-keyring <k.json>]";
 
 /// Minimal JSON-string escape for the emitted `detail` (exit code is the contract; this is diagnostic).
 fn esc(s: &str) -> String {
@@ -53,11 +55,20 @@ fn run() -> i32 {
     let mut checkpoint_path: Option<String> = None;
     let mut checkpoint_keyring_path: Option<String> = None;
     let mut purpose = "current";
+    let mut profile: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
-        if a == "--purpose" {
+        if a == "--profile" {
+            // Closed set, exactly once: missing, unknown or repeated is usage (exit 4), never a silent default.
+            if profile.is_some() || i + 1 >= args.len() || !valid_profile(&args[i + 1]) {
+                eprintln!("{USAGE}");
+                return 4;
+            }
+            i += 1;
+            profile = Some(args[i].clone());
+        } else if a == "--purpose" {
             if i + 1 >= args.len() || (args[i + 1] != "current" && args[i + 1] != "historical") {
                 eprintln!("{USAGE}");
                 return 4;
@@ -123,10 +134,29 @@ fn run() -> i32 {
         return 4;
     }
 
+    let strict_bytes = profile.as_deref() == Some(PROFILE_STRICT_BYTES);
+    // strict-bytes covers current-use bare chains only.
+    if strict_bytes && purpose == "historical" {
+        eprintln!("{USAGE}");
+        return 4;
+    }
+
     // Parse every input file with the strict parser (parity with the TS CLI readJsonFile -> safeParse).
-    let receipts = match read_and_parse(&receipts_path) {
-        Ok(v) => v,
-        Err(e) => return emit_malformed(&e),
+    // strict-bytes: the receipts file's own bytes (`fs::read`) go through the gate unconverted, first.
+    let receipts = if strict_bytes {
+        let data = match std::fs::read(&receipts_path) {
+            Ok(d) => d,
+            Err(e) => return emit_malformed(&format!("{receipts_path}: {e}")),
+        };
+        match admit_chain_bytes(&data, PROFILE_STRICT_BYTES) {
+            Ok(v) => v,
+            Err(e) => return emit_malformed(&e),
+        }
+    } else {
+        match read_and_parse(&receipts_path) {
+            Ok(v) => v,
+            Err(e) => return emit_malformed(&e),
+        }
     };
     let keyring = match &keyring_path {
         Some(p) => match read_and_parse(p) {

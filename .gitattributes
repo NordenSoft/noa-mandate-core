@@ -1,0 +1,3 @@
+# The strict-bytes vectors are byte-exact fixtures (trailing LF/CRLF, BOM, invalid UTF-8 are the
+# cases under test): never let a checkout translate line endings or otherwise touch their bytes.
+conformance/vectors/strict-bytes/** -text

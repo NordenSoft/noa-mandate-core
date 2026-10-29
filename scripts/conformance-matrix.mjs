@@ -76,6 +76,10 @@ const VECTOR_CLASSES = [
   "malleability",
   "unicode",
   "tenant",
+  // The opt-in strict-bytes verifier profile (scripts/gen-vectors.ts section 12): whole-file canonical
+  // bytes under --profile strict-bytes, plus the same files' unchanged native verdicts. Bare-chain
+  // coverage only — the COSE half is TS-only (test/cose/cose.test.ts) and is never claimed here.
+  "strict-bytes",
 ];
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -92,6 +96,9 @@ const VECTOR_CLASSES = [
 // blind spot this matrix exists to prevent. See conformance/MATRIX.md for the per-class rationale
 // (e.g. why `sig.alg="rsa"` is "structural" but "sig fails under wrong pubkey" is "sig").
 const CLASS_RULES = [
+  // FIRST: a strict-bytes label also names its case (e.g. "wrong-signature-canonical", "(no keyring)"
+  // wording), and it must never be credited to the class that case name resembles.
+  [/strict-bytes/i, "strict-bytes"],
   [/scope\.tenant|requireTenantConsistency/i, "tenant"],
   [/key swap/i, "key-swap"],
   [/impersonation/i, "impersonation"],
@@ -305,6 +312,9 @@ function deriveOkFromValues(pyVal, langVal) {
  * `dup-key`.
  */
 const FILE_VECTOR_CLASS_RULES = [
+  // FIRST, for the reason given at CLASS_RULES: "strict-bytes/wrong-signature-canonical" is a profile
+  // case, not a `sig` vector. Every strict-bytes runner line carries the "strict-bytes" prefix.
+  [/strict-bytes/i, "strict-bytes"],
   // A non-receipt trust file (keyring/checkpoint/manifest) fed AS the receipts array must be
   // rejected structurally (non-array/non-chain top level) — the same property TS/Python's own
   // "keyring is a json list, not an object" structural check exercises. Checked FIRST because
@@ -779,6 +789,16 @@ function renderMarkdown({ table, totalTsPyResults, tsPyExitCode, fileLangRuns, o
       "unit tests, and the C# self-check (`impl-csharp/selfcheck`, run by `impl-csharp/conformance.sh`).",
   );
   lines.push("");
+  lines.push(
+    "**`strict-bytes` is the bare-chain profile only.** Its row counts the opt-in `--profile strict-bytes` " +
+      "cases of `conformance/vectors/strict-bytes/` and the same files' unchanged native verdicts; each Go, " +
+      "Rust and C# runner also holds both verifiers to the manifest's authored exit codes and " +
+      "`NON_CANONICAL_BYTES` discriminator on `STRICT-` lines, which this table does not count. The COSE half " +
+      "of that corpus (`canonical.cose`, `extra-space.cose`: the whole-payload canonical check) is exercised " +
+      "by the TypeScript suite only (`test/cose/cose.test.ts`). Python, Go, Rust and C# have no COSE " +
+      "implementation, so COSE coverage is unavailable for them: not passed, and claimed by no cell here.",
+  );
+  lines.push("");
   const header = ["Vector class", ...COLUMNS.map((c) => c.label)];
   lines.push(`| ${header.join(" | ")} |`);
   lines.push(`|${header.map(() => "---").join("|")}|`);
@@ -824,13 +844,13 @@ function renderMarkdown({ table, totalTsPyResults, tsPyExitCode, fileLangRuns, o
   );
   if (fileLangsAllEmpty.length > 0) lines.push("");
   lines.push(
-    "**Additional checks outside the 10-class taxonomy.** The file-based corpus also runs several " +
-      "checks that predate or fall outside these 10 classes — chain-linkage and genesis/prevHash " +
+    `**Additional checks outside the ${VECTOR_CLASSES.length}-class taxonomy.** The file-based corpus also runs several ` +
+      `checks that predate or fall outside these ${VECTOR_CLASSES.length} classes — chain-linkage and genesis/prevHash ` +
       "rules (`forged-genesis`, `relinked`), sequence rules (`seq-gap`, `dup-seq` — a duplicate " +
       "**sequence number**, not to be confused with `dup-key`'s duplicate **JSON object key**), a " +
       "chain-partition rule (`cross-chain-splice`), a seq-must-start-at-0 rule (`head-truncated`), " +
       "and an untrusted/absent signing key (`unknown-kid`). These are run and their result is real, " +
-      "but forcing them into one of the 10 classes above would assert a security property the " +
+      `but forcing them into one of the ${VECTOR_CLASSES.length} classes above would assert a security property the ` +
       "vector's own documented purpose (`scripts/gen-vectors.ts`) does not claim — so they are " +
       "counted here instead, never silently dropped:",
   );
@@ -1104,6 +1124,11 @@ function selftest() {
   check('the strict-ed25519 mixed-order key label classifies malleability', classifyFileVector("strict-ed25519/mixed-order pubkey") === "malleability");
   check('the strict-ed25519 x = 0 sign-bit key label classifies malleability', classifyFileVector("strict-ed25519/x0-sign y=1 non-canonical pubkey") === "malleability");
   check("the new malleability rule does not swallow any REAL current corpus label", ["golden/genesis + keyring", "attack/tampered-content + keyring", "attack/key-swap + keyring", "malformed/duplicate-key"].every((l) => classifyFileVector(l) !== "malleability"));
+  // strict-bytes: a profile case whose NAME resembles another class must still land in strict-bytes,
+  // and no existing label may be pulled into the new class.
+  check('"strict-bytes/wrong-signature-canonical native + keyring" IS strict-bytes, not sig', classifyFileVector("strict-bytes/wrong-signature-canonical native + keyring") === "strict-bytes");
+  check('"strict-bytes/wrong-signature-noncanonical with --profile strict-bytes [TS verifyChain]" IS strict-bytes', classify("strict-bytes/wrong-signature-noncanonical with --profile strict-bytes [TS verifyChain]") === "strict-bytes");
+  check("the strict-bytes rule does not swallow a strict-ed25519 or attack label", ["strict-ed25519/mixed-order pubkey", "attack/wrong-signature + keyring", "malformed/duplicate-key"].every((l) => classifyFileVector(l) !== "strict-bytes"));
 
   console.log("\nQA round 2 finding F5 — parser robustness (colon-in-detail) + the tenant re-attribution now mechanically pinned:");
   {
