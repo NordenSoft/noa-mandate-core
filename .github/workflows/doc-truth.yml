@@ -63,3 +63,34 @@ jobs:
       # GATED_DOCUMENTS (currently README.md and SECURITY.md) and exits non-zero if ANY of them fails.
       - name: Judge every gated document against the repository, the registry and a real shell
         run: node scripts/lint-doc-truth.mjs
+
+      # Every workflow file is a claim surface too: GitHub runs no job of a workflow file it cannot
+      # parse, so a broken file stops producing its checks without any red. actionlint reads every
+      # file under .github/workflows, syntax and expression checks only (shellcheck and pyflakes
+      # off). The one ignored message class is the Ubicloud runner label family, which actionlint
+      # does not know. ACTIONLINT_SHA256 is the linux_amd64 line of the release's own
+      # actionlint_1.7.12_checksums.txt, equal to GitHub's digest of that asset. actionlint exits 1
+      # on any finding, 2 on a bad option and 3 on a fatal error (its docs/usage.md, "Exit status").
+      - name: Lint every workflow file with actionlint (pinned release, sha256-verified)
+        shell: bash
+        timeout-minutes: 3
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          bin_dir="$RUNNER_TEMP/actionlint-${ACTIONLINT_VERSION}"
+          mkdir -p "$bin_dir"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --retry 2 --max-time 60 --output "$bin_dir/$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$bin_dir/$tarball" | sha256sum --check --strict -
+          tar -xzf "$bin_dir/$tarball" -C "$bin_dir" actionlint
+          "$bin_dir/actionlint" -version
+          mapfile -t workflows < <(find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
+          if [ "${#workflows[@]}" -eq 0 ]; then echo "::error::no workflow file under .github/workflows"; exit 1; fi
+          "$bin_dir/actionlint" -shellcheck= -pyflakes= \
+            -ignore 'label "ubicloud-standard-[0-9]+(-arm)?(-ubuntu-[0-9]+)?" is unknown' \
+            "${workflows[@]}"
+          echo "actionlint ${ACTIONLINT_VERSION}: ${#workflows[@]} workflow file(s) clean"
