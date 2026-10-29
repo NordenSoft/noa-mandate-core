@@ -110,7 +110,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
           package-manager-cache: false
 
       - name: Bind the release commit to its merged pull request and the live ruleset
@@ -123,7 +123,7 @@ jobs:
           # Every (context, app id) pair this controller was reviewed against. The live ruleset may
           # require more; a ruleset that no longer requires one of these pairs, including one that
           # points a pinned context at another app, is weakened, and the release stops.
-          MINIMUM_REQUIRED_CHECKS: '[["test (20)", 15368], ["test (24)", 15368], ["supply-chain-audit", 15368], ["dependency-topology", 15368], ["five-verifier-conformance", 15368], ["extended-package-tests", 15368], ["knockout-shards (1)", 15368], ["knockout-shards (2)", 15368], ["knockout-shards (3)", 15368], ["knockout-shards (4)", 15368], ["knockout-shards (5)", 15368], ["knockout-shards (6)", 15368], ["knockout-shards (7)", 15368], ["knockout-shards (8)", 15368], ["knockout-shards (9)", 15368], ["knockout-shards (10)", 15368], ["knockout-shards (11)", 15368], ["knockout-shards (12)", 15368], ["knockout-shards (13)", 15368], ["knockout-shards (14)", 15368], ["knockout-shards (15)", 15368], ["knockout-shards (16)", 15368], ["knockout-shards (17)", 15368], ["knockout-shards (18)", 15368], ["knockout-shards (19)", 15368], ["knockout-shards (20)", 15368], ["knockout-shards (21)", 15368], ["knockout-shards (22)", 15368], ["knockout-shards (23)", 15368], ["knockout-shards (24)", 15368], ["knockout-shards (25)", 15368], ["knockout-shards (26)", 15368], ["knockout-shards (27)", 15368], ["knockout-shards (28)", 15368], ["knockout-shards (29)", 15368], ["knockout-shards (30)", 15368], ["knockout-shards (31)", 15368], ["knockout-shards (32)", 15368], ["shapes", 15368], ["doc-truth", 15368], ["immutable-publish-artifact", 15368], ["pr-title", 15368], ["review", 15368]]'
+          MINIMUM_REQUIRED_CHECKS: '[["test (22)", 15368], ["test (24)", 15368], ["test (26)", 15368], ["supply-chain-audit", 15368], ["dependency-topology", 15368], ["five-verifier-conformance", 15368], ["extended-package-tests", 15368], ["knockout-shards (1)", 15368], ["knockout-shards (2)", 15368], ["knockout-shards (3)", 15368], ["knockout-shards (4)", 15368], ["knockout-shards (5)", 15368], ["knockout-shards (6)", 15368], ["knockout-shards (7)", 15368], ["knockout-shards (8)", 15368], ["knockout-shards (9)", 15368], ["knockout-shards (10)", 15368], ["knockout-shards (11)", 15368], ["knockout-shards (12)", 15368], ["knockout-shards (13)", 15368], ["knockout-shards (14)", 15368], ["knockout-shards (15)", 15368], ["knockout-shards (16)", 15368], ["knockout-shards (17)", 15368], ["knockout-shards (18)", 15368], ["knockout-shards (19)", 15368], ["knockout-shards (20)", 15368], ["knockout-shards (21)", 15368], ["knockout-shards (22)", 15368], ["knockout-shards (23)", 15368], ["knockout-shards (24)", 15368], ["knockout-shards (25)", 15368], ["knockout-shards (26)", 15368], ["knockout-shards (27)", 15368], ["knockout-shards (28)", 15368], ["knockout-shards (29)", 15368], ["knockout-shards (30)", 15368], ["knockout-shards (31)", 15368], ["knockout-shards (32)", 15368], ["shapes", 15368], ["doc-truth", 15368], ["immutable-publish-artifact", 15368], ["pr-title", 15368], ["review", 15368]]'
         run: |
           set -euo pipefail
           repo="$GITHUB_REPOSITORY"
@@ -270,7 +270,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image='docker.io/library/node@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a'
+          image='docker.io/library/node@sha256:fa52d1669505e29b58c042875b1d65c229e0787a3610fd52869b22b68e480853'
           docker pull --platform=linux/amd64 "$image"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = 'linux/amd64'
 
@@ -435,7 +435,7 @@ jobs:
     steps:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
           package-manager-cache: false
 
       - name: Install the exact npm CLI
@@ -541,7 +541,7 @@ jobs:
     steps:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
           package-manager-cache: false
 
       - name: Install the exact npm CLI

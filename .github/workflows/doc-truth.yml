@@ -44,7 +44,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
 
       # Anti-vacuity, and it runs FIRST. The fixtures are hermetic — no network, no filesystem, no
       # shell — and they run in BOTH directions: READMEs that must be rejected AND READMEs that must

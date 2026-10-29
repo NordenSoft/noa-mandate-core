@@ -49,6 +49,11 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Changed
 
+- Supported Node.js: every package now declares `engines.node` `>=22` (was `>=20`; `noa-signer`
+  was `>=20.19.0`). Node 20 reached end of life on 2026-04-30
+  ([schedule](https://github.com/nodejs/Release/blob/main/schedule.json)). CI tests Node 22, 24 and
+  26, the lines still in LTS or maintenance. No runtime code path changed.
+
 - `NON-CLAIMS.md` NC-S9.9: the reference gate no longer signs a caller's `action.reversible`. For an
   action whose adapter derives no reversibility (`noa.command.exec`) it signs `false` and refuses any
   other caller value (`422 REVERSIBLE_NOT_CALLER_SUPPLIED`); `false` there means the gate does not

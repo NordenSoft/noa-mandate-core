@@ -72,7 +72,7 @@ CI on every push — if one of them stops working, the build goes red.
 ```bash
 mkdir -p noa-quickstart && cd noa-quickstart
 npm init -y > /dev/null
-npm install noa-receipt        # no runtime dependencies; Node >= 20 stdlib only
+npm install noa-receipt        # no runtime dependencies; Node >= 22 stdlib only
 ```
 
 ```bash
