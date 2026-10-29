@@ -6,7 +6,7 @@
  * below is a TEST-ONLY fixture (its private key is intentionally public) — NEVER a real key.
  */
 
-import { mkdirSync, writeFileSync, rmSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildReceipt, buildCheckpoint, type Signer } from "../src/builder.js";
@@ -104,8 +104,27 @@ function write(rel: string, data: unknown): void {
   writeFileSync(path, text);
 }
 
+// VENDORED, NOT GENERATED: strict-bytes/attest-cc0/ holds an outside implementer's CC0 corpus
+// (mrpkk/attest conformance/ at e6ec711b5da367d91d1e8489106d406f47d98cd7; see its README.md). This
+// generator cannot re-derive those bytes, so the clean rebuild below carries them across unchanged and
+// refuses to run when an upstream file is missing or differs from its SHA-256 pin.
+const ATTEST_CC0 = "strict-bytes/attest-cc0";
+const ATTEST_CC0_FILES: ReadonlyArray<{ name: string; sha256: string | null }> = [
+  { name: "receipt-vectors.json", sha256: "d57b0673b7cf1320ab06ca84459e208855dc981ab7ca493d4425dcd800916261" },
+  { name: "LICENSE", sha256: "03c6c2d74d88d05f4a0ed216aeb088e22b828388ed82672cd426ac53a57d31bd" },
+  { name: "README.md", sha256: null },
+];
+const attestCc0 = ATTEST_CC0_FILES.map(({ name, sha256 }) => {
+  const bytes = readFileSync(join(OUT, ATTEST_CC0, name));
+  if (sha256 !== null && createHash("sha256").update(bytes).digest("hex") !== sha256) {
+    throw new Error(`${ATTEST_CC0}/${name}: the vendored bytes differ from the upstream SHA-256 pin`);
+  }
+  return { name, bytes };
+});
+
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
+for (const { name, bytes } of attestCc0) write(`${ATTEST_CC0}/${name}`, bytes);
 
 // --- valid fixtures ---
 write("valid-chain.json", chain);
