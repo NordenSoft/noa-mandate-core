@@ -7172,6 +7172,9 @@ export async function runIsolatedKnockoutSweep({
       terminalReasonCode: sweepDiagnosticCode(terminal?.reasonCode),
       terminalStatus: sweepDiagnosticCode(completed.status),
       workerExecutionMs: sweepDiagnosticInteger(workerDiagnostics?.workerExecutionMs),
+      originalProcessGroupDrainMs: sweepDiagnosticInteger(
+        workerDiagnostics?.originalProcessGroupDrainMs,
+      ),
       workerTimeoutMs,
       preparation: workerDiagnostics?.preparation ?? null,
       publication: workerDiagnostics?.publication ?? null,
