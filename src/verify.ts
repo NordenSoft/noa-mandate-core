@@ -1,11 +1,12 @@
 import type { Receipt, Checkpoint } from "./types.js";
 import { validateReceiptShapeParsed } from "./schema.js";
 import { receiptHashInput, checkpointHashInput } from "./canonicalize.js";
+import { canonicalize } from "./jcs.js";
 import { sha256Hex } from "./hash.js";
 import { verifyEd25519, type Keyring } from "./keys.js";
 import { signingMessage, RECEIPT_SIG_DOMAIN, CHECKPOINT_SIG_DOMAIN } from "./signing.js";
 import { nonNfcPaths, isNFC } from "./nfc.js";
-import { parseDocument } from "./bytes.js";
+import { parseDocument, parseDocumentBytes } from "./bytes.js";
 import { inertOptions, type OptionSchema } from "./opts.js";
 import { arrayPush, arrayIncludes, arrayEvery, arrayLength, arrayJoin, publishArray, bufferFrom, mapHas, mapGet, mapSet, newMap, newSet, objectCreateNull, objectKeys, objectGetOwnPropertyNames, isSafeInteger, arraySlice, setAdd, setHas, setSize, isArray, jsonStringify } from "./intrinsics.js";
 import { isSha256Hash, isRfc3339Instant, tsOrder, TS_ORDER_BACKWARDS, TS_ORDER_NOT_COMPARABLE } from "./scan.js";
@@ -107,7 +108,25 @@ export interface VerifyOptions {
    * both verify.
    */
   requireNFC?: boolean;
+  /**
+   * Verifier profile. **DEFAULT: `"native"`** — omitted and `"native"` are the same run: the parsed
+   * receipt values are verified and the received encoding is not judged (whitespace, member order
+   * and equivalent string escapes do not change the verdict).
+   *
+   * `"strict-bytes"` is opt-in and additionally requires the input to be the original bytes
+   * (`Uint8Array`) and those bytes to equal the UTF-8 JCS serialization of the parsed chain — the
+   * complete array in presented order, before any receipt check. A mismatch is `MALFORMED` with a
+   * `reason` starting `NON_CANONICAL_BYTES`; equality lets the ordinary native verification run
+   * unchanged, so it never establishes signature validity by itself. Any other value is `MALFORMED`.
+   */
+  profile?: VerifyProfile;
 }
+
+/** The closed set of verifier profiles (`VerifyOptions.profile`). */
+export type VerifyProfile = "native" | "strict-bytes";
+
+/** The stable discriminator a strict-bytes byte mismatch carries at the start of `reason`. */
+const NON_CANONICAL_BYTES = "NON_CANONICAL_BYTES";
 
 export interface VerifyResult {
   status: VerifyStatus;
@@ -382,6 +401,7 @@ export function verifyChain(receipts: Uint8Array | string, opts: VerifyOptions =
   const admitted = inertOptions<InertVerifyOptions>(VERIFY_OPTION_SCHEMA, opts, "options");
   if (!admitted.ok) return fail("MALFORMED", admitted.reason, null, 0);
   const o = admitted.value;
+  if (o.profile === "strict-bytes") return verifyStrictBytesChain(receipts, o);
 
   // The document. `parseDocument` bounds the BYTES, decodes UTF-8 fatally, and hands the text to
   // `safeParse` — so what comes back is a null-prototype, accessor-free, duplicate-key-free,
@@ -389,6 +409,32 @@ export function verifyChain(receipts: Uint8Array | string, opts: VerifyOptions =
   // `structuredClone` snapshots this function used to carry are gone rather than merely tightened.
   const parsed = parseDocument(receipts, "receipts");
   if (!parsed.ok) return fail("MALFORMED", parsed.reason, null, 0);
+  return verifyParsedChain(parsed.value, o);
+}
+
+/**
+ * THE STRICT-BYTES GATE (opt-in `profile: "strict-bytes"`). Runs after options admission and before
+ * every receipt check: bytes only, one fatal decode, one strict parse, then the WHOLE input must
+ * equal the UTF-8 JCS serialization of the parsed value — the complete array, in presented order,
+ * brackets and separators included. Nothing is trimmed, normalized, reordered or repaired first.
+ * Equality hands the SAME parsed value to the unchanged native verifier, so a canonical input gets
+ * exactly the native verdict; a mismatch outranks every later verdict (bad signature, no keyring).
+ *
+ * It does not use `receiptHashInput`: that pre-image deliberately omits `chain.hash` and
+ * `sig.value`, and this comparison covers every byte of the received file.
+ */
+function verifyStrictBytesChain(receipts: unknown, o: InertVerifyOptions): VerifyResult {
+  const parsed = parseDocumentBytes(receipts, "receipts");
+  if (!parsed.ok) return fail("MALFORMED", parsed.reason, null, 0);
+  let canonical: string;
+  try {
+    canonical = canonicalize(parsed.value);
+  } catch {
+    return fail("MALFORMED", `${NON_CANONICAL_BYTES}: receipts: the parsed input has no JCS serialization`, null, 0);
+  }
+  if (canonical !== parsed.text) {
+    return fail("MALFORMED", `${NON_CANONICAL_BYTES}: receipts: the input bytes are not the UTF-8 JCS serialization of the parsed chain`, null, 0);
+  }
   return verifyParsedChain(parsed.value, o);
 }
 
@@ -400,7 +446,11 @@ interface InertVerifyOptions {
   readonly maxReceipts?: number;
   readonly requireTenantConsistency?: boolean;
   readonly requireNFC?: boolean;
+  readonly profile?: VerifyProfile;
 }
+
+/** The closed profile set, owned and frozen here; `opts.ts` compares against it with `===`. */
+const VERIFY_PROFILES: readonly string[] = Object.freeze(["native", "strict-bytes"]);
 
 /** Mutable only while constructing a captured null-prototype internal record. */
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
@@ -419,6 +469,7 @@ const VERIFY_OPTION_SCHEMA: OptionSchema = Object.freeze(Object.assign(Object.cr
   maxReceipts: { kind: "count", max: DEFAULT_MAX_RECEIPTS },
   requireTenantConsistency: { kind: "boolean" },
   requireNFC: { kind: "boolean" },
+  profile: { kind: "enum", values: VERIFY_PROFILES },
 })) as OptionSchema;
 
 interface InertHistoricalVerifyOptions {

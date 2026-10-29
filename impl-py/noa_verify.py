@@ -14,8 +14,9 @@ It reimplements the frozen rules from the spec:
   - signing msg = b"NOA-Receipt-v0.1-sig:" ++ sha256(hash_input);  Ed25519-verified against the keyring.
   - public key  = base64(DER SPKI Ed25519) -> raw 32-byte key (fixed 12-byte SPKI prefix).
 
-Usage:  python3 noa_verify.py <receipts.json> [keyring.json]
+Usage:  python3 noa_verify.py <receipts.json> [keyring.json] [--profile native|strict-bytes]
 Exit:   0 VALID · 1 UNVERIFIED (no keyring) · 2 TAMPERED · 3 MALFORMED
+        (--profile strict-bytes: a receipts file that is not byte-for-byte JCS is 3, detail NON_CANONICAL_BYTES)
 """
 import sys, json, hashlib, base64
 
@@ -1067,21 +1068,69 @@ def verify_historical_chain(receipts, receipt_root, checkpoint=None, checkpoint_
         checkpoint["ts"],
     )
 
+# ── strict-bytes verifier profile (opt-in) ────────────────────────────────────
+# "native" (the default) verifies parsed values and never judges the received encoding. "strict-bytes"
+# additionally requires the ORIGINAL bytes of a bare chain file to equal UTF8(jcs(parsed array)) — the
+# complete array in presented order — before any receipt check. No BOM stripping, trimming, newline
+# translation or repair: the bytes are decoded once with the strict "utf-8" codec (which keeps a BOM as
+# U+FEFF, so the strict parser refuses it) and compared once. A mismatch is MALFORMED with a detail
+# starting NON_CANONICAL_BYTES; equality hands the same parsed value to the unchanged verify_chain.
+_PROFILES = ("native", "strict-bytes")
+NON_CANONICAL_BYTES = "NON_CANONICAL_BYTES"
+
+def admit_chain_bytes(data, profile="native"):
+    """Strict UTF-8 decode + strict parse of a chain file's bytes, then (strict-bytes only) whole-file
+    canonical equality. Returns (receipts, None) or (None, detail) — the detail of a refusal is MALFORMED."""
+    if profile not in _PROFILES:
+        return None, "profile must be native or strict-bytes"
+    if not isinstance(data, (bytes, bytearray)):
+        return None, "chain input must be the original bytes (bytes or bytearray), not text"
+    data = bytes(data)  # one snapshot: decode and comparison read the same bytes
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None, "input is not valid UTF-8"
+    try:
+        receipts = strict_load_text(text)
+    except Exception as e:
+        return None, str(e)
+    if profile == "strict-bytes":
+        try:
+            canonical = jcs(receipts).encode("utf-8")
+        except (ValueError, RecursionError):
+            return None, NON_CANONICAL_BYTES + ": receipts: the parsed input has no JCS serialization"
+        if canonical != data:
+            return None, NON_CANONICAL_BYTES + ": receipts: the input bytes are not the UTF-8 JCS serialization of the parsed chain"
+    return receipts, None
+
+def verify_chain_bytes(data, keyring=None, identity_manifest=None, checkpoint=None, warnings_out=None, profile="native"):
+    """Byte-entry wrapper of verify_chain: same verdicts, plus the opt-in strict-bytes gate (see above).
+    The trust inputs are parsed values, exactly as verify_chain takes them; their acceptance is unchanged."""
+    receipts, detail = admit_chain_bytes(data, profile)
+    if detail is not None:
+        return "MALFORMED", detail
+    return verify_chain(receipts, keyring, identity_manifest, checkpoint, warnings_out=warnings_out)
+
 _EXIT = {"VALID": 0, "UNVERIFIED": 1, "TAMPERED": 2, "MALFORMED": 3, "UNTRUSTED": 5}
 
 def _main(argv):
     args = argv[1:]
     receipts_path = keyring_path = identity_path = checkpoint_path = checkpoint_keyring_path = None
     purpose = "current"
+    profile = None
     i = 0
-    usage = "usage: noa_verify.py <receipts.json> [keyring.json] [--purpose current|historical] [--identity <m.json>] [--checkpoint <cp.json>] [--checkpoint-keyring <k.json>]\n"
+    usage = "usage: noa_verify.py <receipts.json> [keyring.json] [--profile native|strict-bytes] [--purpose current|historical] [--identity <m.json>] [--checkpoint <cp.json>] [--checkpoint-keyring <k.json>]\n"
     while i < len(args):
         a = args[i]
         # A TRAILING --identity/--checkpoint with NO following path: silently setting the path
         # to None would DROP the security control (the manifest / tail-truncation check) and the verifier would
         # return VALID (exit 0) — a fail-OPEN where the TS CLI returns usage (exit 4). Emit usage + exit 4 to
         # match the TS CLI: a malformed invocation never silently weakens enforcement.
-        if a == "--purpose":
+        if a == "--profile":
+            # Closed set, exactly once: missing, unknown or repeated is usage (exit 4), never a silent default.
+            if profile is not None or i + 1 >= len(args) or args[i + 1] not in _PROFILES: sys.stderr.write(usage); return 4
+            i += 1; profile = args[i]
+        elif a == "--purpose":
             if i + 1 >= len(args) or args[i + 1] not in ("current", "historical"): sys.stderr.write(usage); return 4
             i += 1; purpose = args[i]
         elif a == "--identity":
@@ -1106,12 +1155,21 @@ def _main(argv):
         sys.stderr.write(usage); return 4
     if checkpoint_keyring_path is not None and checkpoint_path is None:
         sys.stderr.write(usage); return 4
+    if profile == "strict-bytes" and purpose == "historical":  # strict-bytes covers current-use bare chains only
+        sys.stderr.write(usage); return 4
     try:
         # ALL input files (incl. the auxiliary trust files) go through the strict parser — parity with the
         # TS CLI (src/cli.ts readJsonFile -> safeParse). Plain json.load silently accepts duplicate keys
         # (last-wins), floats, and NaN/Infinity, which would make the documented T8 dup-key mitigation FALSE
         # for the keyring/identity/checkpoint and diverge from the TS reference.
-        receipts = strict_load_text(open(receipts_path).read())  # strict: dup-key/float/proto rejected
+        if profile == "strict-bytes":
+            # Binary read, no newline translation; the gate decodes, parses and compares these bytes once.
+            with open(receipts_path, "rb") as fh:
+                receipts, strict_detail = admit_chain_bytes(fh.read(), profile)
+            if strict_detail is not None:
+                print(json.dumps({"status": "MALFORMED", "detail": strict_detail})); return _EXIT["MALFORMED"]
+        else:
+            receipts = strict_load_text(open(receipts_path).read())  # strict: dup-key/float/proto rejected
         keyring = strict_load_text(open(keyring_path).read()) if keyring_path else None
         identity = strict_load_text(open(identity_path).read()) if identity_path else None
         checkpoint = strict_load_text(open(checkpoint_path).read()) if checkpoint_path else None

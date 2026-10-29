@@ -33,7 +33,7 @@ public readonly struct VerifyResult
 /// TS reference: structural validation, hash-chain integrity, Ed25519 signatures, per-agent key
 /// continuity, identity binding (UNTRUSTED), and checkpoint tail-truncation + §5b opener-binding.
 /// </summary>
-public static class Verifier
+public static partial class Verifier
 {
     private static readonly byte[] ReceiptDomain = Encoding.UTF8.GetBytes("NOA-Receipt-v0.1-sig:");
     private static readonly byte[] CheckpointDomain = Encoding.UTF8.GetBytes("NOA-Checkpoint-v0.1-sig:");
