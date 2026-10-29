@@ -20,6 +20,9 @@ All notable changes to `noa-receipt` are documented here. The format follows
   `conformance/receipt-vectors.json` at `e6ec711b`), vendored byte-exact with their CC0 notice under
   `conformance/vectors/strict-bytes/attest-cc0/`. The TypeScript and Python verifiers are held to each
   vector's own `expect_ok` under `--profile strict-bytes` (`impl-py/conformance.mjs` section 16).
+  `not_canonical` is held to the outcome its author stated, `MALFORMED` with the detail prefix
+  `NON_CANONICAL_BYTES` and exit 3, never to the status token alone. The corpus is bare-chain only and is
+  kept apart from the COSE envelope conformance.
 
 - Approval artifacts: the [vault verification profile](packages/approval-artifacts/vault-verification.md),
   six additional wire schemas and deterministic conformance vectors specify root-pinned

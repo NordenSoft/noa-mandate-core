@@ -994,11 +994,17 @@ expect("USAGE (--identity is the last token, no keyring) [PY verifier]", pyVerif
 // run: true must be VALID (exit 0); false must refuse the receipt's own bytes, TAMPERED (exit 2) or
 // MALFORMED (exit 3). UNVERIFIED/UNTRUSTED would mean the corpus key was not applied, so they fail. The
 // chain is "[" + text + "]" and the keyring maps the corpus kid to the SPKI form of its raw Ed25519 key.
+// A vector whose outcome the corpus author stated exactly (ATTEST_CC0_STATED) is held to that status token
+// AND its detail prefix AND (Python) its exit code, never to the status alone.
 {
   const ACD = join(import.meta.dirname, "..", "conformance", "vectors", "strict-bytes", "attest-cc0");
   const ATTEST_CC0_SHA256 = "d57b0673b7cf1320ab06ca84459e208855dc981ab7ca493d4425dcd800916261";
   const ATTEST_CC0_VECTORS = 12;
   const ATTEST_CC0_KID = "k1";
+  // The vendored file carries only expect_ok. The corpus author stated this vector's exact strict-bytes
+  // outcome (mrpkk/attest, 2026-10-29: "MALFORMED with NON_CANONICAL_BYTES at the start of detail and exit
+  // 3 -- not TAMPERED"); it agrees with docs/receipt-spec.md section 5 and is never read from a verifier run.
+  const ATTEST_CC0_STATED = { not_canonical: { status: "MALFORMED", detail: "NON_CANONICAL_BYTES", exit: 3 } };
   const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
   const EXIT = { VALID: 0, TAMPERED: 2, MALFORMED: 3 };
   const line = (label, ok, got, want) => {
@@ -1020,6 +1026,9 @@ expect("USAGE (--identity is the last token, no keyring) [PY verifier]", pyVerif
     vectors.length === ATTEST_CC0_VECTORS &&
     new Set(vectors.map((v) => v?.name)).size === ATTEST_CC0_VECTORS &&
     vectors.every((v) => typeof v?.name === "string" && /^[A-Za-z0-9_]+$/.test(v.name) && typeof v.text === "string" && typeof v.expect_ok === "boolean") &&
+    // Every stated outcome names a vendored vector and agrees with that vector's own expect_ok, so a
+    // renamed or dropped vector cannot leave its exact check silently unused.
+    Object.entries(ATTEST_CC0_STATED).every(([name, s]) => vectors.some((v) => v?.name === name && v.expect_ok === (s.status === "VALID"))) &&
     rawKey.length === 32;
   line(
     "strict-bytes attest-cc0 corpus is the vendored upstream file, SHA-256 pin and 12 named vectors [PY verifier]",
@@ -1033,22 +1042,44 @@ expect("USAGE (--identity is the last token, no keyring) [PY verifier]", pyVerif
   writeFileSync(acKeyringPath, acKeyringBytes);
   const want = (expectOk) => (expectOk ? "VALID" : "TAMPERED or MALFORMED");
   const refused = (status) => status === "TAMPERED" || status === "MALFORMED";
+  const leads = (text, prefix) => typeof text === "string" && text.startsWith(prefix);
   for (const v of shapeOk ? vectors : []) {
     const chainBytes = Buffer.concat([Buffer.from("[", "utf8"), Buffer.from(v.text, "utf8"), Buffer.from("]", "utf8")]);
     const file = join(dir, `attest-cc0-${v.name}.json`);
     writeFileSync(file, chainBytes);
+    const stated = Object.hasOwn(ATTEST_CC0_STATED, v.name) ? ATTEST_CC0_STATED[v.name] : null;
     const ts = verifyChain(new Uint8Array(chainBytes), { keyring: acKeyringBytes, profile: "strict-bytes" });
-    const tsOk = v.expect_ok ? ts.status === "VALID" : refused(ts.status);
-    line(`strict-bytes/attest-cc0/${v.name} with --profile strict-bytes [TS verifyChain]`, tsOk, ts.status, want(v.expect_ok));
+    const tsOk = stated
+      ? ts.status === stated.status && leads(ts.reason, stated.detail)
+      : v.expect_ok ? ts.status === "VALID" : refused(ts.status);
+    const tsLeadGot = stated && leads(ts.reason, stated.detail) ? ` ${stated.detail}` : "";
+    line(
+      `strict-bytes/attest-cc0/${v.name} with --profile strict-bytes [TS verifyChain]`,
+      tsOk,
+      `${ts.status}${tsLeadGot}`,
+      stated ? `${stated.status} ${stated.detail}` : want(v.expect_ok),
+    );
     const py = pyVerify(["--profile", "strict-bytes", file, acKeyringPath]);
     let pyStatus;
+    let pyDetail;
     try {
-      pyStatus = JSON.parse(py.out).status;
+      const parsed = JSON.parse(py.out);
+      pyStatus = parsed.status;
+      pyDetail = parsed.detail;
     } catch {
       pyStatus = undefined;
+      pyDetail = undefined;
     }
-    const pyOk = (v.expect_ok ? pyStatus === "VALID" : refused(pyStatus)) && py.code === EXIT[pyStatus];
-    line(`strict-bytes/attest-cc0/${v.name} with --profile strict-bytes [PY verifier]`, pyOk, `exit ${py.code} ${pyStatus}`, want(v.expect_ok));
+    const pyOk = stated
+      ? py.code === stated.exit && pyStatus === stated.status && leads(pyDetail, stated.detail)
+      : (v.expect_ok ? pyStatus === "VALID" : refused(pyStatus)) && py.code === EXIT[pyStatus];
+    const pyLeadGot = stated && leads(pyDetail, stated.detail) ? ` ${stated.detail}` : "";
+    line(
+      `strict-bytes/attest-cc0/${v.name} with --profile strict-bytes [PY verifier]`,
+      pyOk,
+      `exit ${py.code} ${pyStatus}${pyLeadGot}`,
+      stated ? `exit ${stated.exit} ${stated.status} ${stated.detail}` : want(v.expect_ok),
+    );
   }
 }
 

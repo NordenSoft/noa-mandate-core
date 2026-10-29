@@ -14,6 +14,8 @@ the opt-in `strict-bytes` profile.
 Both files are byte-for-byte the upstream files (their git blob ids equal the upstream tree's). They are vendored,
 not generated: `scripts/gen-vectors.ts` carries them across its clean rebuild of `conformance/vectors/` and refuses
 to run when either differs from the pin above. Do not edit them; a newer upstream corpus is vendored as a new pin.
+Re-checked on 2026-10-29 against upstream `main` at `08c247d9ece490f243ca2bf4305dbe0fbb44635b`: both files
+are unchanged there (same git blob ids and SHA-256), so the pin above stands.
 
 ## Licence
 
@@ -36,3 +38,16 @@ The expectation is the corpus's own `expect_ok`, read from the vendored file and
 `not_canonical` is the vector that needs the profile: its signature and hash are valid, but its bytes are not
 the canonical serialization, so `--profile strict-bytes` refuses it while the default `native` profile does not
 judge the encoding.
+
+The vendored file states only `expect_ok`. For `not_canonical` the corpus author also stated the exact outcome
+under strict-bytes: `MALFORMED`, `detail` (TypeScript `reason`) starting `NON_CANONICAL_BYTES`, exit 3, not
+`TAMPERED`. Section 16 holds both verifiers to that status token and that detail prefix, and the Python verifier
+to that exit code as well; it never compares the status alone for this vector. The expectation is written in the
+runner (`ATTEST_CC0_STATED`), not taken from a verifier run, and agrees with `docs/receipt-spec.md` section 5.
+
+## Scope: bare chain path only
+
+Every vector here is a bare receipt with no COSE envelope, so the corpus exercises the bare-chain verification
+path only. It is kept apart from the envelope conformance (the COSE vectors `canonical.cose` and
+`extra-space.cose` one directory up, run by `test/cose/cose.test.ts`), so a failure here names the chain layer,
+not the envelope.
