@@ -187,10 +187,49 @@ export type ParseResult = { readonly ok: true; readonly value: unknown } | { rea
 export function parseDocument(input: unknown, what: string): ParseResult {
   const decoded = decodeDocument(input, what);
   if (!decoded.ok) return decoded;
+  return parseDecodedText(decoded.text, what);
+}
+
+/** The one `safeParse` call both parse routes share, so their diagnostics cannot drift apart. */
+function parseDecodedText(text: string, what: string): ParseResult {
   try {
-    return { ok: true, value: safeParse(decoded.text, { maxLength: MAX_INPUT_BYTES }) };
+    return { ok: true, value: safeParse(text, { maxLength: MAX_INPUT_BYTES }) };
   } catch (e) {
     if (isSafeJsonError(e)) return { ok: false, reason: `${what}: ${(e as SafeJsonError).message}` };
     return { ok: false, reason: `${what}: input could not be parsed` };
   }
+}
+
+export type BytesParseResult =
+  | { readonly ok: true; readonly value: unknown; readonly text: string }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * BYTES-ONLY DECODE THEN STRICT-PARSE, for the opt-in strict-bytes verifier profile.
+ *
+ * Same decode and same parse as `parseDocument`, with two differences that are the whole point:
+ * a `string` is refused (the profile compares the ORIGINAL bytes, and a caller-decoded string has
+ * already lost them), and the decoded text is returned beside the value, so the caller compares the
+ * one captured decode with the canonical form instead of reading the caller's buffer a second time.
+ *
+ * Comparing that text with the canonical text is the byte comparison: the decode is fatal (no
+ * substitution) and BOM-preserving (nothing stripped), so it is injective on the inputs it accepts,
+ * and the canonical text is well-formed Unicode, whose UTF-8 encoding is unique. Text equality
+ * therefore holds exactly when `bytes == UTF8(canonical)`.
+ *
+ * ONE READ OF THE CALLER'S BUFFER (security round 1, finding 1). A `Uint8Array` is mutable, so its
+ * CONTENT is read exactly once, by the decode; the parse and the caller's comparison both use the
+ * returned `text`, an immutable string. No later step reads the buffer again, so a rewrite of the
+ * caller's bytes after the decode cannot pair one parse tree with different compared bytes. (The
+ * `byteLength` read before the decode is the size bound only, never compared.)
+ */
+export function parseDocumentBytes(input: unknown, what: string): BytesParseResult {
+  if (!isUint8Array(input)) {
+    return { ok: false, reason: `${what}: the strict-bytes profile requires the original input bytes (Uint8Array), not text or an object` };
+  }
+  const decoded = decodeDocument(input, what);
+  if (!decoded.ok) return decoded;
+  const parsed = parseDecodedText(decoded.text, what);
+  if (!parsed.ok) return parsed;
+  return { ok: true, value: parsed.value, text: decoded.text };
 }

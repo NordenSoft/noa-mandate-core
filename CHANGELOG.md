@@ -8,6 +8,14 @@ All notable changes to `noa-receipt` are documented here. The format follows
 
 ### Added
 
+- Verifiers: an opt-in `strict-bytes` profile in all five implementations (`--profile native|strict-bytes`;
+  TS `verifyChain(bytes, { profile })`, Python `verify_chain_bytes`, Go `verifyChainBytes`, Rust
+  `verify_chain_bytes`, C# `Verifier.VerifyChainBytes`). It requires a bare chain file to be byte-for-byte
+  the UTF-8 JCS serialization of its parsed array, in presented order, before any receipt check; a mismatch
+  is `MALFORMED` (exit 3) with the discriminator `NON_CANONICAL_BYTES`. The default `native` profile, its
+  verdicts, output and exit codes are unchanged (`docs/receipt-spec.md` §5, `VERSIONING.md`). Shared
+  byte-exact vectors with authored expectations: `conformance/vectors/strict-bytes/`.
+
 - Approval artifacts: the [vault verification profile](packages/approval-artifacts/vault-verification.md),
   six additional wire schemas and deterministic conformance vectors specify root-pinned
   authority, action binding, approval quorum and atomic single-use consumption.

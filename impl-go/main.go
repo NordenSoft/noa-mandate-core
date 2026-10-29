@@ -42,11 +42,20 @@ func run(argv []string) (code int) {
 	args := argv[1:]
 	var receiptsPath, keyringPath, identityPath, checkpointPath, checkpointKeyringPath string
 	purpose := "current"
-	const usage = "usage: noa-verify <receipts.json> [keyring.json] [--purpose current|historical] [--identity <m.json>] [--checkpoint <cp.json>] [--checkpoint-keyring <k.json>]\n"
+	profile := ""
+	const usage = "usage: noa-verify <receipts.json> [keyring.json] [--profile native|strict-bytes] [--purpose current|historical] [--identity <m.json>] [--checkpoint <cp.json>] [--checkpoint-keyring <k.json>]\n"
 
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
+		case a == "--profile":
+			// Closed set, exactly once: missing, unknown or repeated is usage (exit 4), never a silent default.
+			if profile != "" || i+1 >= len(args) || !validProfile(args[i+1]) {
+				fmt.Fprint(os.Stderr, usage)
+				return 4
+			}
+			i++
+			profile = args[i]
 		case a == "--purpose":
 			if i+1 >= len(args) || (args[i+1] != "current" && args[i+1] != "historical") {
 				fmt.Fprint(os.Stderr, usage)
@@ -103,9 +112,25 @@ func run(argv []string) (code int) {
 		fmt.Fprint(os.Stderr, usage)
 		return 4
 	}
+	// strict-bytes covers current-use bare chains only.
+	if profile == profileStrictBytes && purpose == "historical" {
+		fmt.Fprint(os.Stderr, usage)
+		return 4
+	}
 
-	receipts, err := loadFile(receiptsPath)
-	if err != nil {
+	var receipts *Value
+	var err error
+	if profile == profileStrictBytes {
+		// The retained os.ReadFile bytes go through the gate unconverted, before any other input is read.
+		data, readErr := os.ReadFile(receiptsPath)
+		if readErr != nil {
+			return malformed(readErr.Error())
+		}
+		var detail string
+		if receipts, detail = admitChainBytes(data, profile); detail != "" {
+			return malformed(detail)
+		}
+	} else if receipts, err = loadFile(receiptsPath); err != nil {
 		return malformed(err.Error())
 	}
 	var keyring, identity, checkpoint, checkpointKeyring *Value

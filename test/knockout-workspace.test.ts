@@ -541,6 +541,7 @@ const workspace = await import(
     options?: { commandTimeoutMs?: number; gitExecutable?: string },
   ) => SourceSnapshot;
   knockoutWorkspaceFailureDiagnostics: (error: unknown) => WorkspaceFailureDiagnostics | null;
+  knockoutWorkspaceOperationDiagnostics: (value: unknown) => Record<string, unknown> | null;
 };
 const knockoutRunner = await import(
   pathToFileURL(path.join(repositoryRoot, "scripts/lib/knockout-runner.mjs")).href
@@ -14766,6 +14767,398 @@ test("Phase 2 worker timeout rejects active close and reaps a stubborn original 
     removeFixturePath(fixture.source);
     removeFixturePath(fixture.custody);
   }
+});
+
+// A clean worker, optionally leaving one same-group descendant behind. The result is written first,
+// so FD 3 and FD 4 are already closed and the descendant holds no supervisor pipe: the leader's
+// close is observed while the descendant is still alive. The leader exits once the descendant is
+// ready. Without a descendant the original group is empty when the leader closes.
+function groupDrainWorkerSource(descendantBody: string[] | null): string {
+  return [
+    "import { spawn } from 'node:child_process';",
+    "import fs from 'node:fs';",
+    "import { claimArmWorkerCapabilityFromFd, writeArmWorkerResultToFd } from './knockout-workspace.mjs';",
+    "const capability = claimArmWorkerCapabilityFromFd();",
+    "const wait = new Int32Array(new SharedArrayBuffer(4));",
+    "writeArmWorkerResultToFd(capability, {",
+    "  observation: { operation: 'ATTEST_ARM', role: capability.role, workspaceBound: true },",
+    "  status: 'COMPLETE',",
+    "});",
+    ...(descendantBody === null ? [] : [
+      `const descendant = spawn(process.execPath, ['-e', ${JSON.stringify(descendantBody.join("\n"))}], {`,
+      "  detached: false,",
+      "  stdio: 'ignore',",
+      "});",
+      "fs.writeFileSync('group-drain-processes.json', JSON.stringify({ descendantPid: descendant.pid, workerPid: process.pid }));",
+      "const readyDeadline = Date.now() + 20000;",
+      "while (!fs.existsSync('group-drain-descendant.ready') && Date.now() < readyDeadline) Atomics.wait(wait, 0, 0, 5);",
+      "if (!fs.existsSync('group-drain-descendant.ready')) process.exit(3);",
+    ]),
+    "process.exit(0);",
+  ].join("\n");
+}
+
+// The descendant records a SIGTERM (whether it then exits or ignores it) and a natural exit.
+function groupDrainDescendantBody(onSigterm: string, naturalExit: string[]): string[] {
+  return [
+    "const fs = require('node:fs');",
+    `process.on('SIGTERM', () => { fs.writeFileSync('group-drain-descendant.sigterm', ''); ${onSigterm} });`,
+    "fs.writeFileSync('group-drain-descendant.ready', '');",
+    ...naturalExit,
+  ];
+}
+
+type GroupDrainTerminal = {
+  lifecycle: {
+    directChildClosed: boolean;
+    exitCode: number | null;
+    originalProcessGroupAbsent: boolean;
+    signal: string | null;
+    timedOut: boolean;
+  };
+  reasonCode: string;
+  status: string;
+  workerResult: { accepted: boolean; status: string | null };
+};
+
+// Intercepts the supervisor's kill(-pid, 0) group probes while runArmWorker runs. `real` performs
+// the actual probe (returns true or throws its real error); the hook returns true or throws.
+type GroupProbeHook = (context: { call: number; real: () => true; workspaceRoot: string }) => true;
+
+// A controllable monotonic clock: `frozenNs` (when set) replaces process.hrtime.bigint(), and
+// `armedDeadlineNs` is the supervisor's exact worker deadline, read from the clock value that was
+// current when the worker timeout of `timeoutMs` was armed.
+type GroupDrainClock = {
+  armedDeadlineNs: bigint | null;
+  frozenNs: bigint | null;
+  lastReadingNs: bigint;
+  onArmed: ((clock: GroupDrainClock) => void) | null;
+};
+
+async function runGroupDrainWorkerCase(options: {
+  armId: string;
+  clock?: GroupDrainClock;
+  groupProbe?: GroupProbeHook;
+  timeoutMs: number;
+  workerSource: string;
+}): Promise<{
+  descendantAbsent: boolean;
+  drainMs: unknown;
+  naturalExit: boolean;
+  sigterm: boolean;
+  status: string;
+  terminal: GroupDrainTerminal;
+}> {
+  const fixture = minimalCaptureFixture(`phase2-${options.armId}`);
+  const originalKill = process.kill;
+  const clockDescriptor = Object.getOwnPropertyDescriptor(process.hrtime, "bigint");
+  assert.ok(clockDescriptor);
+  const originalClock = process.hrtime.bigint;
+  const timerDescriptor = Object.getOwnPropertyDescriptor(globalThis, "setTimeout");
+  assert.ok(timerDescriptor);
+  const originalSetTimeout = globalThis.setTimeout;
+  let captured: Capture | null = null;
+  let cooperativeLease: CooperativeSourceLease | null = null;
+  let plan: ArmPlan | null = null;
+  let arm: DisposableArm | null = null;
+  let terminal = false;
+  let workerPid: number | null = null;
+  let descendantPid: number | null = null;
+  let released: { retainedPrivateRoots: RetainedPrivateRoot[] } | null = null;
+  try {
+    const workerSha256 = installArmWorkerFixture(
+      fixture.source,
+      `install ${options.armId} worker`,
+      options.workerSource,
+    );
+    const subject = armWorkerSubject(workerSha256);
+    captured = workspace.captureAndSealCandidate({
+      custodyRoot: fixture.custody,
+      maxAttempts: 1,
+      sourceRoot: fixture.source,
+    });
+    const sourceLease = workspace.acquireSourceLease(workspace.openKnockoutCustody(captured, {
+      maxRetainedArms: 1,
+      maxRetainedBytes: 64 * 1024 * 1024,
+    }));
+    cooperativeLease = await workspace.acquireCooperativeSourceLease(sourceLease);
+    plan = workspace.admitArmPlan(cooperativeLease, {
+      arms: [{
+        armId: options.armId,
+        role: "SELFTEST",
+        subjectSha256: armWorkerSubjectSha256(subject),
+      }],
+    });
+    arm = workspace.materializeArm(plan, options.armId);
+    const workspaceRoot = arm.workspaceRoot;
+    const clock = options.clock;
+    if (clock !== undefined) {
+      Object.defineProperty(process.hrtime, "bigint", {
+        ...clockDescriptor,
+        value: () => {
+          clock.lastReadingNs = clock.frozenNs ?? originalClock();
+          return clock.lastReadingNs;
+        },
+      });
+      Object.defineProperty(globalThis, "setTimeout", {
+        ...timerDescriptor,
+        value: (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+          if (delay === options.timeoutMs && clock.armedDeadlineNs === null) {
+            clock.armedDeadlineNs = clock.lastReadingNs + BigInt(options.timeoutMs) * 1_000_000n;
+            clock.onArmed?.(clock);
+          }
+          return originalSetTimeout(callback, delay, ...args);
+        },
+      });
+    }
+    const groupProbe = options.groupProbe;
+    let probeCalls = 0;
+    if (groupProbe !== undefined) {
+      process.kill = ((pid: number, signal?: string | number) => {
+        if (pid < 0 && signal === 0) {
+          probeCalls += 1;
+          return groupProbe({
+            call: probeCalls,
+            real: () => originalKill.call(process, pid, 0),
+            workspaceRoot,
+          });
+        }
+        return originalKill.call(process, pid, signal);
+      }) as typeof process.kill;
+    }
+    let result;
+    try {
+      result = await workspace.runArmWorker(cooperativeLease, arm, {
+        subject,
+        timeoutMs: options.timeoutMs,
+      });
+    } finally {
+      process.kill = originalKill;
+    }
+    terminal = true;
+    if (groupProbe !== undefined) assert.ok(probeCalls > 0, "the group-probe hook never ran");
+    const processMarker = path.join(arm.workspaceRoot, "group-drain-processes.json");
+    let descendantAbsent = true;
+    if (fs.existsSync(processMarker)) {
+      const processIds = JSON.parse(fs.readFileSync(processMarker, "utf8")) as {
+        descendantPid: number;
+        workerPid: number;
+      };
+      workerPid = processIds.workerPid;
+      descendantPid = processIds.descendantPid;
+      assert.equal(Number.isSafeInteger(descendantPid) && descendantPid > 1, true);
+      const processExitDeadline = Date.now() + 2_000;
+      descendantAbsent = false;
+      while (!descendantAbsent && Date.now() < processExitDeadline) {
+        try { process.kill(descendantPid, 0); }
+        catch (error) { descendantAbsent = (error as NodeJS.ErrnoException).code === "ESRCH"; }
+        if (!descendantAbsent) await new Promise((resolve) => originalSetTimeout(resolve, 25));
+      }
+    }
+    const outcome = {
+      descendantAbsent,
+      drainMs: workspace.knockoutWorkspaceOperationDiagnostics(result)?.originalProcessGroupDrainMs,
+      naturalExit: fs.existsSync(path.join(arm.workspaceRoot, "group-drain-descendant.natural-exit")),
+      sigterm: fs.existsSync(path.join(arm.workspaceRoot, "group-drain-descendant.sigterm")),
+      status: result.status,
+      terminal: result.terminalPublication.terminal as unknown as GroupDrainTerminal,
+    };
+    assert.equal(result.originalProcessGroupAbsent, true);
+    released = (await workspace.closeCooperativeSourceLease(cooperativeLease)).sourceRelease;
+    cooperativeLease = null;
+    return outcome;
+  } finally {
+    process.kill = originalKill;
+    Object.defineProperty(globalThis, "setTimeout", timerDescriptor);
+    Object.defineProperty(process.hrtime, "bigint", clockDescriptor);
+    if (!terminal && arm !== null && descendantPid === null) {
+      try {
+        descendantPid = (JSON.parse(fs.readFileSync(
+          path.join(arm.workspaceRoot, "group-drain-processes.json"),
+          "utf8",
+        )) as { descendantPid: number }).descendantPid;
+      } catch {}
+    }
+    if (!terminal && workerPid !== null && workerPid > 1) {
+      try { process.kill(-workerPid, "SIGKILL"); }
+      catch {}
+    }
+    if (!terminal && descendantPid !== null && descendantPid > 1) {
+      try { process.kill(descendantPid, "SIGKILL"); }
+      catch {}
+    }
+    if (cooperativeLease !== null) {
+      if (!terminal && arm !== null) {
+        try { workspace.cancelMaterializedArm(cooperativeLease, arm, "TEST_ABORT"); }
+        catch {}
+      } else if (plan !== null && arm === null) {
+        try { workspace.cancelAdmittedArm(plan, options.armId, "TEST_ABORT"); }
+        catch {}
+      }
+      try { released = (await workspace.closeCooperativeSourceLease(cooperativeLease)).sourceRelease; }
+      catch {}
+    }
+    cleanupReportedScratchRoots(released?.retainedPrivateRoots ?? captured?.retainedPrivateRoots ?? []);
+    removeFixturePath(fixture.source);
+    removeFixturePath(fixture.custody);
+  }
+}
+
+function newGroupDrainClock(onArmed: GroupDrainClock["onArmed"]): GroupDrainClock {
+  return { armedDeadlineNs: null, frozenNs: null, lastReadingNs: 0n, onArmed };
+}
+
+const groupDrainCleanLifecycle = Object.freeze({
+  directChildClosed: true,
+  exitCode: 0,
+  originalProcessGroupAbsent: true,
+  signal: null,
+  timedOut: false,
+});
+
+test("Phase 2 supervisor drains a same-group descendant that exits naturally after a clean leader close", async () => {
+  // The descendant exits only after the supervisor's first group probe has seen it alive, so an
+  // immediate classification would refuse this clean result; the drain must wait for it instead.
+  let firstProbeSawGroup = false;
+  const outcome = await runGroupDrainWorkerCase({
+    armId: "group-drain-natural",
+    groupProbe: ({ real, workspaceRoot }) => {
+      const present = real();
+      if (!firstProbeSawGroup) {
+        firstProbeSawGroup = true;
+        fs.writeFileSync(path.join(workspaceRoot, "group-drain-release"), "", { mode: 0o600 });
+      }
+      return present;
+    },
+    timeoutMs: 30_000,
+    workerSource: groupDrainWorkerSource(groupDrainDescendantBody("process.exit(0);", [
+      "const started = Date.now();",
+      "const poll = setInterval(() => {",
+      "  if (fs.existsSync('group-drain-release')) {",
+      "    clearInterval(poll);",
+      "    setTimeout(() => { fs.writeFileSync('group-drain-descendant.natural-exit', ''); process.exit(0); }, 100);",
+      "  } else if (Date.now() - started > 20000) { process.exit(0); }",
+      "}, 5);",
+    ])),
+  });
+  assert.equal(firstProbeSawGroup, true, "the first group probe did not observe the live descendant");
+  assert.equal(outcome.naturalExit, true, "descendant did not exit on its own");
+  assert.equal(outcome.sigterm, false, "a termination signal reached a naturally draining group");
+  assert.equal(outcome.descendantAbsent, true);
+  assert.equal(Number.isSafeInteger(outcome.drainMs) && (outcome.drainMs as number) < 2_000, true);
+  assert.equal(outcome.status, "COMPLETE");
+  assert.equal(outcome.terminal.status, "COMPLETE");
+  assert.equal(outcome.terminal.reasonCode, "WORKER_COMPLETE");
+  assert.equal(outcome.terminal.workerResult.accepted, true);
+  assert.equal(outcome.terminal.workerResult.status, "COMPLETE");
+  assert.deepEqual(outcome.terminal.lifecycle, groupDrainCleanLifecycle);
+});
+
+test("Phase 2 supervisor refuses a same-group descendant that outlives the drain and ignores SIGTERM", async () => {
+  const outcome = await runGroupDrainWorkerCase({
+    armId: "group-drain-lingering",
+    timeoutMs: 30_000,
+    workerSource: groupDrainWorkerSource(groupDrainDescendantBody("", [
+      "setTimeout(() => { fs.writeFileSync('group-drain-descendant.natural-exit', ''); process.exit(0); }, 30000);",
+    ])),
+  });
+  // The full natural drain elapsed before classification; only SIGKILL then emptied the group,
+  // and that forced cleanup did not clear the refusal.
+  assert.equal(Number.isSafeInteger(outcome.drainMs) && (outcome.drainMs as number) >= 2_000, true);
+  assert.equal(outcome.sigterm, true, "descendant never received the post-drain SIGTERM");
+  assert.equal(outcome.naturalExit, false);
+  assert.equal(outcome.descendantAbsent, true, "SIGTERM-ignoring descendant survived the SIGKILL cleanup");
+  assert.equal(outcome.status, "INDETERMINATE");
+  assert.equal(outcome.terminal.status, "INDETERMINATE");
+  assert.equal(outcome.terminal.reasonCode, "ORIGINAL_PROCESS_GROUP_SURVIVED_LEADER");
+  assert.equal(outcome.terminal.workerResult.accepted, false);
+  assert.equal(outcome.terminal.workerResult.status, "COMPLETE");
+  assert.deepEqual(outcome.terminal.lifecycle, groupDrainCleanLifecycle);
+});
+
+test("Phase 2 supervisor latches the worker timeout when the group drain exhausts the worker budget", async () => {
+  // Controlled clock: the drain starts 500 ms before the exact worker deadline (inside the 2 s
+  // grace), and the first probe still sees the group while the clock passes the deadline. The
+  // real timer cannot fire in this window, so the expiry must be latched as WORKER_TIMEOUT before
+  // the timer is cleared; a grace-only drain would instead accept the next (absent) probe.
+  const timeoutMs = 29_437;
+  const clock = newGroupDrainClock((armed) => {
+    armed.frozenNs = armed.armedDeadlineNs! - 500_000_000n;
+  });
+  const outcome = await runGroupDrainWorkerCase({
+    armId: "group-drain-budget",
+    clock,
+    groupProbe: ({ call, real }) => {
+      if (call === 1) {
+        clock.frozenNs = clock.armedDeadlineNs! + 100_000_000n;
+        return true;
+      }
+      return real();
+    },
+    timeoutMs,
+    workerSource: groupDrainWorkerSource(null),
+  });
+  assert.ok(clock.armedDeadlineNs !== null, "the worker timeout was never armed on the controlled clock");
+  assert.equal(outcome.status, "INDETERMINATE");
+  assert.equal(outcome.terminal.status, "INDETERMINATE");
+  assert.equal(outcome.terminal.reasonCode, "WORKER_TIMEOUT");
+  assert.equal(outcome.terminal.workerResult.accepted, false);
+  assert.equal(outcome.terminal.workerResult.status, "COMPLETE");
+  assert.deepEqual(outcome.terminal.lifecycle, { ...groupDrainCleanLifecycle, timedOut: true });
+});
+
+test("Phase 2 supervisor refuses an absence first observed after the drain deadline", async () => {
+  // Controlled clock: the group is present 10 ms before the 2 s grace ends and the next (delayed)
+  // poll observes ESRCH only at 2,005 ms. Absence that is not proven by the deadline must refuse.
+  const clock = newGroupDrainClock((armed) => {
+    armed.frozenNs = armed.lastReadingNs;
+  });
+  let drainStartNs: bigint | null = null;
+  const outcome = await runGroupDrainWorkerCase({
+    armId: "group-drain-late-esrch",
+    clock,
+    groupProbe: ({ call, real }) => {
+      if (call === 1) {
+        drainStartNs = clock.frozenNs;
+        clock.frozenNs = drainStartNs! + 1_990_000_000n;
+        return true;
+      }
+      if (call === 2) {
+        clock.frozenNs = drainStartNs! + 2_005_000_000n;
+        throw Object.assign(new Error("injected late ESRCH"), { code: "ESRCH" });
+      }
+      return real();
+    },
+    timeoutMs: 29_431,
+    workerSource: groupDrainWorkerSource(null),
+  });
+  assert.ok(drainStartNs !== null);
+  assert.equal(outcome.status, "INDETERMINATE");
+  assert.equal(outcome.terminal.status, "INDETERMINATE");
+  assert.equal(outcome.terminal.reasonCode, "ORIGINAL_PROCESS_GROUP_SURVIVED_LEADER");
+  assert.equal(outcome.terminal.workerResult.accepted, false);
+  assert.equal(outcome.terminal.workerResult.status, "COMPLETE");
+  assert.deepEqual(outcome.terminal.lifecycle, groupDrainCleanLifecycle);
+});
+
+test("Phase 2 supervisor refuses at once when a drain probe is uncertain", async () => {
+  // EPERM is not absence: the drain latches the refusal immediately, so the later real ESRCH can
+  // no longer turn this clean result into acceptance.
+  const outcome = await runGroupDrainWorkerCase({
+    armId: "group-drain-uncertain",
+    groupProbe: ({ call, real }) => {
+      if (call === 1) throw Object.assign(new Error("injected EPERM"), { code: "EPERM" });
+      return real();
+    },
+    timeoutMs: 30_000,
+    workerSource: groupDrainWorkerSource(null),
+  });
+  assert.equal(outcome.status, "INDETERMINATE");
+  assert.equal(outcome.terminal.status, "INDETERMINATE");
+  assert.equal(outcome.terminal.reasonCode, "ORIGINAL_PROCESS_GROUP_SURVIVED_LEADER");
+  assert.equal(outcome.terminal.workerResult.accepted, false);
+  assert.equal(outcome.terminal.workerResult.status, "COMPLETE");
+  assert.deepEqual(outcome.terminal.lifecycle, groupDrainCleanLifecycle);
 });
 
 test("Phase 2 cooperative close reopens every worker result and terminal before releasing authority", async () => {

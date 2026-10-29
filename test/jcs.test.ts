@@ -1,6 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { canonicalize, JcsError } from "../src/jcs.js";
+import { safeParse } from "../src/safe-json.js";
+
+// The shared literal-bytes pin (conformance/vectors/strict-bytes/jcs-literal-*.json), consumed by all
+// five canonicalizers: astral-before-U+E000 key order, short escapes, lowercase \u00XX controls, a
+// literal DEL and "/", literal non-ASCII, decomposed text kept decomposed, and the safe-integer bounds.
+test("JCS literal bytes: the shared strict-bytes input canonicalizes to the authored expected bytes", () => {
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "conformance", "vectors", "strict-bytes");
+  const input = readFileSync(join(dir, "jcs-literal-input.json"), "utf8");
+  const expected = readFileSync(join(dir, "jcs-literal-expected.json"));
+  assert.ok(Buffer.from(canonicalize(safeParse(input)), "utf8").equals(expected));
+  // The two keys whose UTF-16 and code-point orders disagree, pinned directly as well.
+  assert.equal(canonicalize({ "": 1, "\u{1F600}": 2 }), '{"\u{1F600}":2,"":1}');
+});
 
 test("sorts object keys by UTF-16 code units", () => {
   assert.equal(canonicalize({ b: 1, a: 2, c: 3 }), '{"a":2,"b":1,"c":3}');
