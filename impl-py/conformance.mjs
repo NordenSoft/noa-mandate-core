@@ -988,5 +988,69 @@ expect("USAGE (--identity is the last token, no keyring) [PY verifier]", pyVerif
   line("strict-bytes JCS literal bytes, astral key before U+E000, escapes, no normalization [PY verifier]", jcsLiteral === "equal", jcsLiteral, "equal");
 }
 
+// 16. STRICT-BYTES, OUTSIDE CORPUS: conformance/vectors/strict-bytes/attest-cc0/ (CC0, vendored byte-exact
+// from mrpkk/attest conformance/receipt-vectors.json at e6ec711b5da367d91d1e8489106d406f47d98cd7; credit and
+// provenance in its README.md). Each vector's expectation is the corpus's OWN expect_ok, never a verifier
+// run: true must be VALID (exit 0); false must refuse the receipt's own bytes, TAMPERED (exit 2) or
+// MALFORMED (exit 3). UNVERIFIED/UNTRUSTED would mean the corpus key was not applied, so they fail. The
+// chain is "[" + text + "]" and the keyring maps the corpus kid to the SPKI form of its raw Ed25519 key.
+{
+  const ACD = join(import.meta.dirname, "..", "conformance", "vectors", "strict-bytes", "attest-cc0");
+  const ATTEST_CC0_SHA256 = "d57b0673b7cf1320ab06ca84459e208855dc981ab7ca493d4425dcd800916261";
+  const ATTEST_CC0_VECTORS = 12;
+  const ATTEST_CC0_KID = "k1";
+  const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+  const EXIT = { VALID: 0, TAMPERED: 2, MALFORMED: 3 };
+  const line = (label, ok, got, want) => {
+    console.log(`${ok ? "✓" : "✗"} ${label}: ${got} (want ${want})`);
+    if (!ok) failures++;
+  };
+  let corpus = null;
+  let pinOk = false;
+  try {
+    const raw = readFileSync(join(ACD, "receipt-vectors.json"));
+    pinOk = createHash("sha256").update(raw).digest("hex") === ATTEST_CC0_SHA256;
+    corpus = JSON.parse(raw.toString("utf8"));
+  } catch {
+    corpus = null;
+  }
+  const vectors = Array.isArray(corpus?.vectors) ? corpus.vectors : [];
+  const rawKey = typeof corpus?.public_key === "string" ? Buffer.from(corpus.public_key, "base64") : Buffer.alloc(0);
+  const shapeOk =
+    vectors.length === ATTEST_CC0_VECTORS &&
+    new Set(vectors.map((v) => v?.name)).size === ATTEST_CC0_VECTORS &&
+    vectors.every((v) => typeof v?.name === "string" && /^[A-Za-z0-9_]+$/.test(v.name) && typeof v.text === "string" && typeof v.expect_ok === "boolean") &&
+    rawKey.length === 32;
+  line(
+    "strict-bytes attest-cc0 corpus is the vendored upstream file, SHA-256 pin and 12 named vectors [PY verifier]",
+    pinOk && shapeOk,
+    pinOk && shapeOk ? `${vectors.length} vectors` : "mismatch",
+    `${ATTEST_CC0_VECTORS} vectors`,
+  );
+
+  const acKeyringBytes = enc.encode(JSON.stringify({ [ATTEST_CC0_KID]: Buffer.concat([ED25519_SPKI_PREFIX, rawKey]).toString("base64") }));
+  const acKeyringPath = join(dir, "attest-cc0-keyring.json");
+  writeFileSync(acKeyringPath, acKeyringBytes);
+  const want = (expectOk) => (expectOk ? "VALID" : "TAMPERED or MALFORMED");
+  const refused = (status) => status === "TAMPERED" || status === "MALFORMED";
+  for (const v of shapeOk ? vectors : []) {
+    const chainBytes = Buffer.concat([Buffer.from("[", "utf8"), Buffer.from(v.text, "utf8"), Buffer.from("]", "utf8")]);
+    const file = join(dir, `attest-cc0-${v.name}.json`);
+    writeFileSync(file, chainBytes);
+    const ts = verifyChain(new Uint8Array(chainBytes), { keyring: acKeyringBytes, profile: "strict-bytes" });
+    const tsOk = v.expect_ok ? ts.status === "VALID" : refused(ts.status);
+    line(`strict-bytes/attest-cc0/${v.name} with --profile strict-bytes [TS verifyChain]`, tsOk, ts.status, want(v.expect_ok));
+    const py = pyVerify(["--profile", "strict-bytes", file, acKeyringPath]);
+    let pyStatus;
+    try {
+      pyStatus = JSON.parse(py.out).status;
+    } catch {
+      pyStatus = undefined;
+    }
+    const pyOk = (v.expect_ok ? pyStatus === "VALID" : refused(pyStatus)) && py.code === EXIT[pyStatus];
+    line(`strict-bytes/attest-cc0/${v.name} with --profile strict-bytes [PY verifier]`, pyOk, `exit ${py.code} ${pyStatus}`, want(v.expect_ok));
+  }
+}
+
 if (failures) { console.error(`\nCROSS-IMPL CONFORMANCE FAILED: ${failures} mismatch(es)`); process.exit(1); }
 console.log("\nCROSS-IMPL CONFORMANCE PASS: the independent Python verifier agrees with the TS reference on every vector (incl. impersonation/truncation/dup-key security verdicts).");
