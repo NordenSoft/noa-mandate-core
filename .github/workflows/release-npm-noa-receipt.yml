@@ -88,7 +88,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
           package-manager-cache: false
 
       - name: Bind the release commit to its merged pull request and the live ruleset
@@ -241,7 +241,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image='docker.io/library/node@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a'
+          image='docker.io/library/node@sha256:fa52d1669505e29b58c042875b1d65c229e0787a3610fd52869b22b68e480853'
           docker pull --platform=linux/amd64 "$image"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = 'linux/amd64'
 
@@ -360,7 +360,7 @@ jobs:
     steps:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
           package-manager-cache: false
 
       - name: Install the exact npm CLI
@@ -459,7 +459,7 @@ jobs:
     steps:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
           package-manager-cache: false
 
       - name: Install the exact npm CLI

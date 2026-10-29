@@ -4298,12 +4298,12 @@ const KNOCKOUT_TEST_OBSERVER = fileURLToPath(
 // as PID 1 in a disposable Linux namespace. Docker does not return from `run --rm` until that
 // namespace is gone, so source restoration cannot race a delayed writer. Digests pin the exact
 // multi-architecture Docker Official Image manifests; mutable tags are not accepted as evidence.
-// Node 20 reached end of life on 2026-04-30 and is no longer a supported major. The Node 26 entry
-// is node:26.12.1-bookworm: on 2026-10-28 no Docker Official Image for 26.13.0 had been published.
+// Node 20 reached end of life on 2026-04-30 and is no longer a supported major. The entries are the
+// bookworm images of the exact versions CI runs: 22.23.4, 24.22.1 and 26.13.0 (.node-version).
 const KNOCKOUT_NODE_IMAGES = Object.freeze({
   22: "docker.io/library/node@sha256:63538dfe497cc29dfafdda25ada09b46db68a3f4cc205abf1f5d6bf0913f3384",
   24: "docker.io/library/node@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a",
-  26: "docker.io/library/node@sha256:3b764117159bda01d2396391e7789b6a9106af9729cfd001ef55e98557868310",
+  26: "docker.io/library/node@sha256:fa52d1669505e29b58c042875b1d65c229e0787a3610fd52869b22b68e480853",
 });
 
 // Docker is part of the evidence TCB, so a bare command name is not an acceptable way to select

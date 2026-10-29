@@ -813,15 +813,15 @@ const LEGACY_PUBLISHER_WORKFLOWS = ["publish.yml", "publish-mcp.yml", "publish-t
 // A partial lexer cannot safely decide which hash begins YAML prose, so this quarantine ignores
 // nothing. Any material or prose change requires explicit re-review of the whole tiny workflow.
 const CLOSED_WORKFLOW_SHA256 = Object.freeze({
-  "boundary.yml": "413ff01fcc2ac22e00aa411ea30d0f31587d95146a4f02f92d6bf1e33c577217",
+  "boundary.yml": "9d6d71d871acd5e4bc66e93ede918459620dae37b426b985af66087afc9b7022",
   "publish.yml": "95a5c267c674326e90ca97b1abe8c9b5b1628b7ca05a820851bbdb852795d5c3",
   "publish-mcp.yml": "7a38cf1cd331d2a61a2890f1430b422996e7c85d7aa892a18c2a8760bbcbc0e7",
   "publish-tsa.yml": "91745dac92651660718868884d203af96f7bcc42f5986ce9f319087c4b38716e",
   // The release controller is pinned whole as well; its controls are ALSO measured structurally
   // below, because a digest alone would make every knockout arm on the file vacuous.
-  "release-npm-noa-receipt.yml": "cff8897c5cf434f4d4dcb4491c8a22614d51a99e7c4c50a68cb93c7dfc47a271",
+  "release-npm-noa-receipt.yml": "de3b65023c12afe690f5660bd07d3e1096caef78b9a2abdff0e1de673df89631",
   // The MCP release controller is pinned whole the same way, and measured structurally below.
-  "release-npm-mcp.yml": "b0a8e9bbe2af5eaec590117b295b4e2401e384196c5cc7b668b911cef6fac935",
+  "release-npm-mcp.yml": "59cd5f51197a38ba63eb05009392c2f0788a21cbf89f81a6941eced812b4f0e1",
 });
 
 // Only LF is a line separator in the canonical production representation. Reject every other
@@ -1365,7 +1365,7 @@ function releaseControllerProblems(source, prOnlyContexts, profile = RECEIPT_REL
   }
   if (/registry-url/u.test(nonComment)) fail("publish", "PUB-NO-REGISTRY-URL", "setup-node writes no registry configuration");
   for (const step of allSteps.filter((candidate) => (candidate.uses ?? "").startsWith("actions/setup-node@"))) {
-    if (step.uses !== RELEASE_SETUP_NODE || !sameMap(step.with, { "node-version": "24.22.1", "package-manager-cache": "false" })) {
+    if (step.uses !== RELEASE_SETUP_NODE || !sameMap(step.with, { "node-version": "26.13.0", "package-manager-cache": "false" })) {
       fail("publish", "PUB-SETUP-NODE", `${step.job}: setup-node is the attested revision with no cache and no registry`);
     }
   }
@@ -2923,7 +2923,7 @@ function releaseControllerMutations(base, fileExpression, expandedFileExpression
   const setupNodeStep = [
     `      - uses: ${SETUP_NODE_TEXT}`,
     "        with:",
-    "          node-version: 24.22.1",
+    "          node-version: 26.13.0",
     "          package-manager-cache: false",
     "",
   ].join("\n");
@@ -3134,7 +3134,7 @@ check("every evidence-bearing CI launch point sanitizes the exact refusal list",
       assert.equal(hostSteps.length, 1, `${file}: the full host integration launch must occur exactly once`);
       const [host] = hostSteps;
       assert.equal(host.condition,
-        "${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 24 }}",
+        "${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 26 }}",
         `${file}: the full host integration must run after the supported build`);
       assert.equal(host.run, "|", `${file}: the host launch must retain its literal shell block`);
       // Bind the entire block: protecting the first command alone would admit an unguarded sibling,

@@ -29,7 +29,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
           cache: npm
       - name: Audit every committed npm lockfile
         shell: bash
@@ -57,7 +57,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
           cache: npm
       - name: "Install the root FIRST — a file: link install builds its target"
         # NOT optional, and not obvious. `npm ci` inside a package whose manifest says
@@ -117,7 +117,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
           cache: npm
       - name: Build the root package
         run: npm ci && npm run build
@@ -215,7 +215,7 @@ jobs:
           /usr/bin/getfattr --version
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
           cache: npm
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -398,12 +398,12 @@ jobs:
         # PHASES 2 and 3 — exactly as at the first evidence step in this file.
         run: /usr/bin/env -u NODE_OPTIONS -u NODE_REPL_EXTERNAL_MODULE -u npm_config_node_options -u npm_config_script_shell -u npm_config_shell -u BASH_ENV -u ENV -u SHELLOPTS -u DYLD_INSERT_LIBRARIES -u DYLD_LIBRARY_PATH -u DYLD_FRAMEWORK_PATH -u LD_PRELOAD -u LD_LIBRARY_PATH -u LD_AUDIT node scripts/lib/knockout-runner.mjs --launch-evidence npm test --ignore-scripts=false --script-shell=/bin/sh --node-options=
       - name: Select attested tooling runtime for package preparation
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label != 24 }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label != 26 }}
         # Registry derivation is an attested controller operation pinned to this runtime.
         # The product and reporter compatibility checks retain their matrix runtime below.
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
       - name: Prepare every package the proof lanes and the sweep resolve through
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # ONE RUNNER, CALLED BY EVERY JOB THAT NEEDS THE SAME TREE. It derives the proof preparation
@@ -413,12 +413,12 @@ jobs:
         # script and not a block of shell each job carries its own copy of.
         run: node scripts/prepare-proof-packages.mjs
       - name: Restore product runtime before matrix proof checks
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label != 24 }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label != 26 }}
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
       - name: Full boundary bootstrap and host packer integration
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 24 }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.label == 26 }}
         # Knockout observers select portable authored tests inside their closed containers. Keep
         # the complete unfiltered suite here, where the real pinned packer has Docker access.
         env:
@@ -724,9 +724,10 @@ jobs:
     # budget of the lane that also runs the ordinary tests, and a matrix leg is the only thing GitHub
     # runs in parallel and reports as its own check, so a slice that fails names itself.
     #
-    # Node 20/22 PRODUCT compatibility is unchanged — `Build + generate vectors + test` in `test`
-    # still runs on both legs. A knockout mutates SOURCE and re-runs a suite, so a second Node
-    # version re-answers a question nobody asked; the sweep is measured once, on 22, as before.
+    # Node 22/24/26 PRODUCT compatibility is unchanged — `Build + generate vectors + test` in `test`
+    # still runs on every leg. A knockout mutates SOURCE and re-runs a suite, so a second Node
+    # version re-answers a question nobody asked; the sweep is measured once, on the toolchain
+    # runtime (.node-version).
     #
     # The earlier partial-progress estimate at 6ba13d3 projected a sixteen-way slice within
     # 180 minutes. Run 34209974888 at d34bccf1 disproved that estimate: shard 0 reported
@@ -775,7 +776,7 @@ jobs:
           /usr/bin/getfattr --version
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
           cache: npm
       # Some suites the sweep re-runs shell out to python3; the lane this moved from set it up too.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
