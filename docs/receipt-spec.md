@@ -171,6 +171,14 @@ The **signature** is Ed25519 over a **domain-separated preimage**, not the bare 
 sig.value = Ed25519_sign( privkey,  "NOA-Receipt-v0.1-sig:" ++ sha256(JCS(receipt \ chain.hash \ sig.value)) )
 ```
 
+The `sha256(...)` term is the raw 32-byte digest, not its hex text. For a receipt the signed
+message is exactly 53 bytes: the 21 UTF-8 bytes of `NOA-Receipt-v0.1-sig:` (colon included),
+followed by the 32 bytes whose lowercase hex follows `sha256:` in `chain.hash`. A checkpoint is
+signed the same way: the 24 UTF-8 bytes of `NOA-Checkpoint-v0.1-sig:` followed by the raw 32-byte
+SHA-256 of the JCS of the checkpoint without `sig.value`, 56 bytes in total. A signature over the
+hex text, or over the bare digest without the tag, does not verify (reference: `signingMessage`
+in `src/signing.ts`).
+
 The domain tag (`NOA-Checkpoint-v0.1-sig:` for checkpoints) prevents cross-protocol signature
 reuse — a signature over a 32-byte value in another context can never be replayed as a receipt
 signature. Well-formed Unicode is required: **unpaired UTF-16 surrogates are rejected** (they
