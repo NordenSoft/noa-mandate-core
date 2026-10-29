@@ -813,7 +813,7 @@ const LEGACY_PUBLISHER_WORKFLOWS = ["publish.yml", "publish-mcp.yml", "publish-t
 // A partial lexer cannot safely decide which hash begins YAML prose, so this quarantine ignores
 // nothing. Any material or prose change requires explicit re-review of the whole tiny workflow.
 const CLOSED_WORKFLOW_SHA256 = Object.freeze({
-  "boundary.yml": "413ff01fcc2ac22e00aa411ea30d0f31587d95146a4f02f92d6bf1e33c577217",
+  "boundary.yml": "c06964d3a1f9ecbabecd45cfd86adff9bf1ad0bbc60cf55b5e3024263d6000ca",
   "publish.yml": "95a5c267c674326e90ca97b1abe8c9b5b1628b7ca05a820851bbdb852795d5c3",
   "publish-mcp.yml": "7a38cf1cd331d2a61a2890f1430b422996e7c85d7aa892a18c2a8760bbcbc0e7",
   "publish-tsa.yml": "91745dac92651660718868884d203af96f7bcc42f5986ce9f319087c4b38716e",
@@ -946,8 +946,8 @@ check("boundary workflow is keyless Tier-A CI with least privilege", () => {
 
   let anchorMutant = exactReplacement(
     base,
-    "  shapes:\n    runs-on: ubuntu-latest\n",
-    "  shapes:\n    env: &observer_env\n      GH_TOKEN: ${{ github['token'] }}\n    runs-on: ubuntu-latest\n",
+    "  shapes:\n    runs-on: ubicloud-standard-16\n",
+    "  shapes:\n    env: &observer_env\n      GH_TOKEN: ${{ github['token'] }}\n    runs-on: ubicloud-standard-16\n",
     "YAML-anchor token injection",
   );
   anchorMutant = exactReplacement(

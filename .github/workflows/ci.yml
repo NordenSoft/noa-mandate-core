@@ -186,7 +186,7 @@ jobs:
     # only; Go, Rust and C# were verified on developer machines and by nothing else. That is exactly
     # the shape of gap this repository keeps finding: a rule enforced in some implementations is not
     # an invariant. Every verifier that claims conformance is now checked on every push.
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-16
     # 40, was 25 (2026-10-28): the first evidence step runs the full `npm test` suite, measured at
     # 704-1242 s on this runner; a green run finished at 24m52s and #66 was cut at 25m18s. Budget only.
     timeout-minutes: 40
@@ -318,7 +318,7 @@ jobs:
 
   test:
     name: test (${{ matrix.label }})
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-16
     # THE SWEEP NO LONGER RUNS HERE. It was moved to the sharded `knockout-shards` job below after
     # run 32853985529 job 97821365624 was cancelled at this job's 120-minute ceiling with the whole
     # registry unmeasured — the instruction this file already carried, to shard rather than drop
@@ -732,7 +732,7 @@ jobs:
     # Divide the same registry into thirty-two slices so the expensive boundary suite no longer
     # fills one eighteen-control job. Preserve every control, per-arm deadline and job limit;
     # the additional setup/baseline work trades runner minutes for a bounded completion path.
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-16
     timeout-minutes: 180
     strategy:
       # fail-fast DEFAULTS TO TRUE, which would cancel every queued and in-progress sibling the

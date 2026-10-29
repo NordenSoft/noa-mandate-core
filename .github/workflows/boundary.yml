@@ -30,7 +30,7 @@ jobs:
   # Runs on every pull request (including forks) and integrated main push because Tier A needs no
   # secret. An outside contributor must never be blocked by a credential they cannot have.
   shapes:
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-16
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
