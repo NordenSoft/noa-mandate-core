@@ -106,8 +106,13 @@ jobs:
               exit 1
             fi
             set +e
+            # strict-bytes holds deliberately malformed receipt vectors; its bom.json (a UTF-8 BOM vector) is read as a
+            # CycloneDX SBOM, fails to parse, and that logged error makes osv-scanner exit 127 whenever no vulnerability
+            # is found (cmd/osv-scanner/internal/cmd/run.go at v2.5.1). The directory holds no dependency manifest, and
+            # the coverage check below still refuses a scan that misses any lockfile.
             "$work/osv-scanner" scan source --recursive --format=json --all-packages \
               --no-ignore --no-call-analysis=all --config="$work/empty.toml" \
+              --experimental-exclude=strict-bytes \
               --output-file="$output" "$tree"
             exit_code=$?
             set -e
