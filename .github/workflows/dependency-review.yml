@@ -106,8 +106,14 @@ jobs:
               exit 1
             fi
             set +e
+            # conformance/vectors/strict-bytes/bom.json (a UTF-8 BOM receipt vector) is picked up by the CycloneDX SBOM
+            # extractor by its name, fails to parse, and that logged error makes osv-scanner exit 127 whenever no
+            # vulnerability is found (cmd/osv-scanner/internal/cmd/run.go at v2.5.1). This repository ships no SBOM, so
+            # the sbom/cdx extractor is disabled; every lockfile extractor stays, and the coverage check below still
+            # refuses a scan that misses any lockfile.
             "$work/osv-scanner" scan source --recursive --format=json --all-packages \
               --no-ignore --no-call-analysis=all --config="$work/empty.toml" \
+              --experimental-disable-plugins=sbom/cdx \
               --output-file="$output" "$tree"
             exit_code=$?
             set -e
