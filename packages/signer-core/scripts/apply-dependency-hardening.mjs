@@ -673,8 +673,7 @@ const bytewiseNameOrder = (left, right) => reflectApply(bufferCompare, Buffer, [
  * The consequence, exactly: this file is `postinstall` for `noa-signer` and is listed in its `files`,
  * so on any platform that does not provide these constants the attestation would REFUSE and the
  * install would fail rather than produce an unproven tree. VERIFIED on this repository: every
- * workflow that runs it is Linux (`ubuntu-latest` or Ubicloud `ubicloud-standard-2`, Ubuntu 24.04),
- * and `noa-signer` is `private: true`, so it is never
+ * workflow that runs it is `ubuntu-latest`, and `noa-signer` is `private: true`, so it is never
  * published and never installed anywhere but here. [UNVERIFIED LOCALLY: Node documents which
  * `fs.constants.O_*` are unavailable on Windows; no Windows host was available to measure it, and
  * `@types/node` carries no availability note for these two.]
